@@ -102,7 +102,7 @@ pass `--no-default-features` to `cargo tauri dev` or `cargo tauri build`.
 
 For a quick development environment without manual dependency installation, you can use Docker Compose. This requires a Linux host with a running X11 or Wayland server.
 
-To compile the CSS, run:
+To compile the CSS, run (note that you need to build the container first, e.g. via `docker compose build` or `docker compose up`):
 ```bash
 docker compose run ratspeak /bin/bash -c "bash ../dashboard/build-css.sh"
 ```
