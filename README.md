@@ -98,6 +98,22 @@ Desktop bundles land under `Ratspeak/src-tauri/target/release/bundle/`.
 To build without the experimental voice stack and skip the rsLXST sibling,
 pass `--no-default-features` to `cargo tauri dev` or `cargo tauri build`.
 
+### Docker Compose
+
+For a quick development environment without manual dependency installation, you can use Docker Compose. This requires a Linux host with a running X11 or Wayland server.
+
+To compile the CSS, run (note that you need to build the container first, e.g. via `docker compose build` or `docker compose up`):
+```bash
+docker compose run ratspeak /bin/bash -c "bash ../dashboard/build-css.sh"
+```
+
+To run the dev environment, use:
+```bash
+docker compose up --build
+```
+
+The ratspeak window will then appear. This will build the environment, mount the current directory, and start `cargo tauri dev` inside the container.
+
 ## Voice (experimental)
 
 Voice calls run on [LXST](https://github.com/ratspeak/rsLXST) over Reticulum
