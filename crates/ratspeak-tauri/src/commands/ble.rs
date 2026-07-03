@@ -1,4 +1,10 @@
-//! BLE commands; non-`ble` builds keep stub fns for stable registration.
+//! BLE commands.
+//!
+//! Convention: BLE commands are always registered with the invoke handler;
+//! builds without the `ble` feature stub out internally, so the frontend sees
+//! a uniform command surface on every platform. This is intentional —
+//! contrast with desktop-only `hardware`, which compile-gates the whole
+//! module and its registrations behind the `hardware` feature.
 
 use std::sync::Arc;
 
@@ -177,35 +183,35 @@ fn ble_recent_disconnect_seed_addresses(
     legacy_json: Option<&str>,
 ) -> Vec<String> {
     let mut out = Vec::new();
-    if let Some(v2) = v2_json {
-        if let Ok(records) = serde_json::from_str::<Vec<BleRecentDisconnectRecord>>(v2) {
-            for record in records {
-                if let Some(record) = normalize_ble_recent_disconnect_record(record) {
-                    if !out.iter().any(|address| address == &record.address) {
-                        out.push(record.address);
-                    }
-                }
-                if out.len() >= BLE_RECENT_DISCONNECTS_LIMIT {
-                    return out;
-                }
+    if let Some(v2) = v2_json
+        && let Ok(records) = serde_json::from_str::<Vec<BleRecentDisconnectRecord>>(v2)
+    {
+        for record in records {
+            if let Some(record) = normalize_ble_recent_disconnect_record(record)
+                && !out.iter().any(|address| address == &record.address)
+            {
+                out.push(record.address);
+            }
+            if out.len() >= BLE_RECENT_DISCONNECTS_LIMIT {
+                return out;
             }
         }
     }
 
-    if let Some(legacy) = legacy_json {
-        if let Ok(values) = serde_json::from_str::<Vec<String>>(legacy) {
-            for value in values {
-                if is_valid_identity_hash_hex(value.trim()) {
-                    continue;
-                }
-                if let Some(address) = normalize_ble_address(&value) {
-                    if !out.iter().any(|existing| existing == &address) {
-                        out.push(address);
-                    }
-                }
-                if out.len() >= BLE_RECENT_DISCONNECTS_LIMIT {
-                    break;
-                }
+    if let Some(legacy) = legacy_json
+        && let Ok(values) = serde_json::from_str::<Vec<String>>(legacy)
+    {
+        for value in values {
+            if is_valid_identity_hash_hex(value.trim()) {
+                continue;
+            }
+            if let Some(address) = normalize_ble_address(&value)
+                && !out.iter().any(|existing| existing == &address)
+            {
+                out.push(address);
+            }
+            if out.len() >= BLE_RECENT_DISCONNECTS_LIMIT {
+                break;
             }
         }
     }
@@ -521,6 +527,14 @@ fn spawn_enable_ble_peer_task(state_arc: Arc<AppState>, duration_secs: u64, expi
                             state
                                 .ble_peer_count
                                 .store(peer_count, std::sync::atomic::Ordering::Relaxed);
+                            // Mirror into AppState so api_ble_peer_status can hand
+                            // the current peer rows back after a webview reload.
+                            if let Ok(mut peers) = state.ble_peers.lock() {
+                                *peers = address_to_identity
+                                    .iter()
+                                    .map(|(a, i)| (a.clone(), i.clone()))
+                                    .collect();
+                            }
                             peer_count
                         }
 
@@ -769,6 +783,15 @@ fn spawn_enable_ble_peer_task(state_arc: Arc<AppState>, duration_secs: u64, expi
                     );
                 }
                 Err(_) => {
+                    // The spawn future was cancelled by the timeout, but it may
+                    // have already started advertising + spawned loops (those
+                    // are detached, so dropping the future doesn't stop them).
+                    // Tear the half-started session down so it can't keep
+                    // advertising while the app reports BLE off. Call the
+                    // low-level stop directly — disable_ble_peer_inner would
+                    // deadlock on the enable lock we hold here.
+                    #[cfg(feature = "ble")]
+                    rns_interface::ble_peer::stop_ble_peer_interface().await;
                     let _ = db::spawn_db(state_arc.db.clone(), |p| {
                         db::set_setting(&p, BLE_PEER_ENABLED_SETTING, "0");
                         db::set_setting(&p, BLE_PEER_EXPIRES_AT_SETTING, "0");
@@ -892,15 +915,11 @@ pub async fn disconnect_ble_peer(
     }
     let address_clone = address.clone();
     tokio::spawn(async move {
-        #[cfg(all(feature = "ble", target_os = "android"))]
-        {
-            let addr = address_clone.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                rns_interface::ble_peer::disconnect_android_peer(&addr);
-            })
-            .await;
-        }
-        #[cfg(not(all(feature = "ble", target_os = "android")))]
+        // Cross-platform now (was Android-only, so the UI reported success on
+        // desktop/Apple while doing nothing).
+        #[cfg(feature = "ble")]
+        rns_interface::ble_peer::disconnect_mesh_peer(&address_clone).await;
+        #[cfg(not(feature = "ble"))]
         let _ = &address_clone;
         emit_op_status_broadcast(
             &state_arc,
@@ -1055,7 +1074,7 @@ pub async fn ble_rnode_bridge_ready(
                         mode,
                         st_alock,
                         lt_alock,
-                        flow_control: false,
+                        flow_control: true,
                     },
                     tcp_port,
                 )
@@ -1135,6 +1154,8 @@ pub async fn ble_rnode_bridge_ready(
 }
 
 /// Aborts in-flight iOS SMP exchange (the OS dialog may briefly linger).
+/// Config rollback only applies to entries the in-flight add created;
+/// cancelling a reconnect of a pre-existing radio keeps its config.
 #[tauri::command]
 pub async fn cancel_ble_connect(state: State<'_, Arc<AppState>>, name: String) -> AppResult<Value> {
     #[cfg(feature = "ble")]
@@ -1152,6 +1173,7 @@ pub async fn cancel_ble_connect(state: State<'_, Arc<AppState>>, name: String) -
         #[cfg(target_os = "linux")]
         rns_interface::ble_rnode::linux_cancel_pairing();
 
+        let fresh_add = crate::commands::shared::take_fresh_lora_add(&name);
         let config_dir = active_rns_config_dir(&state_arc);
         let name_clone = name.clone();
         tokio::spawn(async move {
@@ -1184,9 +1206,11 @@ pub async fn cancel_ble_connect(state: State<'_, Arc<AppState>>, name: String) -
                 }
             }
 
-            let _ = with_rns_config_lock(&state_arc, || {
-                crate::rns_config::remove_interface(&config_dir, &name_clone)
-            });
+            if fresh_add {
+                let _ = with_rns_config_lock(&state_arc, || {
+                    crate::rns_config::remove_interface(&config_dir, &name_clone)
+                });
+            }
             let ifaces = crate::rns_config::get_all_interfaces(&config_dir);
             emit_hub_interfaces(&state_arc, ifaces);
             emit_op_status_broadcast(
@@ -1257,6 +1281,9 @@ pub async fn disconnect_ble_rnode(
                     }
                 }
             }
+
+            #[cfg(target_os = "android")]
+            state_arc.emit_to_all("ble_rnode_disconnect_native", json!({}));
 
             if with_rns_config_lock(&state_arc, || {
                 crate::rns_config::remove_interface(&config_dir, &name_clone)

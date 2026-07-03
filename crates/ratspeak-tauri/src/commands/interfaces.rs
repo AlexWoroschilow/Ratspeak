@@ -52,19 +52,114 @@ fn android_ble_peer_availability_payload() -> Value {
     }
 }
 
-#[cfg(all(feature = "ble", target_os = "android"))]
-fn availability_missing_strings(value: &Value) -> Vec<String> {
-    value
-        .get("missing")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
+/// Result of the shared BLE platform availability probe.
+struct BlePlatformProbe {
+    available: bool,
+    missing: Vec<String>,
+    /// iOS CoreBluetooth authorization state (iOS builds only).
+    auth_state: Option<&'static str>,
+    /// Android runtime permissions still outstanding (Android builds only).
+    permission_required: bool,
+}
+
+/// Five-way platform dispatch shared by the BLE availability commands: iOS
+/// auth-state mapping / Android JNI payload / macOS no-probe / desktop adapter
+/// probe / no-`ble`-feature stub. `api_ble_available` keeps its own Android
+/// and desktop arms where behavior diverges (hardcoded Android availability,
+/// Linux BlueZ hints).
+async fn ble_platform_probe() -> BlePlatformProbe {
+    #[cfg(all(feature = "ble", target_os = "ios"))]
+    {
+        let auth = crate::platform_ios::bluetooth_authorization();
+        let (available, missing) = match auth {
+            "denied" | "restricted" => (
+                false,
+                vec![
+                    "iOS Bluetooth permission denied — open Settings → Ratspeak → Bluetooth"
+                        .to_string(),
+                ],
+            ),
+            _ => (true, vec![]),
+        };
+        return BlePlatformProbe {
+            available,
+            missing,
+            auth_state: Some(auth),
+            permission_required: false,
+        };
+    }
+
+    #[cfg(all(feature = "ble", target_os = "android"))]
+    {
+        let payload = android_ble_peer_availability_payload();
+        let missing = payload
+            .get("missing")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        return BlePlatformProbe {
+            available: payload
+                .get("available")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+            missing,
+            auth_state: None,
+            permission_required: payload
+                .get("permission_required")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        };
+    }
+
+    // macOS: skip btleplug probe; `Manager::new()` triggers the system
+    // Bluetooth permission prompt prematurely.
+    #[cfg(all(feature = "ble", target_os = "macos"))]
+    return BlePlatformProbe {
+        available: true,
+        missing: vec![],
+        auth_state: None,
+        permission_required: false,
+    };
+
+    #[cfg(all(
+        feature = "ble",
+        not(target_os = "ios"),
+        not(target_os = "android"),
+        not(target_os = "macos")
+    ))]
+    {
+        let (available, missing) = match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            rns_interface::ble_rnode::ble_adapter_present(),
+        )
+        .await
+        {
+            Ok(Ok(true)) => (true, vec![]),
+            Ok(Ok(false)) => (false, vec!["No BLE adapter found".to_string()]),
+            Ok(Err(e)) => (false, vec![e]),
+            Err(_) => (false, vec!["BLE check timed out".to_string()]),
+        };
+        return BlePlatformProbe {
+            available,
+            missing,
+            auth_state: None,
+            permission_required: false,
+        };
+    }
+
+    #[cfg(not(feature = "ble"))]
+    BlePlatformProbe {
+        available: false,
+        missing: vec!["ble feature not compiled".to_string()],
+        auth_state: None,
+        permission_required: false,
+    }
 }
 
 #[tauri::command]
@@ -160,101 +255,90 @@ pub async fn api_serial_ports() -> AppResult<Value> {
 
 #[tauri::command]
 pub async fn api_ble_available() -> AppResult<Value> {
-    #[cfg(feature = "ble")]
+    // Android: bridge BLE is always present; no probe.
+    #[cfg(all(feature = "ble", target_os = "android"))]
+    return Ok(json!({"available": true, "missing": [], "install_cmd": ""}));
+
+    // Linux/BSD desktop keeps its own adapter probe: BlueZ-specific hints the
+    // shared probe does not produce.
+    #[cfg(all(
+        feature = "ble",
+        not(target_os = "ios"),
+        not(target_os = "android"),
+        not(target_os = "macos")
+    ))]
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        rns_interface::ble_rnode::ble_adapter_present(),
+    )
+    .await
     {
-        #[cfg(target_os = "ios")]
-        {
-            let auth = crate::platform_ios::bluetooth_authorization();
-            let (available, missing): (bool, Vec<String>) = match auth {
-                "denied" | "restricted" => (
-                    false,
-                    vec![
-                        "iOS Bluetooth permission denied — open Settings → Ratspeak → Bluetooth"
-                            .to_string(),
-                    ],
-                ),
-                _ => (true, vec![]),
-            };
+        Ok(Ok(true)) => {
+            return Ok(json!({"available": true, "missing": [], "install_cmd": ""}));
+        }
+        Ok(Ok(false)) => {
+            #[cfg(target_os = "linux")]
             return Ok(json!({
-                "available": available,
-                "missing": missing,
+                "available": false,
+                "missing": [
+                    "No BLE adapter found. If your machine has Bluetooth, ensure bluetoothd is running: sudo systemctl start bluetooth"
+                ],
                 "install_cmd": "",
-                "auth_state": auth,
+            }));
+            #[cfg(not(target_os = "linux"))]
+            return Ok(json!({
+                "available": false,
+                "missing": ["No BLE adapter found"],
+                "install_cmd": "",
             }));
         }
-
-        #[cfg(target_os = "android")]
-        return Ok(json!({"available": true, "missing": [], "install_cmd": ""}));
-
-        // macOS: skip btleplug probe; `Manager::new()` triggers the system
-        // Bluetooth permission prompt prematurely.
-        #[cfg(target_os = "macos")]
-        return Ok(json!({"available": true, "missing": [], "install_cmd": ""}));
-
-        #[cfg(all(
-            not(target_os = "ios"),
-            not(target_os = "android"),
-            not(target_os = "macos")
-        ))]
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            rns_interface::ble_rnode::ble_adapter_present(),
-        )
-        .await
-        {
-            Ok(Ok(true)) => {
-                return Ok(json!({"available": true, "missing": [], "install_cmd": ""}));
-            }
-            Ok(Ok(false)) => {
-                #[cfg(target_os = "linux")]
-                return Ok(json!({
-                    "available": false,
-                    "missing": [
-                        "No BLE adapter found. If your machine has Bluetooth, ensure bluetoothd is running: sudo systemctl start bluetooth"
-                    ],
-                    "install_cmd": "",
-                }));
-                #[cfg(not(target_os = "linux"))]
-                return Ok(json!({
-                    "available": false,
-                    "missing": ["No BLE adapter found"],
-                    "install_cmd": "",
-                }));
-            }
-            Ok(Err(e)) => {
-                #[cfg(target_os = "linux")]
+        Ok(Err(e)) => {
+            #[cfg(target_os = "linux")]
+            {
+                let lower = e.to_lowercase();
+                let hint = if lower.contains("serviceunknown")
+                    || lower.contains("org.bluez")
+                    || lower.contains("not provided by any .service")
                 {
-                    let lower = e.to_lowercase();
-                    let hint = if lower.contains("serviceunknown")
-                        || lower.contains("org.bluez")
-                        || lower.contains("not provided by any .service")
-                    {
-                        Some("BlueZ daemon not running — try `sudo systemctl start bluetooth`")
-                    } else if lower.contains("permission") || lower.contains("not authorized") {
-                        Some(
-                            "BlueZ rejected the request — add your user to the `bluetooth` group (or matching polkit rule) and re-login",
-                        )
-                    } else {
-                        None
-                    };
-                    let missing = match hint {
-                        Some(h) => vec![format!("{e} — {h}")],
-                        None => vec![e],
-                    };
-                    return Ok(json!({"available": false, "missing": missing, "install_cmd": ""}));
-                }
-                #[cfg(not(target_os = "linux"))]
-                return Ok(json!({"available": false, "missing": [e], "install_cmd": ""}));
+                    Some("BlueZ daemon not running — try `sudo systemctl start bluetooth`")
+                } else if lower.contains("permission") || lower.contains("not authorized") {
+                    Some(
+                        "BlueZ rejected the request — add your user to the `bluetooth` group (or matching polkit rule) and re-login",
+                    )
+                } else {
+                    None
+                };
+                let missing = match hint {
+                    Some(h) => vec![format!("{e} — {h}")],
+                    None => vec![e],
+                };
+                return Ok(json!({"available": false, "missing": missing, "install_cmd": ""}));
             }
-            Err(_) => {
-                return Ok(
-                    json!({"available": false, "missing": ["BLE check timed out"], "install_cmd": ""}),
-                );
-            }
+            #[cfg(not(target_os = "linux"))]
+            return Ok(json!({"available": false, "missing": [e], "install_cmd": ""}));
+        }
+        Err(_) => {
+            return Ok(
+                json!({"available": false, "missing": ["BLE check timed out"], "install_cmd": ""}),
+            );
         }
     }
-    #[cfg(not(feature = "ble"))]
-    Ok(json!({"available": false, "missing": ["ble feature not compiled"], "install_cmd": ""}))
+
+    // Complement of the two arms above: iOS, macOS, and no-`ble` builds match
+    // the shared probe exactly.
+    #[cfg(any(not(feature = "ble"), target_os = "ios", target_os = "macos"))]
+    {
+        let probe = ble_platform_probe().await;
+        let mut body = json!({
+            "available": probe.available,
+            "missing": probe.missing,
+            "install_cmd": "",
+        });
+        if let Some(auth) = probe.auth_state {
+            body["auth_state"] = json!(auth);
+        }
+        Ok(body)
+    }
 }
 
 #[tauri::command]
@@ -278,58 +362,23 @@ pub async fn api_ble_scan() -> AppResult<Value> {
 
 #[tauri::command]
 pub async fn api_ble_peer_available() -> AppResult<Value> {
-    #[cfg(feature = "ble")]
+    // Android returns the raw JNI payload: extra permission-detail keys the
+    // shared probe does not model.
+    #[cfg(all(feature = "ble", target_os = "android"))]
+    return Ok(android_ble_peer_availability_payload());
+
+    #[cfg(not(all(feature = "ble", target_os = "android")))]
     {
-        #[cfg(target_os = "ios")]
-        {
-            let auth = crate::platform_ios::bluetooth_authorization();
-            let (available, missing): (bool, Vec<String>) = match auth {
-                "denied" | "restricted" => (
-                    false,
-                    vec![
-                        "iOS Bluetooth permission denied — open Settings → Ratspeak → Bluetooth"
-                            .to_string(),
-                    ],
-                ),
-                _ => (true, vec![]),
-            };
-            return Ok(json!({
-                "available": available,
-                "missing": missing,
-                "auth_state": auth,
-            }));
+        let probe = ble_platform_probe().await;
+        let mut body = json!({
+            "available": probe.available,
+            "missing": probe.missing,
+        });
+        if let Some(auth) = probe.auth_state {
+            body["auth_state"] = json!(auth);
         }
-
-        #[cfg(target_os = "android")]
-        return Ok(android_ble_peer_availability_payload());
-
-        // macOS: skip btleplug probe (see `api_ble_available`).
-        #[cfg(target_os = "macos")]
-        return Ok(json!({"available": true, "missing": []}));
-
-        #[cfg(all(
-            not(target_os = "ios"),
-            not(target_os = "android"),
-            not(target_os = "macos")
-        ))]
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            rns_interface::ble_rnode::ble_adapter_present(),
-        )
-        .await
-        {
-            Ok(Ok(true)) => return Ok(json!({"available": true, "missing": []})),
-            Ok(Ok(false)) => {
-                return Ok(json!({"available": false, "missing": ["No BLE adapter found"]}));
-            }
-            Ok(Err(e)) => return Ok(json!({"available": false, "missing": [e]})),
-            Err(_) => {
-                return Ok(json!({"available": false, "missing": ["BLE check timed out"]}));
-            }
-        }
+        Ok(body)
     }
-    #[cfg(not(feature = "ble"))]
-    Ok(json!({"available": false, "missing": ["ble feature not compiled"]}))
 }
 
 #[tauri::command]
@@ -353,102 +402,16 @@ pub async fn api_ble_peer_status(state: State<'_, Arc<AppState>>) -> AppResult<V
         Default::default()
     });
 
-    #[cfg(all(feature = "ble", target_os = "ios"))]
-    let (available, missing, auth_state, permission_required): (
-        bool,
-        Vec<String>,
-        Option<&'static str>,
-        bool,
-    ) = {
-        let auth = crate::platform_ios::bluetooth_authorization();
-        let (avail, miss) = match auth {
-            "denied" | "restricted" => (
-                false,
-                vec![
-                    "iOS Bluetooth permission denied — open Settings → Ratspeak → Bluetooth"
-                        .to_string(),
-                ],
-            ),
-            _ => (true, vec![]),
-        };
-        (avail, miss, Some(auth), false)
-    };
-
-    #[cfg(all(feature = "ble", target_os = "android"))]
-    let (available, missing, auth_state, permission_required): (
-        bool,
-        Vec<String>,
-        Option<&'static str>,
-        bool,
-    ) = {
-        let payload = android_ble_peer_availability_payload();
-        (
-            payload
-                .get("available")
-                .and_then(Value::as_bool)
-                .unwrap_or(true),
-            availability_missing_strings(&payload),
-            None,
-            payload
-                .get("permission_required")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-        )
-    };
-
-    // macOS: skip btleplug probe (see `api_ble_available`).
-    #[cfg(all(feature = "ble", target_os = "macos"))]
-    let (available, missing, auth_state, permission_required): (
-        bool,
-        Vec<String>,
-        Option<&'static str>,
-        bool,
-    ) = (true, vec![], None, false);
-
-    #[cfg(all(
-        feature = "ble",
-        not(any(target_os = "ios", target_os = "android", target_os = "macos"))
-    ))]
-    let (available, missing, auth_state, permission_required): (
-        bool,
-        Vec<String>,
-        Option<&'static str>,
-        bool,
-    ) = {
-        let (avail, miss) = match tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            rns_interface::ble_rnode::ble_adapter_present(),
-        )
-        .await
-        {
-            Ok(Ok(true)) => (true, vec![]),
-            Ok(Ok(false)) => (false, vec!["No BLE adapter found".to_string()]),
-            Ok(Err(e)) => (false, vec![e]),
-            Err(_) => (false, vec!["BLE check timed out".to_string()]),
-        };
-        (avail, miss, None, false)
-    };
-    #[cfg(not(feature = "ble"))]
-    let (available, missing, auth_state, permission_required): (
-        bool,
-        Vec<String>,
-        Option<&'static str>,
-        bool,
-    ) = (
-        false,
-        vec!["ble feature not compiled".to_string()],
-        None,
-        false,
-    );
+    let probe = ble_platform_probe().await;
 
     let peer_count = state
         .ble_peer_count
         .load(std::sync::atomic::Ordering::Relaxed);
     let peer_state = if !enabled {
         "off"
-    } else if permission_required {
+    } else if probe.permission_required {
         "permission_needed"
-    } else if !available {
+    } else if !probe.available {
         "unavailable"
     } else if peer_count > 0 {
         "on"
@@ -456,14 +419,27 @@ pub async fn api_ble_peer_status(state: State<'_, Arc<AppState>>) -> AppResult<V
         "starting"
     };
 
+    // Connected-peer snapshot so the UI can rebuild rows after a webview
+    // reload instead of waiting for the next per-peer event.
+    let peers: Vec<Value> = state
+        .ble_peers
+        .lock()
+        .map(|m| {
+            m.iter()
+                .map(|(address, identity)| json!({ "address": address, "identity_hash": identity }))
+                .collect()
+        })
+        .unwrap_or_default();
+
     let mut body = json!({
         "enabled": enabled,
-        "available": available,
-        "missing": missing,
+        "available": probe.available,
+        "missing": probe.missing,
         "state": peer_state,
         "peer_count": peer_count,
+        "peers": peers,
     });
-    if let Some(a) = auth_state {
+    if let Some(a) = probe.auth_state {
         body["auth_state"] = json!(a);
     }
     Ok(body)
@@ -1443,11 +1419,13 @@ enum EditableInterfaceConfig {
         tx_power: i8,
         airtime_limit_short: Option<f64>,
         airtime_limit_long: Option<f64>,
+        public_map: RnodePublicMapSettings,
     },
     TcpClient {
         name: String,
         host: String,
         port: u16,
+        ifac: InterfaceIfacSettings,
     },
     TcpServer {
         name: String,
@@ -1462,6 +1440,7 @@ enum EditableInterfaceConfig {
         connect_timeout: Option<u64>,
         max_reconnect_tries: Option<usize>,
         i2p_tunneled: bool,
+        ifac: InterfaceIfacSettings,
     },
     BackboneServer {
         name: String,
@@ -1470,6 +1449,30 @@ enum EditableInterfaceConfig {
         prefer_ipv6: bool,
         device: Option<String>,
     },
+}
+
+#[derive(Clone, Default)]
+struct RnodePublicMapSettings {
+    discoverable: bool,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
+    discovery_name: Option<String>,
+}
+
+impl RnodePublicMapSettings {
+    fn config_args(&self) -> crate::rns_config::RnodePublicMapArgs<'_> {
+        crate::rns_config::RnodePublicMapArgs {
+            discoverable: self.discoverable,
+            latitude: self.latitude,
+            longitude: self.longitude,
+            discovery_name: self.discovery_name.as_deref(),
+        }
+    }
+}
+
+enum RnodePublicMapUpdate {
+    Preserve,
+    Set(RnodePublicMapSettings),
 }
 
 impl EditableInterfaceConfig {
@@ -1496,6 +1499,10 @@ fn cfg_str(entry: &Value, key: &str) -> Option<String> {
         .get(key)
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
+}
+
+fn cfg_non_empty_str(entry: &Value, key: &str) -> Option<String> {
+    cfg_str(entry, key).filter(|s| !s.is_empty())
 }
 
 fn cfg_u64(entry: &Value, key: &str) -> Option<u64> {
@@ -1550,6 +1557,80 @@ fn cfg_bool_default_true(entry: &Value, key: &str) -> bool {
             )
         })
         .unwrap_or(true)
+}
+
+#[derive(Clone, Debug, Default)]
+struct InterfaceIfacSettings {
+    network_name: Option<String>,
+    passphrase: Option<String>,
+    ifac_size: Option<usize>,
+}
+
+impl InterfaceIfacSettings {
+    fn is_enabled(&self) -> bool {
+        self.network_name.as_ref().is_some_and(|s| !s.is_empty())
+            || self.passphrase.as_ref().is_some_and(|s| !s.is_empty())
+    }
+
+    fn config_args(&self) -> crate::rns_config::InterfaceIfacArgs<'_> {
+        crate::rns_config::InterfaceIfacArgs {
+            network_name: self.network_name.as_deref(),
+            passphrase: self.passphrase.as_deref(),
+            ifac_size: self.ifac_size,
+        }
+    }
+
+    fn runtime_config(&self) -> Option<rns_runtime::reticulum::RuntimeInterfaceIfacConfig> {
+        self.is_enabled()
+            .then(|| rns_runtime::reticulum::RuntimeInterfaceIfacConfig {
+                network_name: self.network_name.clone(),
+                passphrase: self.passphrase.clone(),
+                ifac_size: self.ifac_size,
+            })
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct InterfaceIfacCommandFields {
+    #[serde(default)]
+    ifac_enabled: Option<bool>,
+    #[serde(default)]
+    ifac_network_name: Option<String>,
+    #[serde(default)]
+    ifac_passphrase: Option<String>,
+}
+
+fn ifac_settings_from_entry(entry: &Value) -> InterfaceIfacSettings {
+    InterfaceIfacSettings {
+        network_name: cfg_non_empty_str(entry, "network_name")
+            .or_else(|| cfg_non_empty_str(entry, "networkname")),
+        passphrase: cfg_non_empty_str(entry, "passphrase")
+            .or_else(|| cfg_non_empty_str(entry, "pass_phrase")),
+        ifac_size: cfg_usize(entry, "ifac_size"),
+    }
+}
+
+fn ifac_settings_from_args(
+    fields: &InterfaceIfacCommandFields,
+    existing: Option<&InterfaceIfacSettings>,
+) -> InterfaceIfacSettings {
+    match fields.ifac_enabled {
+        Some(true) => InterfaceIfacSettings {
+            network_name: fields
+                .ifac_network_name
+                .as_deref()
+                .map(|s| sanitize_text(s, 128))
+                .filter(|s| !s.is_empty()),
+            passphrase: fields
+                .ifac_passphrase
+                .as_deref()
+                .map(|s| sanitize_text(s, 256))
+                .filter(|s| !s.is_empty()),
+            ifac_size: existing.and_then(|settings| settings.ifac_size),
+        },
+        Some(false) => InterfaceIfacSettings::default(),
+        None => existing.cloned().unwrap_or_default(),
+    }
 }
 
 fn cfg_rnode_mode(entry: &Value) -> String {
@@ -1683,6 +1764,12 @@ fn rnode_config_from_entry(entry: &Value) -> Option<EditableInterfaceConfig> {
         tx_power: cfg_i8(entry, "txpower").unwrap_or_else(default_tx),
         airtime_limit_short: cfg_f64(entry, "airtime_limit_short"),
         airtime_limit_long: cfg_f64(entry, "airtime_limit_long"),
+        public_map: RnodePublicMapSettings {
+            discoverable: cfg_bool(entry, "discoverable"),
+            latitude: cfg_f64(entry, "latitude"),
+            longitude: cfg_f64(entry, "longitude"),
+            discovery_name: cfg_non_empty_str(entry, "discovery_name"),
+        },
     })
 }
 
@@ -1691,6 +1778,7 @@ fn tcp_client_config_from_entry(entry: &Value) -> Option<EditableInterfaceConfig
         name: cfg_str(entry, "name")?,
         host: cfg_str(entry, "target_host")?,
         port: cfg_u16(entry, "target_port")?,
+        ifac: ifac_settings_from_entry(entry),
     })
 }
 
@@ -1711,6 +1799,7 @@ fn backbone_client_config_from_entry(entry: &Value) -> Option<EditableInterfaceC
         connect_timeout: cfg_u64(entry, "connect_timeout"),
         max_reconnect_tries: cfg_usize(entry, "max_reconnect_tries"),
         i2p_tunneled: cfg_bool(entry, "i2p_tunneled"),
+        ifac: ifac_settings_from_entry(entry),
     })
 }
 
@@ -1815,7 +1904,16 @@ async fn teardown_live_interface_by_name(
     )))]
     let _ = rnode_port;
 
+    #[cfg(target_os = "android")]
+    let native_ble_disconnect = rnode_port.is_some_and(|p| p.starts_with("ble://"));
+
     let Some(handle) = runtime_handle(state) else {
+        // Android BLE GATT lives in the Kotlin bridge; without an explicit
+        // disconnect the link lingers and the RNode cannot advertise again.
+        #[cfg(target_os = "android")]
+        if native_ble_disconnect {
+            state.emit_to_all("ble_rnode_disconnect_native", json!({}));
+        }
         return;
     };
     let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
@@ -1828,21 +1926,37 @@ async fn teardown_live_interface_by_name(
         .await
         .is_err()
     {
+        #[cfg(target_os = "android")]
+        if native_ble_disconnect {
+            state.emit_to_all("ble_rnode_disconnect_native", json!({}));
+        }
         return;
     }
     let Ok(rns_transport::messages::TransportQueryResponse::InterfaceStats(stats)) = resp_rx.await
     else {
+        #[cfg(target_os = "android")]
+        if native_ble_disconnect {
+            state.emit_to_all("ble_rnode_disconnect_native", json!({}));
+        }
         return;
     };
     for iface in stats {
         if iface.name == name {
             if let Some(port) = rnode_port {
                 teardown_rnode_interface_for_port(&handle, iface.id, port).await;
-                return;
+                break;
+            } else {
+                rns_runtime::reticulum::teardown_interface(&handle, iface.id).await;
+                break;
             }
-            rns_runtime::reticulum::teardown_interface(&handle, iface.id).await;
-            return;
         }
+    }
+
+    // Close Android's native GATT link after the Rust RNode driver has sent
+    // its normal detach/radio-off sequence through the still-open bridge.
+    #[cfg(target_os = "android")]
+    if native_ble_disconnect {
+        state.emit_to_all("ble_rnode_disconnect_native", json!({}));
     }
 }
 
@@ -1866,6 +1980,7 @@ async fn spawn_editable_interface(
             tx_power,
             airtime_limit_short,
             airtime_limit_long,
+            public_map: _,
         } => {
             #[cfg(all(
                 not(feature = "serial"),
@@ -1926,7 +2041,7 @@ async fn spawn_editable_interface(
                             mode: rnode_runtime_mode(mode),
                             st_alock: airtime_limit_short.map(|v| v as f32),
                             lt_alock: airtime_limit_long.map(|v| v as f32),
-                            flow_control: false,
+                            flow_control: true,
                         },
                     )
                     .await?;
@@ -2012,9 +2127,20 @@ async fn spawn_editable_interface(
                 }
             }
         }
-        EditableInterfaceConfig::TcpClient { name, host, port } => {
-            let id = rns_runtime::reticulum::spawn_tcp_client_runtime(&handle, name, host, *port)
-                .await?;
+        EditableInterfaceConfig::TcpClient {
+            name,
+            host,
+            port,
+            ifac,
+        } => {
+            let id = rns_runtime::reticulum::spawn_tcp_client_runtime_with_ifac(
+                &handle,
+                name,
+                host,
+                *port,
+                ifac.runtime_config(),
+            )
+            .await?;
             Ok(format!("TCP interface active (#{id})"))
         }
         EditableInterfaceConfig::TcpServer {
@@ -2039,16 +2165,20 @@ async fn spawn_editable_interface(
             connect_timeout,
             max_reconnect_tries,
             i2p_tunneled,
+            ifac,
         } => {
             let _ = i2p_tunneled;
-            let id = rns_runtime::reticulum::spawn_backbone_client_runtime(
+            let id = rns_runtime::reticulum::spawn_backbone_client_runtime_with_ifac(
                 &handle,
-                name,
-                host,
-                *port,
-                *prefer_ipv6,
-                *connect_timeout,
-                *max_reconnect_tries,
+                rns_runtime::reticulum::RuntimeBackboneClientConfig {
+                    name,
+                    host,
+                    port: *port,
+                    prefer_ipv6: *prefer_ipv6,
+                    connect_timeout: *connect_timeout,
+                    max_reconnect_tries: *max_reconnect_tries,
+                    ifac: ifac.runtime_config(),
+                },
             )
             .await?;
             Ok(format!("Backbone interface active (#{id})"))
@@ -2112,6 +2242,10 @@ async fn finish_interface_replace(
         None,
     );
     teardown_live_interface_by_name(&state, &old_name, old_runtime.rnode_port()).await;
+
+    if operation == "update_lora" && matches!(&new_runtime, EditableInterfaceConfig::RNode { .. }) {
+        state.suppress_next_interface_reannounce(new_runtime.name());
+    }
 
     match spawn_editable_interface(&state, &new_runtime).await {
         Ok(step) => {
@@ -2322,6 +2456,11 @@ pub async fn resume_interface(
                 }
             }
             Err(e) => {
+                // Failed resume returns to paused; the config entry is kept
+                // so the user can retry.
+                let _ = with_rns_config_lock(&st, || {
+                    crate::rns_config::set_interface_enabled(&config_dir, &iface_name, false)
+                });
                 emit_op_status_broadcast(
                     &st,
                     "resume_interface",
@@ -2383,7 +2522,10 @@ pub async fn add_lora_interface(
         None,
     );
 
-    let (existing_rnode_port, config_written) = with_rns_config_lock(&state_arc, || {
+    let (fresh_add, existing_rnode_port, config_written) = with_rns_config_lock(&state_arc, || {
+        // add_rnode_interface upserts by name; only entries this add creates
+        // may be rolled back (deleted) on connect failure or cancel.
+        let fresh_add = find_config_interface_with_group(&config_dir, None, &name).is_none();
         let existing_rnode_port = find_config_interface(&config_dir, "rnode", &name)
             .and_then(|entry| rnode_config_from_entry(&entry))
             .and_then(|config| config.rnode_port().map(str::to_string));
@@ -2402,9 +2544,10 @@ pub async fn add_lora_interface(
                 preset_key: radio.preset_key,
                 airtime_limit_short: radio.airtime_limit_short,
                 airtime_limit_long: radio.airtime_limit_long,
+                public_map: crate::rns_config::RnodePublicMapArgs::default(),
             },
         );
-        (existing_rnode_port, config_written)
+        (fresh_add, existing_rnode_port, config_written)
     });
     #[cfg(not(any(feature = "ble", target_os = "android")))]
     let _ = &existing_rnode_port;
@@ -2420,6 +2563,7 @@ pub async fn add_lora_interface(
         );
         return Err(AppError::internal("Config write error"));
     }
+    crate::commands::shared::mark_lora_add_freshness(&name, fresh_add);
 
     // USB-OTG: factory skips `androidusb://` on restart; user re-adds.
     #[cfg(target_os = "android")]
@@ -2593,7 +2737,7 @@ pub async fn add_lora_interface(
                         "mode": mode,
                         "airtime_limit_short": radio.airtime_limit_short,
                         "airtime_limit_long": radio.airtime_limit_long,
-                        "rollback_on_error": true,
+                        "rollback_on_error": fresh_add,
                     }),
                 );
                 emit_op_status_broadcast(
@@ -2639,7 +2783,7 @@ pub async fn add_lora_interface(
                             mode: runtime_mode,
                             st_alock: radio.airtime_limit_short.map(|v| v as f32),
                             lt_alock: radio.airtime_limit_long.map(|v| v as f32),
-                            flow_control: false,
+                            flow_control: true,
                         },
                     )
                     .await
@@ -2668,15 +2812,19 @@ pub async fn add_lora_interface(
                                     break;
                                 }
                                 if start.elapsed() > timeout {
-                                    // Rollback: interface never came up.
-                                    let _ = with_rns_config_lock(&st, || {
-                                        crate::rns_config::remove_interface(
-                                            &config_dir,
-                                            &name_for_status,
-                                        )
-                                    });
-                                    let ifaces = crate::rns_config::get_all_interfaces(&config_dir);
-                                    emit_hub_interfaces(&st, ifaces);
+                                    // Rollback only entries this add created;
+                                    // pre-existing radios stay configured.
+                                    if fresh_add {
+                                        let _ = with_rns_config_lock(&st, || {
+                                            crate::rns_config::remove_interface(
+                                                &config_dir,
+                                                &name_for_status,
+                                            )
+                                        });
+                                        let ifaces =
+                                            crate::rns_config::get_all_interfaces(&config_dir);
+                                        emit_hub_interfaces(&st, ifaces);
+                                    }
                                     emit_op_status_broadcast(
                                         &st,
                                         "add_lora",
@@ -2867,6 +3015,83 @@ pub struct UpdateLoraArgs {
     pub airtime_limit_short: Option<f64>,
     #[serde(default)]
     pub airtime_limit_long: Option<f64>,
+    #[serde(default)]
+    pub public_map: Option<UpdateLoraPublicMapArgs>,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateLoraPublicMapArgs {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub latitude: Option<f64>,
+    #[serde(default)]
+    pub longitude: Option<f64>,
+}
+
+async fn resolve_rnode_public_map_update(
+    state: &Arc<AppState>,
+    args: Option<&UpdateLoraPublicMapArgs>,
+) -> AppResult<RnodePublicMapUpdate> {
+    let Some(args) = args else {
+        return Ok(RnodePublicMapUpdate::Preserve);
+    };
+    if !args.enabled {
+        return Ok(RnodePublicMapUpdate::Set(RnodePublicMapSettings::default()));
+    }
+
+    let latitude = args
+        .latitude
+        .filter(|v| v.is_finite())
+        .ok_or_else(|| AppError::bad_request("Add a location before enabling public map."))?;
+    if !(-90.0..=90.0).contains(&latitude) {
+        return Err(AppError::bad_request(
+            "Latitude must be between -90 and 90.",
+        ));
+    }
+    let longitude = args
+        .longitude
+        .filter(|v| v.is_finite())
+        .ok_or_else(|| AppError::bad_request("Add a location before enabling public map."))?;
+    if !(-180.0..=180.0).contains(&longitude) {
+        return Err(AppError::bad_request(
+            "Longitude must be between -180 and 180.",
+        ));
+    }
+
+    let display_name = active_identity_display_name_for_public_map(state).await?;
+    Ok(RnodePublicMapUpdate::Set(RnodePublicMapSettings {
+        discoverable: true,
+        latitude: Some(latitude),
+        longitude: Some(longitude),
+        discovery_name: Some(display_name),
+    }))
+}
+
+async fn active_identity_display_name_for_public_map(state: &Arc<AppState>) -> AppResult<String> {
+    let active = db::spawn_db(state.db.clone(), |p| db::get_active_identity(&p))
+        .await
+        .map_err(|_| AppError::internal("active identity db task panicked"))?;
+    let display_name = active
+        .as_ref()
+        .and_then(|identity| identity.get("display_name"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if display_name.is_empty() {
+        return Err(AppError::bad_request(
+            "Set an identity display name before enabling public map.",
+        ));
+    }
+    if display_name
+        .chars()
+        .any(|c| c == '\r' || c == '\n' || c == '\0' || c == '#')
+    {
+        return Err(AppError::bad_request(
+            "Identity display name contains unsupported characters.",
+        ));
+    }
+    Ok(display_name.to_string())
 }
 
 #[tauri::command]
@@ -2902,6 +3127,8 @@ pub async fn update_lora_interface(
         airtime_limit_long: args.airtime_limit_long,
     })?;
     let mode = normalize_lora_interface_mode(args.mode.as_deref())?;
+    let public_map_update =
+        resolve_rnode_public_map_update(&state_arc, args.public_map.as_ref()).await?;
 
     let config_dir = active_rns_config_dir(&state_arc);
     let (old_runtime, old_config_content, config_written) =
@@ -2910,6 +3137,13 @@ pub async fn update_lora_interface(
                 .ok_or_else(|| AppError::bad_request("Interface not found"))?;
             let old_runtime = rnode_config_from_entry(&old_entry)
                 .ok_or_else(|| AppError::bad_request("Invalid radio config"))?;
+            let public_map = match &public_map_update {
+                RnodePublicMapUpdate::Preserve => match &old_runtime {
+                    EditableInterfaceConfig::RNode { public_map, .. } => public_map.clone(),
+                    _ => RnodePublicMapSettings::default(),
+                },
+                RnodePublicMapUpdate::Set(public_map) => public_map.clone(),
+            };
             let old_config_content =
                 crate::rns_config::read_config(&config_dir).unwrap_or_default();
             let config_written = crate::rns_config::update_rnode_interface(
@@ -2928,6 +3162,7 @@ pub async fn update_lora_interface(
                     preset_key: radio.preset_key,
                     airtime_limit_short: radio.airtime_limit_short,
                     airtime_limit_long: radio.airtime_limit_long,
+                    public_map: public_map.config_args(),
                 },
             );
             Ok::<_, AppError>((old_runtime, old_config_content, config_written))
@@ -2956,6 +3191,13 @@ pub async fn update_lora_interface(
         tx_power: radio.tx_power,
         airtime_limit_short: radio.airtime_limit_short,
         airtime_limit_long: radio.airtime_limit_long,
+        public_map: match public_map_update {
+            RnodePublicMapUpdate::Preserve => match &old_runtime {
+                EditableInterfaceConfig::RNode { public_map, .. } => public_map.clone(),
+                _ => RnodePublicMapSettings::default(),
+            },
+            RnodePublicMapUpdate::Set(public_map) => public_map,
+        },
     };
     emit_hub_interfaces(
         &state_arc,
@@ -3071,6 +3313,9 @@ pub async fn remove_lora_interface(
                 .unwrap_or_default()
         };
 
+        #[cfg(target_os = "android")]
+        let native_ble_disconnect = port.starts_with("ble://");
+
         let rns_handle = state_arc
             .rns
             .read()
@@ -3097,6 +3342,11 @@ pub async fn remove_lora_interface(
                     }
                 }
             }
+        }
+
+        #[cfg(target_os = "android")]
+        if native_ble_disconnect {
+            state_arc.emit_to_all("ble_rnode_disconnect_native", json!({}));
         }
 
         if with_rns_config_lock(&state_arc, || {
@@ -3477,6 +3727,8 @@ pub struct TcpConnectionArgs {
     pub port: i64,
     #[serde(default = "default_tcp_name")]
     pub name: String,
+    #[serde(flatten)]
+    ifac: InterfaceIfacCommandFields,
 }
 
 fn default_tcp_name() -> String {
@@ -3492,6 +3744,7 @@ pub async fn add_tcp_connection(
     let host = sanitize_text(&args.host, 256);
     let port = args.port;
     let name = sanitize_text(&args.name, 64);
+    let ifac = ifac_settings_from_args(&args.ifac, None);
 
     if host.is_empty() || !(1..=65535).contains(&port) {
         emit_op_status_broadcast(
@@ -3521,7 +3774,13 @@ pub async fn add_tcp_connection(
             Some(&iface_name),
             candidate_public_server,
         )?;
-        if crate::rns_config::add_tcp_client(&config_dir, &iface_name, &host, port as u16) {
+        if crate::rns_config::add_tcp_client_with_ifac(
+            &config_dir,
+            &iface_name,
+            &host,
+            port as u16,
+            ifac.config_args(),
+        ) {
             Ok::<_, AppError>(true)
         } else {
             Ok(false)
@@ -3551,6 +3810,7 @@ pub async fn add_tcp_connection(
     let st = Arc::clone(&state_arc);
     let host_clone = host.clone();
     let iface_name_clone = iface_name.clone();
+    let ifac_clone = ifac.clone();
     let config_dir = config_dir.clone();
     tokio::spawn(async move {
         let rns_handle = st
@@ -3560,11 +3820,12 @@ pub async fn add_tcp_connection(
             .and_then(|r| r.as_ref().map(|mgr| mgr.handle.clone()));
         if let Some(handle) = rns_handle {
             teardown_live_interface_by_name(&st, &iface_name_clone, None).await;
-            match rns_runtime::reticulum::spawn_tcp_client_runtime(
+            match rns_runtime::reticulum::spawn_tcp_client_runtime_with_ifac(
                 &handle,
                 &iface_name_clone,
                 &host_clone,
                 port as u16,
+                ifac_clone.runtime_config(),
             )
             .await
             {
@@ -3627,6 +3888,8 @@ pub struct UpdateTcpConnectionArgs {
     pub port: i64,
     #[serde(default = "default_tcp_name")]
     pub name: String,
+    #[serde(flatten)]
+    ifac: InterfaceIfacCommandFields,
 }
 
 #[tauri::command]
@@ -3659,13 +3922,15 @@ pub async fn update_tcp_connection(
     let config_dir = active_rns_config_dir(&state_arc);
 
     let candidate_public_server = public_tcp_server_id(&host, port as u16);
-    let (old_runtime, old_config_content, config_written) =
+    let (old_runtime, old_config_content, config_written, ifac) =
         with_rns_config_lock(&state_arc, || {
             let ifaces = crate::rns_config::get_all_interfaces(&config_dir);
             let old_entry = find_config_interface(&config_dir, "tcp_client", &old_name)
                 .ok_or_else(|| AppError::bad_request("Interface not found"))?;
             let old_runtime = tcp_client_config_from_entry(&old_entry)
                 .ok_or_else(|| AppError::bad_request("Invalid TCP config"))?;
+            let old_ifac = ifac_settings_from_entry(&old_entry);
+            let ifac = ifac_settings_from_args(&args.ifac, Some(&old_ifac));
             enforce_public_tcp_transport_connect_limit(
                 &state_arc,
                 &ifaces,
@@ -3674,14 +3939,15 @@ pub async fn update_tcp_connection(
             )?;
             let old_config_content =
                 crate::rns_config::read_config(&config_dir).unwrap_or_default();
-            let config_written = crate::rns_config::update_tcp_client(
+            let config_written = crate::rns_config::update_tcp_client_with_ifac(
                 &config_dir,
                 &old_name,
                 &name,
                 &host,
                 port as u16,
+                ifac.config_args(),
             );
-            Ok::<_, AppError>((old_runtime, old_config_content, config_written))
+            Ok::<_, AppError>((old_runtime, old_config_content, config_written, ifac))
         })?;
 
     if !config_written {
@@ -3707,6 +3973,7 @@ pub async fn update_tcp_connection(
         name: name.clone(),
         host,
         port: port as u16,
+        ifac,
     };
     emit_hub_interfaces(
         &state_arc,
@@ -4102,6 +4369,8 @@ pub struct BackboneConnectionArgs {
     pub max_reconnect_tries: Option<usize>,
     #[serde(default)]
     pub i2p_tunneled: bool,
+    #[serde(flatten)]
+    ifac: InterfaceIfacCommandFields,
 }
 
 #[tauri::command]
@@ -4113,6 +4382,7 @@ pub async fn add_backbone_connection(
     let host = sanitize_text(&args.host, 256);
     let port = args.port;
     let raw_name = sanitize_text(&args.name, 64);
+    let ifac = ifac_settings_from_args(&args.ifac, None);
 
     if host.is_empty() || !(1..=65535).contains(&port) {
         emit_op_status_broadcast(
@@ -4144,6 +4414,7 @@ pub async fn add_backbone_connection(
                 connect_timeout: args.connect_timeout,
                 max_reconnect_tries: args.max_reconnect_tries,
                 i2p_tunneled: args.i2p_tunneled,
+                ifac: ifac.config_args(),
             },
         )
     }) {
@@ -4167,6 +4438,7 @@ pub async fn add_backbone_connection(
     let prefer_ipv6 = args.prefer_ipv6;
     let connect_timeout = args.connect_timeout;
     let max_reconnect_tries = args.max_reconnect_tries;
+    let ifac_clone = ifac.clone();
     let config_dir = config_dir.clone();
     tokio::spawn(async move {
         let rns_handle = st
@@ -4176,14 +4448,17 @@ pub async fn add_backbone_connection(
             .and_then(|r| r.as_ref().map(|mgr| mgr.handle.clone()));
         if let Some(handle) = rns_handle {
             teardown_live_interface_by_name(&st, &iface_name_clone, None).await;
-            match rns_runtime::reticulum::spawn_backbone_client_runtime(
+            match rns_runtime::reticulum::spawn_backbone_client_runtime_with_ifac(
                 &handle,
-                &iface_name_clone,
-                &host_clone,
-                port as u16,
-                prefer_ipv6,
-                connect_timeout,
-                max_reconnect_tries,
+                rns_runtime::reticulum::RuntimeBackboneClientConfig {
+                    name: &iface_name_clone,
+                    host: &host_clone,
+                    port: port as u16,
+                    prefer_ipv6,
+                    connect_timeout,
+                    max_reconnect_tries,
+                    ifac: ifac_clone.runtime_config(),
+                },
             )
             .await
             {
@@ -4254,6 +4529,8 @@ pub struct UpdateBackboneConnectionArgs {
     pub max_reconnect_tries: Option<usize>,
     #[serde(default)]
     pub i2p_tunneled: bool,
+    #[serde(flatten)]
+    ifac: InterfaceIfacCommandFields,
 }
 
 #[tauri::command]
@@ -4284,12 +4561,14 @@ pub async fn update_backbone_connection(
     };
 
     let config_dir = active_rns_config_dir(&state_arc);
-    let (old_runtime, old_config_content, config_written) =
+    let (old_runtime, old_config_content, config_written, ifac) =
         with_rns_config_lock(&state_arc, || {
             let old_entry = find_config_interface(&config_dir, "backbone_client", &old_name)
                 .ok_or_else(|| AppError::bad_request("Interface not found"))?;
             let old_runtime = backbone_client_config_from_entry(&old_entry)
                 .ok_or_else(|| AppError::bad_request("Invalid Backbone config"))?;
+            let old_ifac = ifac_settings_from_entry(&old_entry);
+            let ifac = ifac_settings_from_args(&args.ifac, Some(&old_ifac));
             let old_config_content =
                 crate::rns_config::read_config(&config_dir).unwrap_or_default();
             let config_written = crate::rns_config::update_backbone_client(
@@ -4303,9 +4582,10 @@ pub async fn update_backbone_connection(
                     connect_timeout: args.connect_timeout,
                     max_reconnect_tries: args.max_reconnect_tries,
                     i2p_tunneled: args.i2p_tunneled,
+                    ifac: ifac.config_args(),
                 },
             );
-            Ok::<_, AppError>((old_runtime, old_config_content, config_written))
+            Ok::<_, AppError>((old_runtime, old_config_content, config_written, ifac))
         })?;
 
     if !config_written {
@@ -4328,6 +4608,7 @@ pub async fn update_backbone_connection(
         connect_timeout: args.connect_timeout,
         max_reconnect_tries: args.max_reconnect_tries,
         i2p_tunneled: args.i2p_tunneled,
+        ifac,
     };
     emit_hub_interfaces(
         &state_arc,
@@ -5167,5 +5448,30 @@ mod backbone_args_tests {
             })
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod ble_probe_tests {
+    use super::*;
+
+    #[cfg(not(feature = "ble"))]
+    #[tokio::test]
+    async fn ble_probe_without_feature_reports_stub() {
+        let probe = ble_platform_probe().await;
+        assert!(!probe.available);
+        assert_eq!(probe.missing, vec!["ble feature not compiled".to_string()]);
+        assert_eq!(probe.auth_state, None);
+        assert!(!probe.permission_required);
+    }
+
+    #[cfg(all(feature = "ble", target_os = "macos"))]
+    #[tokio::test]
+    async fn ble_probe_macos_skips_probe_and_reports_available() {
+        let probe = ble_platform_probe().await;
+        assert!(probe.available);
+        assert!(probe.missing.is_empty());
+        assert_eq!(probe.auth_state, None);
+        assert!(!probe.permission_required);
     }
 }
