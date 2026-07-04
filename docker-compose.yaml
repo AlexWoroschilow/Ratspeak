@@ -1,9 +1,22 @@
 services:
+  dashboard:
+    working_dir: /srv/
+    restart: "no"
+    build:
+      context: ./
+      dockerfile: docker/dashboard/Dockerfile
+    volumes:
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+      - ./dashboard:/srv:cached
+    ports:
+      - "9999:9999"
+    command: sh -c "npm run dev"
   ratspeak:
     restart: "no"
     build:
       context: ./
-      dockerfile: docker/Dockerfile
+      dockerfile: docker/ratspeak/Dockerfile
     environment:
       - XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}
       - WAYLAND_DISPLAY=${WAYLAND_DISPLAY}
