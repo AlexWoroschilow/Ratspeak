@@ -1,11 +1,10 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-visual">
     <meta name="theme-color" content="#FAF7F3">
-<!--    <script src="/static/js/theme.js"></script>-->
-    <script type="module" src="/src/dashboard.jsx"></script>
+    <script src="/static/js/theme.js"></script>
     <!-- Safe-area insets (--sat/--sab/--sal/--sar) are defined in 00-tokens.css
          via env(safe-area-inset-*). iOS feeds env() through viewport-fit=cover +
          WKWebView contentInsetAdjustmentBehavior=.never; Android MainActivity
@@ -17,7 +16,7 @@
 <body class="checking-setup">
 
 
-
+<script type="module" src="/src/dashboard.jsx"></script>
 <!-- Synchronous load order matters: state/constants/setup/nav before any caller
      of their module-level functions; tauri_events.js last (wires everything above).
      Reordering breaks fresh boots silently. -->
