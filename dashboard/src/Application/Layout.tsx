@@ -9,13 +9,25 @@ interface LayoutProps {
 }
 
 interface LayoutState {
+    location: string;
 }
 
 
 export class Layout extends React.Component<LayoutProps, LayoutState> {
     constructor(props: LayoutProps) {
         super(props);
+
+        this.state = {
+            location: window.location.hash || '/'
+        }
     }
+
+    isActive(pathPrefix) {
+        const currentPath = this.state.location;
+        if (pathPrefix === '/') return currentPath === '/' || currentPath === '';
+        return currentPath.startsWith(pathPrefix);
+    }
+
 
     render() {
 
@@ -77,21 +89,21 @@ export class Layout extends React.Component<LayoutProps, LayoutState> {
                         <span className="sidebar-brand-text">Ratspeak</span>
                     </div>
                     <div class="sidebar-divider"></div>
-                    <a className="nav-item active" data-view="dashboard" href="#dashboard" title="Home">
+                    <a className={`nav-item ${this.isActive('#dashboard') && 'active'}`} data-view="dashboard" href="#dashboard" title="Home">
                         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                             <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
                             <polyline points="9 22 9 12 15 12 15 22"/>
                         </svg>
                         <span className="nav-label">Home</span>
                     </a>
-                    <a className="nav-item" data-view="message" href="#messages" title="Messages">
+                    <a className={`nav-item ${this.isActive('#messages') && 'active'}`} data-view="message" href="#messages" title="Messages">
                         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
                         </svg>
                         <span className="nav-label">Messages</span>
                         <span className="nav-unread-dot" id="nav-unread-dot" style={{display: "none"}}></span>
                     </a>
-                    <a className="nav-item" data-view="contacts" href="#contacts" title="Contacts">
+                    <a className={`nav-item ${this.isActive('#contacts') && 'active'}`} data-view="contacts" href="#contacts" title="Contacts">
                         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                             <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
                             <circle cx="9" cy="7" r="4"/>
@@ -155,7 +167,9 @@ export class Layout extends React.Component<LayoutProps, LayoutState> {
                     </div>
                 </nav>
 
-                <Outlet/>
+                <div className={"main-content"}>
+                    <Outlet/>
+                </div>
 
                 {/*    <div class="lxst-call-strip lxst-call-global" id="lxst-call-global" hidden aria-live="polite">*/}
                 {/*        <div class="lxst-call-strip-indicator" aria-hidden="true">*/}

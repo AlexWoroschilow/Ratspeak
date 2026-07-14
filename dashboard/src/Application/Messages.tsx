@@ -1,22 +1,39 @@
 "use strict";
 import React from "react";
+import {Menu} from "./Messages/Menu";
 
 interface MessagesProps {
 }
 
 interface MessagesState {
+    isVisibleMenu?: boolean;
 }
 
 
 export class Messages extends React.Component<MessagesProps, MessagesState> {
     constructor(props: MessagesProps) {
         super(props);
+
+        this.state = {
+            isVisibleMenu: false,
+        }
+    }
+
+    doToggleMenu() {
+        this.setState({
+            isVisibleMenu: !this.state.isVisibleMenu
+        });
+    }
+
+    doHideMenu() {
+        (this?.state?.isVisibleMenu) &&
+        this.setState({isVisibleMenu: false});
     }
 
     render() {
 
         return <>
-            <div class="view" id="view-message">
+            <div class="view" id="view-message" onClick={this.doHideMenu.bind(this)}>
                 <div id="lxmf-mode-panel" class="lxmf-container" style={{display: "flex"}}>
                     <div class="lxmf-layout">
                         <div class="lxmf-sidebar">
@@ -26,13 +43,17 @@ export class Messages extends React.Component<MessagesProps, MessagesState> {
                                     <span class="msg-profile-name" id="msg-profile-name">Me</span>
                                     <span class="msg-profile-hash" id="lxmf-own-hash" title="Click to copy your address">&mdash;</span>
                                 </div>
-                                <button class="msg-compose-btn" id="lxmf-send-message-btn" title="New conversation" aria-label="New conversation">
+                                <button class="msg-compose-btn" id="lxmf-send-message-btn" title="New conversation" aria-label="New conversation"
+                                        onClick={this.doToggleMenu.bind(this)}>
                                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
                                          stroke-linejoin="round">
                                         <path d="M12 20h9"/>
                                         <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>
                                     </svg>
                                 </button>
+
+                                {this?.state?.isVisibleMenu && <Menu/>}
+
                             </div>
                             <input type="text" id="msg-search-input" class="nr-input-sm msg-search" placeholder="Search..." aria-label="Search" autocorrect="off"
                                    autocapitalize="none" spellcheck="false"/>

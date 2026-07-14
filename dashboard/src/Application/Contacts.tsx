@@ -1,30 +1,48 @@
 "use strict";
 import React from "react";
+import {Menu} from "./Contacts/Menu";
 
 interface ContactsProps {
 }
 
 interface ContactsState {
+    isVisibleMenu?: boolean;
 }
 
 
 export class Contacts extends React.Component<ContactsProps, ContactsState> {
     constructor(props: ContactsProps) {
         super(props);
+
+        this.state = {
+            isVisibleMenu: false,
+        }
+    }
+
+    doToggleMenu() {
+        this.setState({
+            isVisibleMenu: !this.state.isVisibleMenu
+        });
+    }
+
+    doHideMenu() {
+        (this?.state?.isVisibleMenu) &&
+        this.setState({isVisibleMenu: false});
     }
 
     render() {
 
         return <>
 
-            <div class="view" id="view-contacts">
+            <div class="view" id="view-contacts" onClick={this.doHideMenu.bind(this)}>
                 <div class="contacts-standalone">
-                    <div class="contacts-standalone-header">
-                        <div class="contacts-standalone-title">
+                    <div className="contacts-standalone-header">
+                        <div className="contacts-standalone-title">
                             <h2>Contacts</h2>
                             <span id="contacts-count">0 contacts</span>
                         </div>
-                        <button class="nr-btn nr-btn-sm contacts-add-btn" id="contacts-add-btn" title="Add contact" aria-label="Add contact">
+                        <button className="nr-btn nr-btn-sm contacts-add-btn" id="contacts-add-btn" title="Add contact" aria-label="Add contact"
+                                onClick={this.doToggleMenu.bind(this)}>
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"
                                  stroke-linejoin="round">
                                 <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
@@ -34,6 +52,9 @@ export class Contacts extends React.Component<ContactsProps, ContactsState> {
                             </svg>
                             <span>Add Contact</span>
                         </button>
+
+                        {this?.state?.isVisibleMenu && <Menu/>}
+
                     </div>
                     <div class="contacts-standalone-toolbar">
                         <input type="text" id="contacts-search" class="conn-search-input msg-search" placeholder="Search..." autocorrect="off" autocapitalize="none"

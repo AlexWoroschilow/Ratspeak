@@ -16,18 +16,18 @@ export class Dashboard extends React.Component<DashboardProps, DashboardState> {
     render() {
 
         return <>
-            <div class="view" id="view-dashboard">
+            <div class="view active" id="view-dashboard">
                 <div class="dashboard-page">
                     <div class="dashboard-page-inner">
                         <div class="dashboard-action-row">
-                            <button class="dashboard-action-btn" id="dash-new-message" title="New Message">
+                            <a href={"#messages"} class="dashboard-action-btn" title="New Message">
                                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
                                      stroke-linejoin="round">
                                     <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
                                 </svg>
                                 <span>New Message</span>
-                            </button>
-                            <button class="dashboard-action-btn" id="dash-add-connection" title="Add Connection">
+                            </a>
+                            <a href={"#network"} class="dashboard-action-btn" title="Add Connection">
                                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
                                      stroke-linejoin="round">
                                     <circle cx="12" cy="12" r="10"/>
@@ -36,8 +36,8 @@ export class Dashboard extends React.Component<DashboardProps, DashboardState> {
                                     <path d="M12 2a15 15 0 0 0-4 10 15 15 0 0 0 4 10"/>
                                 </svg>
                                 <span>Add Connection</span>
-                            </button>
-                            <button class="dashboard-action-btn" id="dash-announce" title="Announce">
+                            </a>
+                            <a href={"#announce"} class="dashboard-action-btn" title="Announce">
                                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
                                      stroke-linejoin="round">
                                     <path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/>
@@ -47,16 +47,16 @@ export class Dashboard extends React.Component<DashboardProps, DashboardState> {
                                     <path d="M19.1 4.9C23 8.8 23 15.1 19.1 19"/>
                                 </svg>
                                 <span>Announce</span>
-                            </button>
+                            </a>
                         </div>
 
                         <div class="panel" id="panel-dashboard-messages">
                             <div class="panel-header">
                                 Recent Messages
                                 <div class="panel-header-actions">
-                                    <button class="panel-header-btn" id="dash-view-all-messages" title="View all messages">
+                                    <a href={"#messages"} class="panel-header-btn" id="dash-view-all-messages" title="View all messages">
                                         <span class="text-xs text-accent">View all</span>
-                                    </button>
+                                    </a>
                                 </div>
                             </div>
                             <div class="panel-body p-0">
@@ -96,9 +96,9 @@ export class Dashboard extends React.Component<DashboardProps, DashboardState> {
                                     Recent Peers
                                 </div>
                                 <div class="panel-header-actions">
-                                    <button class="panel-header-btn" id="dash-view-network" title="View network">
+                                    <a href={"#peers"} class="panel-header-btn" id="dash-view-network" title="View network">
                                         <span class="text-xs text-accent">View all &rarr;</span>
-                                    </button>
+                                    </a>
                                 </div>
                             </div>
                             <div class="panel-body dashboard-peers-scroll p-0">
