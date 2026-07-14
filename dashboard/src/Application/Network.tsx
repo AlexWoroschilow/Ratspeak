@@ -63,7 +63,7 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
                                     </div>
                                     <span class="conn-section-label">Internet/TCP</span>
                                     <span class="conn-section-count" id="conn-count-tcp">0</span>
-                                    <button class="nr-btn nr-btn-sm conn-section-action" id="conn-add-tcp">+</button>
+                                    <a href={"#network-internet"} class="nr-btn nr-btn-sm conn-section-action" id="conn-add-tcp">+</a>
                                     <svg class="conn-section-chevron" viewBox="0 0 24 24" width="16" height="16">
                                         <polyline points="6 9 12 15 18 9"/>
                                     </svg>
@@ -79,7 +79,7 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
                                     </div>
                                     <span class="conn-section-label">Bluetooth Peer</span>
                                     <span class="conn-section-count" id="conn-count-ble">0</span>
-                                    <button class="nr-btn nr-btn-sm conn-section-action" id="conn-toggle-ble">+</button>
+                                    <a href={"#network-bluetooth"} class="nr-btn nr-btn-sm conn-section-action" id="conn-toggle-ble">+</a>
                                     <svg class="conn-section-chevron" viewBox="0 0 24 24" width="16" height="16">
                                         <polyline points="6 9 12 15 18 9"/>
                                     </svg>
@@ -98,7 +98,7 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
                                     </div>
                                     <span class="conn-section-label">Local Network</span>
                                     <span class="conn-section-count" id="conn-count-local">0</span>
-                                    <button class="nr-btn nr-btn-sm conn-section-action" id="conn-toggle-local">+</button>
+                                    <a href={"#network-local"} class="nr-btn nr-btn-sm conn-section-action" id="conn-toggle-local">+</a>
                                     <svg class="conn-section-chevron" viewBox="0 0 24 24" width="16" height="16">
                                         <polyline points="6 9 12 15 18 9"/>
                                     </svg>
@@ -120,7 +120,7 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
                                     </div>
                                     <span class="conn-section-label">Radio</span>
                                     <span class="conn-section-count" id="conn-count-lora">0</span>
-                                    <button class="nr-btn nr-btn-sm conn-section-action" id="conn-add-lora">+</button>
+                                    <a href={"#network-radio"} class="nr-btn nr-btn-sm conn-section-action" id="conn-add-lora">+</a>
                                     <svg class="conn-section-chevron" viewBox="0 0 24 24" width="16" height="16">
                                         <polyline points="6 9 12 15 18 9"/>
                                     </svg>
@@ -139,7 +139,7 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
                                     </div>
                                     <span class="conn-section-label">Host</span>
                                     <span class="conn-section-count" id="conn-count-host">0</span>
-                                    <button class="nr-btn nr-btn-sm conn-section-action" id="conn-add-host">+</button>
+                                    <a href={"#network-host"} class="nr-btn nr-btn-sm conn-section-action" id="conn-add-host">+</a>
                                     <svg class="conn-section-chevron" viewBox="0 0 24 24" width="16" height="16">
                                         <polyline points="6 9 12 15 18 9"/>
                                     </svg>

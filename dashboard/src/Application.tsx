@@ -14,6 +14,11 @@ import {Settings} from "./Application/Settings";
 import {IdentityImport} from "./Application/IdentityImport";
 import {IdentityCreate} from "./Application/IdentityCreate";
 import {IdentityHardware} from "./Application/IdentityHardware";
+import {NetworkInternet} from "./Application/NetworkInternet";
+import {NetworkBluetooth} from "./Application/NetworkBluetooth";
+import {NetworkLocal} from "./Application/NetworkLocal";
+import {NetworkRadio} from "./Application/NetworkRadio";
+import {NetworkHost} from "./Application/NetworkHost";
 
 interface ApplicationProps {
 }
@@ -35,53 +40,23 @@ export class Application extends React.Component<ApplicationProps, ApplicationSt
                 <Routes>
                     <Route element={<Layout/>}>
 
-                        <Route index element={
-                            <Dashboard/>
-                        }/>
-
-                        <Route path="dashboard" element={
-                            <Dashboard/>
-                        }/>
-
-                        <Route path="messages" element={
-                            <Messages/>
-                        }/>
-
-                        <Route path="contacts" element={
-                            <Contacts/>
-                        }/>
-
-                        <Route path="identity" element={
-                            <Identity/>
-                        }/>
-
-                        <Route path="identity" element={
-                            <Identity/>
-                        }/>
-
-                        <Route path="identity-import" element={
-                            <IdentityImport/>
-                        }/>
-
-                        <Route path="identity-create" element={
-                            <IdentityCreate/>
-                        }/>
-
-                        <Route path="identity-hardware" element={
-                            <IdentityHardware/>
-                        }/>
-
-                        <Route path="peers" element={
-                            <Peers/>
-                        }/>
-
-                        <Route path="network" element={
-                            <Network/>
-                        }/>
-
-                        <Route path="settings" element={
-                            <Settings/>
-                        }/>
+                        <Route index element={<Dashboard/>}/>
+                        <Route path="dashboard" element={<Dashboard/>}/>
+                        <Route path="messages" element={<Messages/>}/>
+                        <Route path="contacts" element={<Contacts/>}/>
+                        <Route path="identity" element={<Identity/>}/>
+                        <Route path="identity" element={<Identity/>}/>
+                        <Route path="identity-import" element={<IdentityImport/>}/>
+                        <Route path="identity-create" element={<IdentityCreate/>}/>
+                        <Route path="identity-hardware" element={<IdentityHardware/>}/>
+                        <Route path="peers" element={<Peers/>}/>
+                        <Route path="network" element={<Network/>}/>
+                        <Route path="network-internet" element={<NetworkInternet/>}/>
+                        <Route path="network-bluetooth" element={<NetworkBluetooth/>}/>
+                        <Route path="network-local" element={<NetworkLocal/>}/>
+                        <Route path="network-radio" element={<NetworkRadio/>}/>
+                        <Route path="network-host" element={<NetworkHost/>}/>
+                        <Route path="settings" element={<Settings/>}/>
 
                         <Route path="*" element={
                             <h3>Not implemented yet</h3>
