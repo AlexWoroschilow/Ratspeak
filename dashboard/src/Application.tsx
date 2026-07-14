@@ -19,6 +19,7 @@ import {NetworkBluetooth} from "./Application/NetworkBluetooth";
 import {NetworkLocal} from "./Application/NetworkLocal";
 import {NetworkRadio} from "./Application/NetworkRadio";
 import {NetworkHost} from "./Application/NetworkHost";
+import {Setup} from "./Application/Setup";
 
 interface ApplicationProps {
 }
@@ -41,6 +42,7 @@ export class Application extends React.Component<ApplicationProps, ApplicationSt
                     <Route element={<Layout/>}>
 
                         <Route index element={<Dashboard/>}/>
+                        <Route path="setup" element={<Setup/>}/>
                         <Route path="dashboard" element={<Dashboard/>}/>
                         <Route path="messages" element={<Messages/>}/>
                         <Route path="contacts" element={<Contacts/>}/>

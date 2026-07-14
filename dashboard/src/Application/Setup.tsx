@@ -1,5 +1,6 @@
 "use strict";
 import React from "react";
+import "./Setup.scss";
 
 interface SetupProps {
 }
@@ -16,12 +17,9 @@ export class Setup extends React.Component<SetupProps, SetupState> {
     render() {
 
         return <>
-
-            <h1>Setup</h1>
-
             <div class="view" id="view-setup">
                 <div class="setup-container">
-                    <div class="setup-card">
+                    <div class="">
                         <div class="setup-icon">
                             <svg viewBox="243 243 282 282" fill="var(--accent)" width="48" height="48">
                                 <path
@@ -52,7 +50,7 @@ export class Setup extends React.Component<SetupProps, SetupState> {
                                 <button class="nr-btn nr-btn-ghost nr-btn-lg w-full mt-3" id="setup-import-identity-btn">Import or Restore Identity</button>
                                 <button class="nr-btn nr-btn-ghost nr-btn-lg w-full mt-3" id="setup-hardware-key-btn">Hardware Key</button>
                             </div>
-                            <div class="setup-step" id="setup-step-generating" style="display:none;">
+                            <div class="setup-step" id="setup-step-generating" style={{display: "none"}}>
                                 <div class="setup-crypto-anim">
                                     <div class="crypto-lock-icon" id="crypto-lock-icon">
                                         <svg viewBox="0 0 24 24" width="36" height="36" fill="none" stroke="var(--accent)" stroke-width="1.5">
@@ -73,7 +71,7 @@ export class Setup extends React.Component<SetupProps, SetupState> {
                                     </div>
                                 </div>
                             </div>
-                            <div class="setup-step" id="setup-step-backup" style="display:none;">
+                            <div class="setup-step" id="setup-step-backup" style={{display: "none"}}>
                                 <div class="setup-divider"></div>
                                 <h3 class="setup-step-title">Backup Phrase</h3>
                                 <p class="setup-recovery-warn">Write down these 12 words in order and store them somewhere safe. Anyone with them controls your
@@ -101,7 +99,7 @@ export class Setup extends React.Component<SetupProps, SetupState> {
                                 </label>
                                 <button class="nr-btn nr-btn-lg w-full" id="setup-mnemonic-continue-btn" disabled>Continue</button>
                             </div>
-                            <div class="setup-step" id="setup-step-2" style="display:none;">
+                            <div class="setup-step" id="setup-step-2" style={{display: "none"}}>
                                 <div class="modal-field">
                                     <label>Your Identity <span class="help-icon tooltip-trigger" tabindex="0" role="button" aria-label="What is this?"
                                                                data-tooltip="This is your LXMF identity, it's the address others use to message you."><svg
@@ -120,15 +118,15 @@ export class Setup extends React.Component<SetupProps, SetupState> {
                                         </button>
                                     </div>
                                 </div>
-                                <div class="modal-field" style="margin-top:10px;">
+                                <div class="modal-field" style={{marginTop: "10px"}}>
                                     <label>Display Name</label>
                                     <input type="text" id="setup-display-name" class="modal-input" placeholder="Optional" maxlength="32" autocorrect="off"
                                            autocapitalize="none" spellcheck="false"/>
-                                    <span class="text-hint" style="display:block;">This will be visible to everyone.</span>
+                                    <span class="text-hint" style={{display: "block"}}>This will be visible to everyone.</span>
                                 </div>
                                 <button class="nr-btn nr-btn-lg w-full" id="setup-finish-btn">Connect</button>
                             </div>
-                            <div class="setup-step" id="setup-step-connecting" style="display:none;">
+                            <div class="setup-step" id="setup-step-connecting" style={{display: "none"}}>
                                 <div class="setup-connecting-anim">
                                     <div id="setup-connecting-spinner">
                                         <div class="setup-connecting-logo">
@@ -146,15 +144,15 @@ export class Setup extends React.Component<SetupProps, SetupState> {
                                             </svg>
                                         </div>
                                     </div>
-                                    <h3 class="setup-connecting-title" id="setup-connecting-title">Initializing<span class="ellipsis-dots" id="setup-connecting-dots"
-                                                                                                                     aria-hidden="true">.</span></h3>
+                                    <h3 class="setup-connecting-title" id="setup-connecting-title">Initializing
+                                        <span class="ellipsis-dots" id="setup-connecting-dots"
+                                              aria-hidden="true">.</span></h3>
                                 </div>
                             </div>
                         </div>
                     </div>
                 </div>
             </div>
-
         </>
     }
 }

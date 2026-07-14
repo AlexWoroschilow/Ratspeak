@@ -3,17 +3,30 @@ import React from "react";
 
 
 import "./Network.scss";
+import {Activity} from "./Network/Activity";
 
 interface NetworkProps {
 }
 
 interface NetworkState {
+    isEnabledActivity: boolean;
 }
 
 
 export class Network extends React.Component<NetworkProps, NetworkState> {
     constructor(props: NetworkProps) {
         super(props);
+
+        this.state = {
+            isEnabledActivity: false
+        }
+    }
+
+
+    doToggleActivity() {
+        this.setState({
+            isEnabledActivity: !this.state.isEnabledActivity
+        })
     }
 
     render() {
@@ -151,68 +164,63 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
                             </div>
                         </div>
 
-                        <div class="network-activity" id="network-activity">
-                            <div class="system-drops-card" id="system-drops-card" style={{display: "none"}}>
-                                <div class="system-drops-header" role="button" tabindex="0" aria-expanded="false">
+                        <div className="network-activity" id="network-activity">
+                            <div className="system-drops-card" id="system-drops-card" style={{display: "none"}}>
+                                <div className="system-drops-header" role="button" tabindex="0" aria-expanded="false">
                                     <svg class="system-drops-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
                                          stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                         <circle cx="12" cy="12" r="10"/>
                                         <line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>
                                     </svg>
-                                    <span class="system-drops-title">System drops</span>
-                                    <span class="system-drops-summary" id="system-drops-summary">0</span>
+                                    <span className="system-drops-title">System drops</span>
+                                    <span className="system-drops-summary" id="system-drops-summary">0</span>
                                     <svg class="system-drops-chevron" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
                                         <polyline points="6 9 12 15 18 9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
                                                   stroke-linejoin="round"/>
                                     </svg>
                                 </div>
-                                <div class="system-drops-body" id="system-drops-body" hidden>
-                                    <div class="system-drops-list" id="system-drops-list"></div>
-                                    <div class="system-drops-footer">
-                                        <button class="nr-btn nr-btn-xs" id="system-drops-clear-btn">Clear system drops</button>
-                                        <button class="nr-btn nr-btn-xs" id="system-drops-purge-unverified-btn"
+                                <div className="system-drops-body" id="system-drops-body" hidden>
+                                    <div className="system-drops-list" id="system-drops-list"></div>
+                                    <div className="system-drops-footer">
+                                        <button className="nr-btn nr-btn-xs" id="system-drops-clear-btn">Clear system drops</button>
+                                        <button className="nr-btn nr-btn-xs" id="system-drops-purge-unverified-btn"
                                                 title="Remove manual blocks not backed by a recent announce — cleans up pre-fix entries">Purge unverified
                                         </button>
                                     </div>
                                 </div>
                             </div>
 
-                            <div class="activity-header">
+                            <div className="activity-header">
                                 <span className="activity-title">Network Activity</span>
                                 <label className="prop-toggle activity-toggle">
-                                    <input type="checkbox" id="activity-enabled-toggle" checked=""/>
+                                    <input type="checkbox" id="activity-enabled-toggle" checked={this?.state?.isEnabledActivity}
+                                           onChange={this.doToggleActivity.bind(this)}/>
                                     <span className="prop-slider"></span>
                                 </label>
-                                <div class="activity-controls">
-                                    <button class="nr-btn nr-btn-xs" id="activity-clear-btn">Clear</button>
-                                </div>
+
+                                {(this?.state?.isEnabledActivity === true) &&
+                                    <div className="activity-controls">
+                                        <button className="nr-btn nr-btn-xs" id="activity-clear-btn">
+                                            Clear
+                                        </button>
+                                    </div>}
                             </div>
 
-                            <div class="activity-privacy-gate" id="activity-privacy-gate">
-                                <svg class="activity-privacy-icon" viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5">
-                                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-                                </svg>
-                                <span class="activity-privacy-label">Privacy mode is active</span>
-                                <span class="activity-privacy-desc">No activity is being collected or saved. Enable for this session to see network events in real time.</span>
-                            </div>
+                            {(this?.state?.isEnabledActivity === true) && <>
+                                <Activity/>
+                            </>}
 
-                            <div class="activity-active" id="activity-active" style={{display: "none"}}>
-                                <div class="activity-toolbar">
-                                    <div class="activity-level-select" id="activity-level-select">
-                                        <button class="activity-level-btn" data-level="essential">Essential</button>
-                                        <button class="activity-level-btn active" data-level="standard">Standard</button>
-                                        <button class="activity-level-btn" data-level="detailed">Detailed</button>
-                                    </div>
-                                    <label class="prop-toggle activity-toggle">
-                                        <input type="checkbox" id="activity-enabled-toggle" checked/>
-                                        <span class="prop-slider"></span>
-                                    </label>
-                                </div>
-                                <div class="activity-filters" id="activity-filters"></div>
-                                <div class="activity-feed" id="activity-feed">
-                                    <div class="activity-empty">Listening for network events...</div>
-                                </div>
-                            </div>
+                            {(this?.state?.isEnabledActivity === false) &&
+                                <div className="activity-privacy-gate" id="activity-privacy-gate">
+                                    <svg className="activity-privacy-icon" viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5">
+                                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                                    </svg>
+                                    <span className="activity-privacy-label">Privacy mode is active</span>
+                                    <span
+                                        className="activity-privacy-desc">No activity is being collected or saved. Enable for this session to see network events in real time.</span>
+                                </div>}
+
+
                         </div>
                     </div>
                 </div>
