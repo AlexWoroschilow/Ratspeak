@@ -11,6 +11,9 @@ import {Identity} from "./Application/Identity";
 import {Peers} from "./Application/Peers";
 import {Network} from "./Application/Network";
 import {Settings} from "./Application/Settings";
+import {IdentityImport} from "./Application/IdentityImport";
+import {IdentityCreate} from "./Application/IdentityCreate";
+import {IdentityHardware} from "./Application/IdentityHardware";
 
 interface ApplicationProps {
 }
@@ -40,27 +43,43 @@ export class Application extends React.Component<ApplicationProps, ApplicationSt
                             <Dashboard/>
                         }/>
 
-                        <Route path="messages/*" element={
+                        <Route path="messages" element={
                             <Messages/>
                         }/>
 
-                        <Route path="contacts/*" element={
+                        <Route path="contacts" element={
                             <Contacts/>
                         }/>
 
-                        <Route path="identity/*" element={
+                        <Route path="identity" element={
                             <Identity/>
                         }/>
 
-                        <Route path="peers/*" element={
+                        <Route path="identity" element={
+                            <Identity/>
+                        }/>
+
+                        <Route path="identity-import" element={
+                            <IdentityImport/>
+                        }/>
+
+                        <Route path="identity-create" element={
+                            <IdentityCreate/>
+                        }/>
+
+                        <Route path="identity-hardware" element={
+                            <IdentityHardware/>
+                        }/>
+
+                        <Route path="peers" element={
                             <Peers/>
                         }/>
 
-                        <Route path="network/*" element={
+                        <Route path="network" element={
                             <Network/>
                         }/>
 
-                        <Route path="settings/*" element={
+                        <Route path="settings" element={
                             <Settings/>
                         }/>
 
