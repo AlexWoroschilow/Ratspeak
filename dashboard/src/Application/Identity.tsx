@@ -16,15 +16,15 @@ export class Identity extends React.Component<IdentityProps, IdentityState> {
     render() {
 
         return <>
-            <div class="view" id="view-identity">
-                <div class="identity-page">
-                    <div class="identity-page-header">
-                        <div class="identity-title-block">
-                            <div class="identity-page-kicker">Identity</div>
-                            <div class="identity-page-title" id="identity-page-title">Identity Management</div>
+            <div className="view" id="view-identity">
+                <div className="identity-page">
+                    <div className="identity-page-header">
+                        <div className="identity-title-block">
+                            <div className="identity-page-kicker">Identity</div>
+                            <div className="identity-page-title" id="identity-page-title">Identity Management</div>
                         </div>
-                        <div class="identity-toolbar">
-                            <a href={"#identity-import"} class="identity-toolbar-btn" id="identity-import-btn" title="Import or restore identity"
+                        <div className="identity-toolbar">
+                            <a href={"#identity-import"} className="identity-toolbar-btn" id="identity-import-btn" title="Import or restore identity"
                                aria-label="Import or restore identity">
                                 <svg viewBox="0 0 24 24">
                                     <path d="M12 3v12"/>
@@ -33,7 +33,7 @@ export class Identity extends React.Component<IdentityProps, IdentityState> {
                                 </svg>
                                 <span>Import</span>
                             </a>
-                            <a href={"#identity-hardware"} class="identity-toolbar-btn" id="identity-hardware-btn" title="Hardware key" aria-label="Hardware key">
+                            <a href={"#identity-hardware"} className="identity-toolbar-btn" id="identity-hardware-btn" title="Hardware key" aria-label="Hardware key">
                                 <svg viewBox="0 0 24 24">
                                     <path
                                         d="M2.6 17.4A2 2 0 0 0 2 18.8V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.2a2 2 0 0 0 1.4-.6l.8-.8A6.5 6.5 0 1 0 9.4 10.6z"/>
@@ -41,7 +41,7 @@ export class Identity extends React.Component<IdentityProps, IdentityState> {
                                 </svg>
                                 <span>Hardware</span>
                             </a>
-                            <a href={"#identity-create"} class="identity-toolbar-btn identity-toolbar-btn--primary" id="identity-add-btn" title="Create identity"
+                            <a href={"#identity-create"} className="identity-toolbar-btn identity-toolbar-btn--primary" id="identity-add-btn" title="Create identity"
                                aria-label="Create identity">
                                 <svg viewBox="0 0 24 24">
                                     <path d="M12 5v14"/>
@@ -51,20 +51,20 @@ export class Identity extends React.Component<IdentityProps, IdentityState> {
                             </a>
                         </div>
                     </div>
-                    <div class="identity-management-grid">
-                        <div class="panel identity-panel-list" id="panel-identity-list">
-                            <div class="panel-header">Identities</div>
-                            <div class="panel-body identity-list-body">
+                    <div className="identity-management-grid">
+                        <div className="panel identity-panel-list" id="panel-identity-list">
+                            <div className="panel-header">Identities</div>
+                            <div className="panel-body identity-list-body">
                                 <div id="identity-list">
-                                    <div class="loading-state p-6"><span class="loading-spinner"></span>Loading...</div>
+                                    <div className="loading-state p-6"><span className="loading-spinner"></span>Loading...</div>
                                 </div>
                             </div>
                         </div>
-                        <div class="panel identity-panel-active" id="panel-identity-active">
-                            <div class="panel-header">Identity Detail</div>
-                            <div class="panel-body">
+                        <div className="panel identity-panel-active" id="panel-identity-active">
+                            <div className="panel-header">Identity Detail</div>
+                            <div className="panel-body">
                                 <div id="identity-active-card">
-                                    <div class="loading-state"><span class="loading-spinner"></span>Loading...</div>
+                                    <div className="loading-state"><span className="loading-spinner"></span>Loading...</div>
                                 </div>
                             </div>
                         </div>

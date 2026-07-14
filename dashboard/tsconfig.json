@@ -1,9 +1,14 @@
 {
   "compilerOptions": {
-"target": "ESNext",
+    "target": "ESNext",
     "module": "ESNext",
-    "lib": ["DOM", "DOM.Iterable", "ESNext"],
-    "jsx": "react-jsx", // Это ключевой параметр для поддержки .tsx
+    "lib": [
+      "DOM",
+      "DOM.Iterable",
+      "ESNext"
+    ],
+    "jsx": "react-jsx",
+    // Это ключевой параметр для поддержки .tsx
     "moduleResolution": "bundler",
     "strict": true,
     "skipLibCheck": true,

@@ -33,26 +33,26 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
 
         return <>
 
-            <div class="view" id="view-network">
-                <div class="network-layout">
-                    <div class="network-pulse" id="network-pulse">
-                        <div class="pulse-identity" id="pulse-identity">
-                            <div class="loading-state"><span class="loading-spinner"></span></div>
+            <div className="view" id="view-network">
+                <div className="network-layout">
+                    <div className="network-pulse" id="network-pulse">
+                        <div className="pulse-identity" id="pulse-identity">
+                            <div className="loading-state"><span className="loading-spinner"></span></div>
                         </div>
-                        <div class="pulse-throughput">
-                        <span class="pulse-throughput-item" title="Total uploaded">
-                            <span class="pulse-throughput-arrow" aria-hidden="true">&uarr;</span>
-                            <span class="pulse-throughput-value" id="net-stat-tx">0 B</span>
+                        <div className="pulse-throughput">
+                        <span className="pulse-throughput-item" title="Total uploaded">
+                            <span className="pulse-throughput-arrow" aria-hidden="true">&uarr;</span>
+                            <span className="pulse-throughput-value" id="net-stat-tx">0 B</span>
                         </span>
-                            <span class="pulse-throughput-item" title="Total downloaded">
-                            <span class="pulse-throughput-arrow" aria-hidden="true">&darr;</span>
-                            <span class="pulse-throughput-value" id="net-stat-rx">0 B</span>
+                            <span className="pulse-throughput-item" title="Total downloaded">
+                            <span className="pulse-throughput-arrow" aria-hidden="true">&darr;</span>
+                            <span className="pulse-throughput-value" id="net-stat-rx">0 B</span>
                         </span>
                         </div>
-                        <div class="pulse-actions">
-                            <button class="pulse-announce-btn" id="network-announce-btn">
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                                     stroke-linejoin="round" aria-hidden="true">
+                        <div className="pulse-actions">
+                            <button className="pulse-announce-btn" id="network-announce-btn">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"
+                                     strokeLinejoin="round" aria-hidden="true">
                                     <path d="M3 11l18-8-8 18-2-8-8-2z"/>
                                 </svg>
                                 <span>Announce</span>
@@ -60,16 +60,16 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
                         </div>
                     </div>
                     {/**/}
-                    <div class="network-subtabs" id="network-subtabs">
-                        <button class="network-subtab-btn active" data-subtab="connections">Connections</button>
-                        <button class="network-subtab-btn" data-subtab="activity">Activity</button>
+                    <div className="network-subtabs" id="network-subtabs">
+                        <button className="network-subtab-btn active" data-subtab="connections">Connections</button>
+                        <button className="network-subtab-btn" data-subtab="activity">Activity</button>
                     </div>
                     {/**/}
-                    <div class="network-main">
-                        <div class="network-connections">
-                            <div class="conn-section conn-section-tcp collapsed" data-iface-type="tcp">
-                                <div class="conn-section-header" role="button" tabindex="0" aria-expanded="false">
-                                    <div class="conn-section-icon">
+                    <div className="network-main">
+                        <div className="network-connections">
+                            <div className="conn-section conn-section-tcp collapsed" data-iface-type="tcp">
+                                <div className="conn-section-header" role="button" aria-expanded="false">
+                                    <div className="conn-section-icon">
                                         <svg viewBox="0 0 24 24">
                                             <circle cx="12" cy="12" r="10"/>
                                             <path d="M2 12h20"/>
@@ -77,34 +77,34 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
                                             <path d="M12 2a15 15 0 0 0-4 10 15 15 0 0 0 4 10"/>
                                         </svg>
                                     </div>
-                                    <span class="conn-section-label">Internet/TCP</span>
-                                    <span class="conn-section-count" id="conn-count-tcp">0</span>
-                                    <a href={"#network-internet"} class="nr-btn nr-btn-sm conn-section-action" id="conn-add-tcp">+</a>
-                                    <svg class="conn-section-chevron" viewBox="0 0 24 24" width="16" height="16">
+                                    <span className="conn-section-label">Internet/TCP</span>
+                                    <span className="conn-section-count" id="conn-count-tcp">0</span>
+                                    <a href={"#network-internet"} className="nr-btn nr-btn-sm conn-section-action" id="conn-add-tcp">+</a>
+                                    <svg className="conn-section-chevron" viewBox="0 0 24 24" width="16" height="16">
                                         <polyline points="6 9 12 15 18 9"/>
                                     </svg>
                                 </div>
-                                <div class="conn-section-body" id="conn-body-tcp"></div>
+                                <div className="conn-section-body" id="conn-body-tcp"></div>
                             </div>
-                            <div class="conn-section conn-section-ble collapsed" data-iface-type="ble">
-                                <div class="conn-section-header" role="button" tabindex="0" aria-expanded="false">
-                                    <div class="conn-section-icon">
+                            <div className="conn-section conn-section-ble collapsed" data-iface-type="ble">
+                                <div className="conn-section-header" role="button" aria-expanded="false">
+                                    <div className="conn-section-icon">
                                         <svg viewBox="0 0 24 24">
                                             <path d="M6.5 6.5l11 11L12 23V1l5.5 5.5-11 11"/>
                                         </svg>
                                     </div>
-                                    <span class="conn-section-label">Bluetooth Peer</span>
-                                    <span class="conn-section-count" id="conn-count-ble">0</span>
-                                    <a href={"#network-bluetooth"} class="nr-btn nr-btn-sm conn-section-action" id="conn-toggle-ble">+</a>
-                                    <svg class="conn-section-chevron" viewBox="0 0 24 24" width="16" height="16">
+                                    <span className="conn-section-label">Bluetooth Peer</span>
+                                    <span className="conn-section-count" id="conn-count-ble">0</span>
+                                    <a href={"#network-bluetooth"} className="nr-btn nr-btn-sm conn-section-action" id="conn-toggle-ble">+</a>
+                                    <svg className="conn-section-chevron" viewBox="0 0 24 24" width="16" height="16">
                                         <polyline points="6 9 12 15 18 9"/>
                                     </svg>
                                 </div>
-                                <div class="conn-section-body" id="conn-body-ble"></div>
+                                <div className="conn-section-body" id="conn-body-ble"></div>
                             </div>
-                            <div class="conn-section conn-section-local collapsed" data-iface-type="local">
-                                <div class="conn-section-header" role="button" tabindex="0" aria-expanded="false">
-                                    <div class="conn-section-icon">
+                            <div className="conn-section conn-section-local collapsed" data-iface-type="local">
+                                <div className="conn-section-header" role="button" aria-expanded="false">
+                                    <div className="conn-section-icon">
                                         <svg viewBox="0 0 24 24">
                                             <path d="M5 12.55a11 11 0 0 1 14.08 0"/>
                                             <path d="M1.42 9a16 16 0 0 1 21.16 0"/>
@@ -112,18 +112,18 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
                                             <circle cx="12" cy="20" r="1" fill="currentColor" stroke="none"/>
                                         </svg>
                                     </div>
-                                    <span class="conn-section-label">Local Network</span>
-                                    <span class="conn-section-count" id="conn-count-local">0</span>
-                                    <a href={"#network-local"} class="nr-btn nr-btn-sm conn-section-action" id="conn-toggle-local">+</a>
-                                    <svg class="conn-section-chevron" viewBox="0 0 24 24" width="16" height="16">
+                                    <span className="conn-section-label">Local Network</span>
+                                    <span className="conn-section-count" id="conn-count-local">0</span>
+                                    <a href={"#network-local"} className="nr-btn nr-btn-sm conn-section-action" id="conn-toggle-local">+</a>
+                                    <svg className="conn-section-chevron" viewBox="0 0 24 24" width="16" height="16">
                                         <polyline points="6 9 12 15 18 9"/>
                                     </svg>
                                 </div>
-                                <div class="conn-section-body" id="conn-body-local"></div>
+                                <div className="conn-section-body" id="conn-body-local"></div>
                             </div>
-                            <div class="conn-section conn-section-lora collapsed" data-iface-type="lora">
-                                <div class="conn-section-header" role="button" tabindex="0" aria-expanded="false">
-                                    <div class="conn-section-icon">
+                            <div className="conn-section conn-section-lora collapsed" data-iface-type="lora">
+                                <div className="conn-section-header" role="button" aria-expanded="false">
+                                    <div className="conn-section-icon">
                                         <svg viewBox="0 0 24 24">
                                             <path d="M12 20v-14"/>
                                             <path d="M12 6l-3 3"/>
@@ -134,18 +134,18 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
                                             <path d="M21 16a10 10 0 0 1 0-10"/>
                                         </svg>
                                     </div>
-                                    <span class="conn-section-label">Radio</span>
-                                    <span class="conn-section-count" id="conn-count-lora">0</span>
-                                    <a href={"#network-radio"} class="nr-btn nr-btn-sm conn-section-action" id="conn-add-lora">+</a>
-                                    <svg class="conn-section-chevron" viewBox="0 0 24 24" width="16" height="16">
+                                    <span className="conn-section-label">Radio</span>
+                                    <span className="conn-section-count" id="conn-count-lora">0</span>
+                                    <a href={"#network-radio"} className="nr-btn nr-btn-sm conn-section-action" id="conn-add-lora">+</a>
+                                    <svg className="conn-section-chevron" viewBox="0 0 24 24" width="16" height="16">
                                         <polyline points="6 9 12 15 18 9"/>
                                     </svg>
                                 </div>
-                                <div class="conn-section-body" id="conn-body-lora"></div>
+                                <div className="conn-section-body" id="conn-body-lora"></div>
                             </div>
-                            <div class="conn-section conn-section-host collapsed" data-iface-type="host">
-                                <div class="conn-section-header" role="button" tabindex="0" aria-expanded="false">
-                                    <div class="conn-section-icon">
+                            <div className="conn-section conn-section-host collapsed" data-iface-type="host">
+                                <div className="conn-section-header" role="button" aria-expanded="false">
+                                    <div className="conn-section-icon">
                                         <svg viewBox="0 0 24 24">
                                             <rect x="2" y="2" width="20" height="8" rx="2"/>
                                             <rect x="2" y="14" width="20" height="8" rx="2"/>
@@ -153,30 +153,30 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
                                             <circle cx="6" cy="18" r="1" fill="currentColor" stroke="none"/>
                                         </svg>
                                     </div>
-                                    <span class="conn-section-label">Host</span>
-                                    <span class="conn-section-count" id="conn-count-host">0</span>
-                                    <a href={"#network-host"} class="nr-btn nr-btn-sm conn-section-action" id="conn-add-host">+</a>
-                                    <svg class="conn-section-chevron" viewBox="0 0 24 24" width="16" height="16">
+                                    <span className="conn-section-label">Host</span>
+                                    <span className="conn-section-count" id="conn-count-host">0</span>
+                                    <a href={"#network-host"} className="nr-btn nr-btn-sm conn-section-action" id="conn-add-host">+</a>
+                                    <svg className="conn-section-chevron" viewBox="0 0 24 24" width="16" height="16">
                                         <polyline points="6 9 12 15 18 9"/>
                                     </svg>
                                 </div>
-                                <div class="conn-section-body" id="conn-body-host"></div>
+                                <div className="conn-section-body" id="conn-body-host"></div>
                             </div>
                         </div>
 
                         <div className="network-activity" id="network-activity">
                             <div className="system-drops-card" id="system-drops-card" style={{display: "none"}}>
-                                <div className="system-drops-header" role="button" tabindex="0" aria-expanded="false">
-                                    <svg class="system-drops-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
-                                         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <div className="system-drops-header" role="button" aria-expanded="false">
+                                    <svg className="system-drops-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2"
+                                         strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                                         <circle cx="12" cy="12" r="10"/>
                                         <line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>
                                     </svg>
                                     <span className="system-drops-title">System drops</span>
                                     <span className="system-drops-summary" id="system-drops-summary">0</span>
-                                    <svg class="system-drops-chevron" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
-                                        <polyline points="6 9 12 15 18 9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                                                  stroke-linejoin="round"/>
+                                    <svg className="system-drops-chevron" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+                                        <polyline points="6 9 12 15 18 9" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"
+                                                  strokeLinejoin="round"/>
                                     </svg>
                                 </div>
                                 <div className="system-drops-body" id="system-drops-body" hidden>
@@ -212,7 +212,7 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
 
                             {(this?.state?.isEnabledActivity === false) &&
                                 <div className="activity-privacy-gate" id="activity-privacy-gate">
-                                    <svg className="activity-privacy-icon" viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5">
+                                    <svg className="activity-privacy-icon" viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" strokeWidth="1.5">
                                         <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
                                     </svg>
                                     <span className="activity-privacy-label">Privacy mode is active</span>
