@@ -1,6 +1,9 @@
 "use strict";
 import React from "react";
 
+
+import "./Network.scss";
+
 interface NetworkProps {
 }
 
@@ -175,9 +178,13 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
                             </div>
 
                             <div class="activity-header">
-                                <span class="activity-title">Network Activity</span>
+                                <span className="activity-title">Network Activity</span>
+                                <label className="prop-toggle activity-toggle">
+                                    <input type="checkbox" id="activity-enabled-toggle" checked=""/>
+                                    <span className="prop-slider"></span>
+                                </label>
                                 <div class="activity-controls">
-                                    <button class="nr-btn nr-btn-xs" id="activity-clear-btn" style={{display: "none"}}>Clear</button>
+                                    <button class="nr-btn nr-btn-xs" id="activity-clear-btn">Clear</button>
                                 </div>
                             </div>
 
@@ -186,9 +193,7 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
                                     <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
                                 </svg>
                                 <span class="activity-privacy-label">Privacy mode is active</span>
-                                <span
-                                    class="activity-privacy-desc">No activity is being collected or saved. Enable for this session to see network events in real time.</span>
-                                <button class="nr-btn nr-btn-sm" id="activity-enable-btn">Enable For This Session</button>
+                                <span class="activity-privacy-desc">No activity is being collected or saved. Enable for this session to see network events in real time.</span>
                             </div>
 
                             <div class="activity-active" id="activity-active" style={{display: "none"}}>

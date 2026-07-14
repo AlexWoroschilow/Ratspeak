@@ -36,22 +36,25 @@ export class NetworkLocal extends React.Component<NetworkLocalProps, NetworkLoca
                 </div>
                 <details style={{marginTop: "var(--space-3)"}} open="">
                     <summary className="rs-dialog-advanced-summary">Advanced</summary>
-                    <div style={{paddingTop: "var(--space-2)"}}><label className="rs-dialog-field-label">Discovery Scope</label><select className="rs-dialog-input">
-                        <option value="link">Link (default — same Wi-Fi / LAN)</option>
-                        <option value="admin">Admin (administrative boundary)</option>
-                        <option value="site">Site (cross-router within a site)</option>
-                        <option value="organisation">Organisation</option>
-                        <option value="global">Global (Internet IPv6 multicast)</option>
-                    </select>
+                    <div style={{paddingTop: "var(--space-2)"}}>
+                        <label className="rs-dialog-field-label">Discovery Scope</label>
+                        <select className="rs-dialog-input">
+                            <option value="link">Link (default — same Wi-Fi / LAN)</option>
+                            <option value="admin">Admin (administrative boundary)</option>
+                            <option value="site">Site (cross-router within a site)</option>
+                            <option value="organisation">Organisation</option>
+                            <option value="global">Global (Internet IPv6 multicast)</option>
+                        </select>
                         <div className="rs-dialog-field-help">Most users want Link. Site/Global require IPv6 multicast routing in the upstream network.</div>
-                        <label className="rs-dialog-field-label">Multicast Address Type</label><select className="rs-dialog-input">
+                        <label className="rs-dialog-field-label">Multicast Address Type</label>
+                        <select className="rs-dialog-input">
                             <option value="temporary">Temporary (default — RFC 4291 transient)</option>
                             <option value="permanent">Permanent (well-known IANA prefix)</option>
                         </select>
                         <div className="rs-dialog-field-help">Most users want Temporary. Permanent reserves a stable group address.</div>
                         <label className="rs-dialog-field-label">Discovery Port</label><input type="number" className="rs-dialog-input" placeholder="29716" min="1"
                                                                                               max="65535"/><label className="rs-dialog-field-label">Data Port</label><input
-                            type="number" className="rs-dialog-input" placeholder="42671" min="1" max="65535"/>
+                        type="number" className="rs-dialog-input" placeholder="42671" min="1" max="65535"/>
                         <div className="rs-dialog-field-help">Must differ from Discovery Port. Both must be free.</div>
                         <label className="rs-dialog-field-label">Network Interfaces</label>
                         <div style={{display: "flex", flexDirection: "column", gap: "var(--space-1)", marginBottom: "var(--space-2)"}}>
