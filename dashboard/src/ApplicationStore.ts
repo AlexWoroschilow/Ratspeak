@@ -37,9 +37,50 @@ import {makeAutoObservable} from "mobx";
 // *   `dashboard/static/js/lxmf.js`: Handling all messaging, contact, and voice event logic.
 // *   `dashboard/static/js/identity.js`: Handling identity and hardware security key events.
 // *   `dashboard/static/js/settings.js`: Monitoring configuration and preference updates.
+
+export interface SetupStatusResponse {
+    needs_setup: boolean;
+}
+
+export interface SetupCompleteArgs {
+    args: {
+        display_name: string;
+    };
+}
+
+export interface SetupCompleteResponse {
+    ok: boolean;
+    error?: string;
+    mnemonic?: string;
+    identity_hash?: string;
+    lxmf_hash?: string;
+}
+
+export interface StartupProgressResponse {
+    stage: 'starting' | 'hw_locked' | 'ready';
+    hw_locked?: string;
+    hw_locked_kind?: 'passcode' | 'hardware';
+}
+
 export class ApplicationStore {
+
     constructor() {
         makeAutoObservable(this);
+    }
+
+    isSetupRequired(): boolean {
+        return false
+    }
+
+    setupRestart() {
+
+    }
+
+    setupComplete(): SetupCompleteResponse {
+        return {
+            ok: false,
+            error: "Not Implemented"
+        }
     }
 }
 

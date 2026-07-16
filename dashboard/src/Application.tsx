@@ -1,6 +1,6 @@
 "use strict";
 import React from "react";
-import {inject, observer} from "mobx-react";
+import {inject, observer, Provider} from "mobx-react";
 
 import {Layout} from "./Application/Layout";
 import {HashRouter, Route, Routes} from "react-router-dom";
@@ -25,52 +25,56 @@ import {ApplicationStore} from "./ApplicationStore";
 import "./Application.scss";
 
 interface ApplicationProps {
-    store: ApplicationStore;
+    store?: ApplicationStore;
 }
 
 interface ApplicationState {
 }
 
 
+@inject("store")
 export class Application extends React.Component<ApplicationProps, ApplicationState> {
     constructor(props: ApplicationProps) {
         super(props);
+
+        console.info("??", props.store);
     }
 
     render() {
 
         return <>
+            <Provider store={new ApplicationStore()}>
+                <HashRouter>
+                    <Routes>
+                        <Route element={<Layout/>}>
 
-            <HashRouter>
-                <Routes>
-                    <Route element={<Layout/>}>
+                            <Route index element={<Dashboard/>}/>
+                            <Route path="setup" element={<Setup/>}/>
+                            <Route path="dashboard" element={<Dashboard/>}/>
+                            <Route path="messages" element={<Messages/>}/>
+                            <Route path="contacts" element={<Contacts/>}/>
+                            <Route path="identity" element={<Identity/>}/>
+                            <Route path="identity" element={<Identity/>}/>
+                            <Route path="identity-import" element={<IdentityImport/>}/>
+                            <Route path="identity-create" element={<IdentityCreate/>}/>
+                            <Route path="identity-hardware" element={<IdentityHardware/>}/>
+                            <Route path="peers" element={<Peers/>}/>
+                            <Route path="network" element={<Network/>}/>
+                            <Route path="network-internet" element={<NetworkInternet/>}/>
+                            <Route path="network-bluetooth" element={<NetworkBluetooth/>}/>
+                            <Route path="network-local" element={<NetworkLocal/>}/>
+                            <Route path="network-radio" element={<NetworkRadio/>}/>
+                            <Route path="network-host" element={<NetworkHost/>}/>
+                            <Route path="settings" element={<Settings/>}/>
 
-                        <Route index element={<Dashboard/>}/>
-                        <Route path="setup" element={<Setup/>}/>
-                        <Route path="dashboard" element={<Dashboard/>}/>
-                        <Route path="messages" element={<Messages/>}/>
-                        <Route path="contacts" element={<Contacts/>}/>
-                        <Route path="identity" element={<Identity/>}/>
-                        <Route path="identity" element={<Identity/>}/>
-                        <Route path="identity-import" element={<IdentityImport/>}/>
-                        <Route path="identity-create" element={<IdentityCreate/>}/>
-                        <Route path="identity-hardware" element={<IdentityHardware/>}/>
-                        <Route path="peers" element={<Peers/>}/>
-                        <Route path="network" element={<Network/>}/>
-                        <Route path="network-internet" element={<NetworkInternet/>}/>
-                        <Route path="network-bluetooth" element={<NetworkBluetooth/>}/>
-                        <Route path="network-local" element={<NetworkLocal/>}/>
-                        <Route path="network-radio" element={<NetworkRadio/>}/>
-                        <Route path="network-host" element={<NetworkHost/>}/>
-                        <Route path="settings" element={<Settings/>}/>
+                            <Route path="*" element={
+                                <h3>Not implemented yet</h3>
+                            }/>
 
-                        <Route path="*" element={
-                            <h3>Not implemented yet</h3>
-                        }/>
-
-                    </Route>
-                </Routes>
-            </HashRouter>
+                        </Route>
+                    </Routes>
+                </HashRouter>
+            </Provider>
         </>
     }
 }
