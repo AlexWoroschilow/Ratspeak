@@ -9,7 +9,43 @@ interface MessagesState {
     isVisibleMenu?: boolean;
 }
 
-
+// Based on the investigation of the `@dashboard/static/js/*` files (primarily `dashboard/static/js/lxmf.js`), here are the `RS.invoke` methods related to messages, chats, and voice communication:
+//
+// ### LXMF Messaging and Conversations
+// *   `api_lxmf_conversations`: Retrieves the list of all active LXMF (Lightweight eXchange Message Format) conversations.
+// *   `get_conversation`: Retrieves the message history and state for a specific conversation (identified by a hash).
+// *   `api_lxmf_limits`: Retrieves the message size or rate limits for the LXMF protocol.
+// *   `api_search_messages`: Performs a keyword search across all messages.
+// *   `send_lxmf_message`: Sends a new LXMF message to a destination.
+// *   `send_lxmf_reply`: Sends a reply to an existing LXMF message.
+// *   `send_lxmf_with_attachment`: Sends an LXMF message with a file attachment.
+// *   `cancel_lxmf_message`: Cancels a message that is currently in the outbound queue.
+// *   `send_reaction`: Sends an emoji reaction to a specific message.
+// *   `mark_read`: Marks all messages in a conversation as read.
+// *   `hide_conversation`: Hides a conversation from the active list without deleting history.
+// *   `delete_conversation`: Permanently deletes a conversation and its message history.
+//
+// ### Voice Communication (Voice-over-Reticum)
+// These methods handle peer-to-peer voice calls within the chat interface:
+// *   `voice_call`: Initiates a voice call to a specific contact.
+// *   `voice_answer`: Answers an incoming voice call.
+// *   `voice_reject`: Rejects an incoming voice call.
+// *   `voice_hangup`: Ends an active voice call.
+// *   `voice_status`: Retrieves the current status of the voice subsystem (e.g., calling, connected, idle).
+// *   `voice_set_microphone_muted`: Toggles the microphone state during a call.
+// *   `voice_restart_speaker`: Restarts or toggles the speaker/audio output device.
+//
+// ### Announcements and Presence
+// *   `api_announces`: Retrieves a list of received identity announcements from the network.
+// *   `trigger_announce`: Manually triggers an identity announcement to let other peers know you are online.
+// *   `check_contact_status`: Triggers a request to update the reachability/status of contacts.
+//
+// ### Summary of Locations
+// *   `dashboard/static/js/lxmf.js`: The primary controller for all messaging, conversation management, and voice call logic.
+// *   `dashboard/static/js/tauri_events.js`: Updates the conversation UI when new messages or events are received.
+// *   `dashboard/static/js/state.js`: Manages the global state of the active conversation.
+// *   `dashboard/static/js/settings.js`: Handles automatic announcement settings and identity usage broadcasting.
+// 
 export class Messages extends React.Component<MessagesProps, MessagesState> {
     constructor(props: MessagesProps) {
         super(props);

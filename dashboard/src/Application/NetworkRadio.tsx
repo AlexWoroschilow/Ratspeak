@@ -14,7 +14,6 @@ interface NetworkRadioProps {
 interface NetworkRadioState {
 }
 
-
 export class NetworkRadio extends React.Component<NetworkRadioProps, NetworkRadioState> {
     constructor(props: NetworkRadioProps) {
         super(props);

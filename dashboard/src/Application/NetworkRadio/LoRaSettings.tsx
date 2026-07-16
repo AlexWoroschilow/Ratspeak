@@ -8,7 +8,31 @@ export interface LoRaSettingsProps {
 interface LoRaSettingsLoRaState {
 }
 
-
+// Based on the investigation of the `@dashboard/static/js/*` files, here are the `RS.invoke` methods related to LoRa radio and RNode hardware:
+//
+// ### LoRa Interface Management
+// *   `add_lora_interface`: Adds a new LoRa interface (RNode). Used for BLE, USB (Android), and TCP-connected RNodes.
+// *   `update_lora_interface`: Updates configuration for an existing LoRa interface.
+//
+// ### RNode Configuration and Presets
+// *   `api_rnode_presets`: Retrieves a catalog of RNode presets and region settings (frequency, bandwidth, spreading factor, etc.).
+//
+// ### RNode via Bluetooth (BLE)
+// These methods are specifically used when an RNode is connected via Bluetooth:
+// *   `disconnect_ble_rnode`: Disconnects a Bluetooth-connected RNode.
+// *   `submit_ble_rnode_passkey`: Submits the pairing passkey for an RNode pairing request.
+// *   `cancel_ble_rnode_pairing`: Cancels a pending Bluetooth pairing request with an RNode.
+// *   `ble_rnode_bridge_ready`: Signals that the bridge between the application and the BLE RNode is established.
+//
+// ### Related Connection Actions
+// *   `cancel_ble_connect`: Used to cancel an ongoing attempt to connect to a BLE LoRa radio.
+//
+// ### Summary of Locations
+// These methods are primarily used in the following files:
+// *   `dashboard/static/js/modals.js`: Contains the main logic for adding and updating LoRa interfaces (`submitRnodeInterface`) and fetching presets.
+// *   `dashboard/static/js/tauri_events.js`: Handles event-driven Bluetooth RNode actions like pairing and bridge readiness.
+// *   `dashboard/static/js/ui_shared.js`: Handles generic interface actions including disconnecting BLE RNodes.
+//
 export class LoRaSettings extends React.Component<LoRaSettingsProps, LoRaSettingsLoRaState> {
     constructor(props: LoRaSettingsProps) {
         super(props);
