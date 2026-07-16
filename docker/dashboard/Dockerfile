@@ -20,6 +20,8 @@ ENV DISPLAY=:99
 ARG ENVIRONMENT
 ARG DEBUG
 
+#RUN apt-get update && apt-get install -y
+
 RUN apt-get update -y --fix-missing && \
         apt-get install -y apt-utils && \
         apt-get install -y software-properties-common && \
@@ -31,8 +33,7 @@ RUN apt-get install -y htop && \
         apt-get install -y wget && \
         apt-get install -y curl
 
-RUN apt-get update -y --fix-missing && \
-        apt-get install -y python3-dev && \
+RUN  apt-get install -y python3-dev && \
         apt-get install -y python3-pip && \
         python3 -m pip install requests
 
