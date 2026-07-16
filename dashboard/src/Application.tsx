@@ -1,7 +1,7 @@
 "use strict";
 import React from "react";
+import {inject, observer} from "mobx-react";
 
-import "./Application.scss";
 import {Layout} from "./Application/Layout";
 import {HashRouter, Route, Routes} from "react-router-dom";
 import {Dashboard} from "./Application/Dashboard";
@@ -20,8 +20,12 @@ import {NetworkLocal} from "./Application/NetworkLocal";
 import {NetworkRadio} from "./Application/NetworkRadio";
 import {NetworkHost} from "./Application/NetworkHost";
 import {Setup} from "./Application/Setup";
+import {ApplicationStore} from "./ApplicationStore";
+
+import "./Application.scss";
 
 interface ApplicationProps {
+    store: ApplicationStore;
 }
 
 interface ApplicationState {
