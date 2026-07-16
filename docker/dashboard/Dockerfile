@@ -10,7 +10,7 @@
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-FROM ubuntu:22.04
+FROM ubuntu:26.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV NODE_OPTIONS=--max-old-space-size=8192
 ENV WINEDLLOVERRIDES="mscoree,mshtml="
@@ -19,8 +19,6 @@ ENV DISPLAY=:99
 
 ARG ENVIRONMENT
 ARG DEBUG
-
-#RUN apt-get update && apt-get install -y
 
 RUN apt-get update -y --fix-missing && \
         apt-get install -y apt-utils && \
@@ -32,10 +30,6 @@ RUN apt-get install -y htop && \
         apt-get install -y gcc g++ make && \
         apt-get install -y wget && \
         apt-get install -y curl
-
-RUN  apt-get install -y python3-dev && \
-        apt-get install -y python3-pip && \
-        python3 -m pip install requests
 
 RUN apt-get --purge remove -y nodejs && \
         apt-get --purge remove -y npm
