@@ -4,13 +4,13 @@ services:
     restart: "no"
     build:
       context: ./
-      dockerfile: docker/dashboard/Dockerfile
+      dockerfile: docker/frontend/Dockerfile
     volumes:
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
-      - ./dashboard:/srv:cached
+      - ./frontend:/srv:cached
     ports:
-      - "9999:9999"
+      - "0.0.0.0:9999:9999"
     command: sh -c "npm run dev"
   ratspeak:
     restart: "no"

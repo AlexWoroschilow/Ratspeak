@@ -51,3 +51,4 @@ Thumbs.db
 *.swo
 /dashboard/node_modules/
 /dashboard/dist/
+/frontend/node_modules/

@@ -4,7 +4,8 @@
   "version": "1.0.24",
   "identifier": "org.ratspeak.desktop",
   "build": {
-    "frontendDist": "../dashboard"
+    "frontendDist": "../frontend",
+    "devUrl": "http://188.21.0.2:9999/dashboard.html"
   },
   "bundle": {
     "active": true,

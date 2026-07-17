@@ -22,7 +22,7 @@ export class Layout extends React.Component<LayoutProps, LayoutState> {
         }
     }
 
-    isActive(pathPrefix) {
+    isActive(pathPrefix: string) {
         const currentPath = this.state.location;
         if (pathPrefix === '/') return currentPath === '/' || currentPath === '';
         return currentPath.startsWith(pathPrefix);
@@ -152,7 +152,8 @@ export class Layout extends React.Component<LayoutProps, LayoutState> {
                             <div className="sidebar-identity-name" id="sidebar-identity-name"></div>
                             <div className="sidebar-identity-hash" id="sidebar-identity-hash"></div>
                         </div>
-                        <svg className="header-identity-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"
+                        <svg className="header-identity-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+                             strokeLinecap="round"
                              strokeLinejoin="round">
                             <polyline points="6 9 12 15 18 9"/>
                         </svg>
