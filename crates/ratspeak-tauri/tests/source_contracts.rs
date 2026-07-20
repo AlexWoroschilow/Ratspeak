@@ -734,10 +734,22 @@ fn linux_wayland_webkit_startup_keeps_blank_window_workaround() {
     let source = read_source(repo_root().join("src-tauri/src/lib.rs")).expect("app shell");
 
     assert!(source.contains("fn apply_linux_webkit_rendering_workarounds()"));
-    assert!(source.contains("WAYLAND_DISPLAY"));
-    assert!(source.contains("XDG_SESSION_TYPE"));
     assert!(source.contains("WEBKIT_DISABLE_DMABUF_RENDERER"));
     assert!(source.contains("RATSPEAK_DISABLE_WEBKIT_DMABUF_WORKAROUND"));
+
+    // WEBKIT_DISABLE_DMABUF_RENDERER only selects the legacy renderer on
+    // WebKitGTK < 2.46; on 2.46+ it disables hardware acceleration outright
+    // (gray windows on smithay compositors / NixOS). The workaround must stay
+    // version-gated on the runtime WebKit.
+    assert!(source.contains("fn should_disable_webkit_dmabuf("));
+    assert!(source.contains("webkit_get_major_version"));
+    assert!(source.contains("webkit_version < (2, 46)"));
+
+    // Session detection lives in the shared window_prefs module.
+    let prefs = read_source(repo_root().join("crates/ratspeak-tauri/src/window_prefs.rs"))
+        .expect("window prefs");
+    assert!(prefs.contains("WAYLAND_DISPLAY"));
+    assert!(prefs.contains("XDG_SESSION_TYPE"));
 
     let workaround_pos = source
         .find("let linux_webkit_dmabuf_workaround = apply_linux_webkit_rendering_workarounds();")
@@ -752,6 +764,51 @@ fn linux_wayland_webkit_startup_keeps_blank_window_workaround() {
         workaround_pos < tracing_pos && tracing_pos < builder_pos,
         "WebKitGTK env workaround must run before Tauri constructs the webview"
     );
+
+    // --webview-diag must exit before any webview/env mutation side effects.
+    let diag_pos = source
+        .find("\"--webview-diag\"")
+        .expect("webview diagnostics flag");
+    assert!(
+        diag_pos < workaround_pos,
+        "--webview-diag must be handled before the workaround/builder run"
+    );
+}
+
+#[test]
+fn linux_window_decorations_preference_is_wired_end_to_end() {
+    let root = repo_root();
+    let shell = read_source(root.join("src-tauri/src/lib.rs")).expect("app shell");
+    let prefs =
+        read_source(root.join("crates/ratspeak-tauri/src/window_prefs.rs")).expect("window prefs");
+    let commands = read_source(root.join("crates/ratspeak-tauri/src/commands/interfaces.rs"))
+        .expect("interfaces commands");
+    let settings_js =
+        read_source(root.join("dashboard/static/js/settings.js")).expect("settings js");
+    let index = read_source(root.join("dashboard/index.html")).expect("index html");
+
+    // Resolver: explicit on/off override; auto only reacts to tiling Wayland.
+    assert!(prefs.contains("fn resolve_window_decorations"));
+    assert!(prefs.contains("SWAYSOCK"));
+    assert!(prefs.contains("NIRI_SOCKET"));
+    assert!(prefs.contains("HYPRLAND_INSTANCE_SIGNATURE"));
+
+    // Shell: preference read before the window is built, applied at builder
+    // time, and adjustable live via the command.
+    assert!(shell.contains("window_decorations"));
+    assert!(shell.contains(".decorations(decorations)"));
+    assert!(shell.contains("fn set_window_decorations("));
+    assert!(shell.contains("set_window_decorations,"));
+
+    // Devtools must be reachable in release builds for field diagnostics.
+    assert!(shell.contains(".devtools(diagnostics_enabled() || developer_mode)"));
+
+    // Settings surface: payload field + frontend control.
+    assert!(commands.contains("\"window_decorations\": window_decorations"));
+    assert!(settings_js.contains("set_window_decorations"));
+    assert!(settings_js.contains("initWindowDecorationsToggle"));
+    assert!(index.contains("settings-window-decorations-auto"));
+    assert!(index.contains("settings-window-decorations-off"));
 }
 
 #[test]
@@ -802,8 +859,37 @@ fn app_sources_do_not_write_direct_stdout_or_stderr_logs() {
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
             continue;
         }
-        let source = read_source(&path).expect("source file");
-        let rel = path.strip_prefix(&root).unwrap_or(&path).display();
+        let mut source = read_source(&path).expect("source file");
+        // Normalize separators so the carve-out below matches on Windows too.
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .display()
+            .to_string()
+            .replace('\\', "/");
+
+        // Sole sanctioned stderr exception: `--webview-diag` prints the
+        // rendering environment by design — it must work without the tracing
+        // opt-in, before any subscriber exists. Everything else stays on
+        // tracing. The excised region must still never touch stdout.
+        if rel.ends_with("src-tauri/src/lib.rs") {
+            let start = source
+                .find("fn print_webview_diagnostics()")
+                .expect("webview diagnostics printer present");
+            let end = source[start..]
+                .find("\nfn ")
+                .map(|offset| start + offset)
+                .expect("function following the diagnostics printer");
+            // `eprintln!(` contains the `println!(` substring; strip stderr
+            // prints first so only genuine stdout prints can trip this.
+            let diag_without_stderr = source[start..end].replace("eprintln!(", "");
+            assert!(
+                !diag_without_stderr.contains("println!("),
+                "print_webview_diagnostics must write to stderr, not stdout"
+            );
+            source.replace_range(start..end, "");
+        }
+
         assert!(
             !source.contains("println!("),
             "{rel} must not print to stdout"
@@ -1172,53 +1258,101 @@ fn tcp_public_connect_sheet_uses_curated_public_servers() {
 }
 
 #[test]
-fn tcp_connect_sheet_gates_backbone_and_ifac_behind_developer_mode() {
+fn ifac_is_available_ungated_on_client_and_server_sheets() {
     let root = repo_root();
     let index = read_source(root.join("dashboard/index.html")).expect("index html");
     for expected in [
+        // Backbone stays a developer-mode experiment; IFAC does not.
         "id=\"connect-backbone-row\" style=\"display:none;\"",
-        "id=\"connect-ifac-row\" style=\"display:none;\"",
         "id=\"connect-use-ifac\"",
         "id=\"connect-ifac-network-name\"",
         "id=\"connect-ifac-passphrase\"",
+        "id=\"connect-ifac-size\"",
+        "id=\"host-use-ifac\"",
+        "id=\"host-ifac-network-name\"",
+        "id=\"host-ifac-passphrase\"",
+        "id=\"host-ifac-size\"",
+        "id=\"backbone-host-use-ifac\"",
+        "id=\"backbone-host-ifac-network-name\"",
+        "id=\"backbone-host-ifac-passphrase\"",
+        "id=\"backbone-host-ifac-size\"",
     ] {
-        assert!(
-            index.contains(expected),
-            "missing IFAC connect UI token {expected}"
-        );
+        assert!(index.contains(expected), "missing IFAC UI token {expected}");
     }
-    assert!(!index.contains("ifac_size"));
 
     let modals_js = read_source(root.join("dashboard/static/js/modals.js")).expect("modals js");
     assert!(modals_js.contains("function _syncConnectAdvancedVisibility()"));
     assert!(modals_js.contains("if (bbRow) bbRow.style.display = dev ? '' : 'none';"));
-    assert!(modals_js.contains("if (ifacRow) ifacRow.style.display = showIfac ? '' : 'none';"));
-    assert!(modals_js.contains("if (!_developerModeEnabled()) return null;"));
-    assert!(modals_js.contains("args.ifac_enabled = ifac.ifac_enabled;"));
-    assert!(modals_js.contains("args.ifac_network_name = ifac.ifac_network_name;"));
-    assert!(modals_js.contains("args.ifac_passphrase = ifac.ifac_passphrase;"));
+    // IFAC row is always visible; only the size override is dev-gated.
+    assert!(modals_js.contains("if (ifacRow) ifacRow.style.display = '';"));
+    assert!(modals_js.contains(
+        "if (sizeField) sizeField.style.display = _developerModeEnabled() ? '' : 'none';"
+    ));
+    assert!(modals_js.contains("function _ifacSyncFields(prefix)"));
+    assert!(modals_js.contains("args.ifac_enabled = v.ifac_enabled;"));
+    assert!(modals_js.contains("args.ifac_network_name = v.ifac_network_name;"));
+    assert!(modals_js.contains("args.ifac_passphrase = v.ifac_passphrase;"));
     assert!(modals_js.contains("Enter an IFAC network name or passphrase"));
-    assert!(modals_js.contains("window.addEventListener('ratspeak-developer-mode-changed', _syncConnectAdvancedVisibility);"));
+    assert!(modals_js.contains("_ifacGuardEmpty('connect')"));
+    assert!(modals_js.contains("_ifacGuardEmpty('host')"));
+    assert!(modals_js.contains("_ifacGuardEmpty('backbone-host')"));
+    assert!(modals_js.contains("_ifacPopulate('connect', iface)"));
+    assert!(modals_js.contains("_ifacPopulate('host', iface)"));
+    assert!(modals_js.contains("_ifacPopulate('backbone-host', iface)"));
+    assert!(modals_js.contains("_ifacApplyArgs('host', {"));
+    assert!(modals_js.contains("_ifacApplyArgs('backbone-host', {"));
+    assert!(modals_js.contains(
+        "window.addEventListener('ratspeak-developer-mode-changed', _syncConnectAdvancedVisibility);"
+    ));
     assert!(modals_js.contains("if (ifacCheckbox) ifacCheckbox.checked = false;"));
     assert!(modals_js.contains("if (ifacNetworkName) ifacNetworkName.value = '';"));
     assert!(modals_js.contains("if (ifacPassphrase) ifacPassphrase.value = '';"));
+    assert!(modals_js.contains("if (ifacSize) ifacSize.value = '';"));
 
     let interfaces_rs = read_source(root.join("crates/ratspeak-tauri/src/commands/interfaces.rs"))
         .expect("interfaces commands");
     assert!(interfaces_rs.contains("struct InterfaceIfacCommandFields"));
     assert!(interfaces_rs.contains("ifac_enabled: Option<bool>"));
+    assert!(interfaces_rs.contains("ifac_size: Option<usize>"));
     assert!(interfaces_rs.contains("ifac_settings_from_args(&args.ifac, None)"));
     assert!(interfaces_rs.contains("ifac_settings_from_args(&args.ifac, Some(&old_ifac))"));
+    assert!(interfaces_rs.contains("ifac_settings_from_args(&args.ifac, Some(&existing_ifac))"));
     assert!(interfaces_rs.contains("spawn_tcp_client_runtime_with_ifac"));
     assert!(interfaces_rs.contains("spawn_backbone_client_runtime_with_ifac"));
+    assert!(interfaces_rs.contains("spawn_tcp_server_runtime_with_ifac"));
+    assert!(interfaces_rs.contains("spawn_backbone_server_runtime_with_ifac"));
 
     let rns_config =
         read_source(root.join("crates/ratspeak-runtime/src/rns_config.rs")).expect("rns config");
     assert!(rns_config.contains("pub struct InterfaceIfacArgs"));
     assert!(rns_config.contains("network_name = {network_name}"));
     assert!(rns_config.contains("passphrase = {passphrase}"));
+    assert!(rns_config.contains("ifac_size = {ifac_size}"));
     assert!(rns_config.contains("add_tcp_client_with_ifac"));
     assert!(rns_config.contains("update_tcp_client_with_ifac"));
+    assert!(rns_config.contains("add_tcp_server_with_ifac"));
+    assert!(rns_config.contains("update_tcp_server_with_ifac"));
+    assert!(rns_config.contains("add_backbone_server_with_ifac"));
+    assert!(rns_config.contains("update_backbone_server_with_ifac"));
+}
+
+#[test]
+fn developer_mode_persists_in_sqlite_not_only_localstorage() {
+    let root = repo_root();
+    let settings_js =
+        read_source(root.join("dashboard/static/js/settings.js")).expect("settings js");
+    assert!(settings_js.contains("RS.invoke('set_developer_mode'"));
+    assert!(settings_js.contains("function adoptDeveloperModeFromBackend(enabled)"));
+    assert!(settings_js.contains("adoptDeveloperModeFromBackend(data.developer_mode)"));
+
+    let interfaces_rs = read_source(root.join("crates/ratspeak-tauri/src/commands/interfaces.rs"))
+        .expect("interfaces commands");
+    assert!(interfaces_rs.contains("pub async fn set_developer_mode"));
+    assert!(interfaces_rs.contains("\"developer_mode_enabled\""));
+    assert!(interfaces_rs.contains("\"developer_mode\": developer_mode"));
+
+    let tauri_lib = read_source(root.join("src-tauri/src/lib.rs")).expect("src-tauri lib");
+    assert!(tauri_lib.contains("ratspeak_tauri::commands::interfaces::set_developer_mode"));
 }
 
 #[test]
@@ -1953,7 +2087,7 @@ fn active_call_surface_is_passive_and_shows_elapsed_duration() {
 fn settings_version_display_uses_package_version_api() {
     let root = repo_root();
     let version_file = read_source(root.join("VERSION")).expect("display version");
-    assert_eq!(version_file.trim(), "1.0.24");
+    assert_eq!(version_file.trim(), "1.0.25");
 
     let system_rs =
         read_source(root.join("crates/ratspeak-tauri/src/commands/system.rs")).expect("system rs");
@@ -2039,7 +2173,7 @@ fn settings_version_display_uses_package_version_api() {
     assert!(
         tauri_conf.contains("connect-src 'self' ipc: http://ipc.localhost https://api.github.com")
     );
-    assert!(tauri_conf.contains(r#""versionCode": 1000028"#));
+    assert!(tauri_conf.contains(r#""versionCode": 1000029"#));
 
     let android_gradle = read_source(root.join("src-tauri/gen/android/app/build.gradle.kts"))
         .expect("android gradle");
@@ -2228,7 +2362,8 @@ fn settings_system_panel_has_developer_mode_and_reset_group() {
     assert!(!settings_js.contains("title: 'Enable Developer Mode?'"));
     assert!(!settings_js.contains("confirmText: 'Enable'"));
     assert!(!settings_js.contains("_settingsDeveloperModeEnabled = !!ok;"));
-    assert!(!settings_js.contains("RS.invoke('set_developer_mode'"));
+    // Durable store is SQLite (see developer_mode_persists_in_sqlite_not_only_localstorage).
+    assert!(settings_js.contains("RS.invoke('set_developer_mode'"));
 
     assert!(views_css.contains(".settings-panel-section-title"));
     assert!(views_css.contains(".settings-radio-group"));
@@ -2321,9 +2456,7 @@ fn network_interface_sections_scroll_without_compressing_rows() {
     ));
 
     assert!(responsive_css.contains(".network-main {\n        display: flex;"));
-    assert!(responsive_css.contains(
-        "padding-bottom: calc(62px + var(--sab, env(safe-area-inset-bottom, 0px)) + var(--space-5));"
-    ));
+    assert!(responsive_css.contains("padding-bottom: calc(62px + var(--sab) + var(--space-5));"));
     assert!(responsive_css.contains(
         ".conn-section:not(.collapsed) .conn-section-body {\n        max-height: none;\n        overflow: visible;"
     ));
@@ -3046,7 +3179,7 @@ fn first_run_announce_hint_waits_for_online_mobile_interface() {
     assert!(system.contains("remove app-private Reticulum config"));
     assert!(runtime.contains("strip_legacy_default_auto_interface(&source_content)"));
     assert!(rns_config.contains("pub fn strip_legacy_default_auto_interface"));
-    assert!(animations.contains("bottom: calc(62px + var(--sab, 0px) + 20px);"));
+    assert!(animations.contains("bottom: calc(62px + var(--sab) + 20px);"));
     assert!(animations.contains("background: var(--surface-sheet);"));
     assert!(animations.contains(".first-run-hint-icon"));
     assert!(animations.contains("background: var(--accent-a12);"));
@@ -3719,8 +3852,14 @@ fn peers_are_filtered_to_ratspeak_actionable_services() {
     assert!(peers.contains("telephony_hash"));
     assert!(peers.contains("supports_lxst_call"));
 
+    let core_types =
+        read_source(root.join("crates/ratspeak-core/src/types.rs")).expect("core types");
+    assert!(core_types.contains("pub const LXMF_DELIVERY_APP_NAME: &str = \"lxmf.delivery\";"));
+
     let db = read_source(root.join("crates/ratspeak-db/src/db.rs")).expect("db");
-    assert!(db.contains("pub const PEER_SERVICE_LXMF_DELIVERY: &str = \"lxmf.delivery\";"));
+    assert!(db.contains(
+        "pub const PEER_SERVICE_LXMF_DELIVERY: &str = ratspeak_core::LXMF_DELIVERY_APP_NAME;"
+    ));
     assert!(db.contains("pub const PEER_SERVICE_LXST_TELEPHONY: &str = \"lxst.telephony\";"));
     assert!(db.contains("fn peer_service_filter_sql(column: &str) -> String"));
 
@@ -3728,7 +3867,7 @@ fn peers_are_filtered_to_ratspeak_actionable_services() {
         .expect("handlers");
     assert!(handlers.contains("pub async fn spawn_lxst_telephony_handler"));
     assert!(handlers.contains("const LXST_TELEPHONY_ASPECT: &str = \"lxst.telephony\";"));
-    assert!(handlers.contains("Destination::hash_from_name_and_identity(\"lxmf.delivery\""));
+    assert!(handlers.contains("Destination::hash_from_name_and_identity(LXMF_DELIVERY_APP_NAME"));
     assert!(handlers.contains("db::PEER_SERVICE_LXST_TELEPHONY"));
 
     let runtime = read_source(root.join("crates/ratspeak-runtime/src/lib.rs")).expect("runtime");

@@ -1199,6 +1199,26 @@
                                     </label>
                                 </div>
                             </div>
+                            <div class="settings-row" id="settings-window-decorations-row" style="display: none;">
+                                <div class="settings-row-info">
+                                    <span class="settings-row-label">Window Decorations</span>
+                                    <span class="settings-row-desc">Title bar drawn by the app. Auto hides it under tiling Wayland compositors (Sway, Hyprland, niri).</span>
+                                </div>
+                                <div class="settings-radio-group" role="radiogroup" aria-label="Window Decorations">
+                                    <label class="settings-radio-option">
+                                        <input type="radio" name="settings-window-decorations" id="settings-window-decorations-auto" value="auto" checked>
+                                        <span>Auto</span>
+                                    </label>
+                                    <label class="settings-radio-option">
+                                        <input type="radio" name="settings-window-decorations" id="settings-window-decorations-on" value="on">
+                                        <span>On</span>
+                                    </label>
+                                    <label class="settings-radio-option">
+                                        <input type="radio" name="settings-window-decorations" id="settings-window-decorations-off" value="off">
+                                        <span>Off</span>
+                                    </label>
+                                </div>
+                            </div>
 
                             <div class="settings-panel-section-title">Reset</div>
                             <div class="system-subsection system-subsection--cache collapsed" id="system-section-caches">
@@ -1389,6 +1409,10 @@
                     <label>IFAC Passphrase</label>
                     <input type="password" id="connect-ifac-passphrase" class="modal-input" placeholder="Required for most IFAC networks" maxlength="256" autocorrect="off" autocapitalize="none" spellcheck="false">
                 </div>
+                <div class="modal-field" id="connect-ifac-size-field" style="display:none;">
+                    <label>IFAC Size (bytes)</label>
+                    <input type="number" id="connect-ifac-size" class="modal-input" placeholder="16 (default)" min="1" max="64" autocorrect="off" autocapitalize="none" spellcheck="false">
+                </div>
             </div>
             <button class="nr-btn w-full mt-4" id="connect-submit-btn">Connect</button>
         </div>
@@ -1416,6 +1440,24 @@
             <label>Name (optional)</label>
             <input type="text" id="host-name" class="modal-input" placeholder="My Server" maxlength="32" autocorrect="off" autocapitalize="none" spellcheck="false">
         </div>
+        <label class="rs-dialog-checkbox-wrap mt-4" id="host-ifac-row">
+            <input type="checkbox" id="host-use-ifac" class="rs-dialog-checkbox">
+            <span class="rs-dialog-checkbox-label">Use IFAC</span>
+        </label>
+        <div id="host-ifac-fields" style="display:none;">
+            <div class="modal-field">
+                <label>IFAC Network Name</label>
+                <input type="text" id="host-ifac-network-name" class="modal-input" placeholder="Optional" maxlength="128" autocorrect="off" autocapitalize="none" spellcheck="false">
+            </div>
+            <div class="modal-field">
+                <label>IFAC Passphrase</label>
+                <input type="password" id="host-ifac-passphrase" class="modal-input" placeholder="Clients must present this to join" maxlength="256" autocorrect="off" autocapitalize="none" spellcheck="false">
+            </div>
+            <div class="modal-field" id="host-ifac-size-field" style="display:none;">
+                <label>IFAC Size (bytes)</label>
+                <input type="number" id="host-ifac-size" class="modal-input" placeholder="16 (default)" min="1" max="64" autocorrect="off" autocapitalize="none" spellcheck="false">
+            </div>
+        </div>
         <p class="inline-hint-sm mt-3" style="margin-bottom:0;">Your firewall or router may need to allow this port.</p>
         <button class="nr-btn w-full mt-4" id="host-submit-btn">Start Hosting</button>
     </div>
@@ -1441,6 +1483,24 @@
         <div class="modal-field">
             <label>Name (optional)</label>
             <input type="text" id="backbone-host-name" class="modal-input" placeholder="Backbone Server" maxlength="32" autocorrect="off" autocapitalize="none" spellcheck="false">
+        </div>
+        <label class="rs-dialog-checkbox-wrap mt-4" id="backbone-host-ifac-row">
+            <input type="checkbox" id="backbone-host-use-ifac" class="rs-dialog-checkbox">
+            <span class="rs-dialog-checkbox-label">Use IFAC</span>
+        </label>
+        <div id="backbone-host-ifac-fields" style="display:none;">
+            <div class="modal-field">
+                <label>IFAC Network Name</label>
+                <input type="text" id="backbone-host-ifac-network-name" class="modal-input" placeholder="Optional" maxlength="128" autocorrect="off" autocapitalize="none" spellcheck="false">
+            </div>
+            <div class="modal-field">
+                <label>IFAC Passphrase</label>
+                <input type="password" id="backbone-host-ifac-passphrase" class="modal-input" placeholder="Clients must present this to join" maxlength="256" autocorrect="off" autocapitalize="none" spellcheck="false">
+            </div>
+            <div class="modal-field" id="backbone-host-ifac-size-field" style="display:none;">
+                <label>IFAC Size (bytes)</label>
+                <input type="number" id="backbone-host-ifac-size" class="modal-input" placeholder="16 (default)" min="1" max="64" autocorrect="off" autocapitalize="none" spellcheck="false">
+            </div>
         </div>
         <p class="inline-hint-sm mt-3" style="margin-bottom:0;">Use this for stable desktop or server nodes, not mobile networks.</p>
         <button class="nr-btn w-full mt-4" id="backbone-host-submit-btn">Start Hosting</button>

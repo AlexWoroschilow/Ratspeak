@@ -4,6 +4,7 @@ function openSettings() {
     showSettingsMobileSectionIndex({ restoreFocus: false });
     initHapticsToggle();
     initDeveloperModeToggle();
+    initWindowDecorationsToggle();
     syncSettingsIdentityActions();
     renderSettingsVersion();
     // Re-seal every System reset subsection on each visit. The collapse IS the
@@ -46,6 +47,19 @@ function setDeveloperModeEnabled(enabled) {
     persistDeveloperModePreference(_settingsDeveloperModeEnabled);
     syncDeveloperModeRadioState();
     notifyDeveloperModeChanged();
+    // SQLite is the durable store; localStorage is only a boot-time cache
+    // (WKWebView drops custom-scheme localStorage on macOS/iOS).
+    RS.invoke('set_developer_mode', { enabled: _settingsDeveloperModeEnabled }).catch(function() {});
+}
+
+// Backend value wins over the localStorage cache at boot; no write-back.
+function adoptDeveloperModeFromBackend(enabled) {
+    enabled = !!enabled;
+    if (enabled === _settingsDeveloperModeEnabled) return;
+    _settingsDeveloperModeEnabled = enabled;
+    persistDeveloperModePreference(enabled);
+    syncDeveloperModeRadioState();
+    notifyDeveloperModeChanged();
 }
 
 window.ratspeakDeveloperModeEnabled = function() {
@@ -73,6 +87,52 @@ function initDeveloperModeToggle() {
 
     on.addEventListener('change', function() {
         if (on.checked) setDeveloperModeEnabled(true);
+    });
+}
+
+var _settingsWindowDecorationsBound = false;
+var _settingsWindowDecorationsMode = 'auto';
+
+// Linux desktop only: GTK is the only backend that draws its own title bar
+// (tao WlHeader on Wayland); macOS/Windows decorations are native.
+function windowDecorationsRowApplies() {
+    return !!window.__RATSPEAK_DESKTOP__ && /linux/i.test(navigator.userAgent);
+}
+
+function syncWindowDecorationsRadioState() {
+    ['auto', 'on', 'off'].forEach(function(mode) {
+        var el = document.getElementById('settings-window-decorations-' + mode);
+        if (el) el.checked = (_settingsWindowDecorationsMode === mode);
+    });
+}
+
+function setWindowDecorationsMode(mode) {
+    if (['auto', 'on', 'off'].indexOf(mode) === -1) return;
+    _settingsWindowDecorationsMode = mode;
+    syncWindowDecorationsRadioState();
+    RS.invoke('set_window_decorations', { mode: mode }).catch(function() {});
+}
+
+function adoptWindowDecorationsFromBackend(mode) {
+    if (['auto', 'on', 'off'].indexOf(mode) === -1) mode = 'auto';
+    if (mode === _settingsWindowDecorationsMode) return;
+    _settingsWindowDecorationsMode = mode;
+    syncWindowDecorationsRadioState();
+}
+
+function initWindowDecorationsToggle() {
+    var row = document.getElementById('settings-window-decorations-row');
+    if (!row) return;
+    if (!windowDecorationsRowApplies()) return;
+    row.style.display = '';
+    syncWindowDecorationsRadioState();
+    if (_settingsWindowDecorationsBound) return;
+    _settingsWindowDecorationsBound = true;
+    ['auto', 'on', 'off'].forEach(function(mode) {
+        var el = document.getElementById('settings-window-decorations-' + mode);
+        if (el) el.addEventListener('change', function() {
+            if (el.checked) setWindowDecorationsMode(mode);
+        });
     });
 }
 
@@ -1242,6 +1302,12 @@ function applyAppSettingsPayload(data) {
         var t = parseInt(data.hardware_session_timeout, 10);
         hwBadge.textContent = _hwLockLabel(t);
         hwBadge.setAttribute('data-value', t);
+    }
+    if (data.developer_mode !== undefined) {
+        adoptDeveloperModeFromBackend(data.developer_mode);
+    }
+    if (data.window_decorations !== undefined) {
+        adoptWindowDecorationsFromBackend(data.window_decorations);
     }
 }
 
