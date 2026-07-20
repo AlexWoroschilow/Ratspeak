@@ -10,7 +10,7 @@ pub type DbPool = Pool<SqliteConnectionManager>;
 
 const SCHEMA_VERSION: i64 = 33;
 
-pub const PEER_SERVICE_LXMF_DELIVERY: &str = "lxmf.delivery";
+pub const PEER_SERVICE_LXMF_DELIVERY: &str = ratspeak_core::LXMF_DELIVERY_APP_NAME;
 pub const PEER_SERVICE_LXST_TELEPHONY: &str = "lxst.telephony";
 pub const PEER_SERVICE_RATSPEAK_CLIENT: &str = "ratspeak.client";
 pub const PEER_SERVICE_RATSPEAK_GAMES: &str = "ratspeak.games";
@@ -54,22 +54,7 @@ pub fn init_pool(data_dir: &Path) -> Result<DbPool, Box<dyn std::error::Error + 
     let ratspeak_dir = data_dir.join(".ratspeak");
     std::fs::create_dir_all(&ratspeak_dir)?;
 
-    // Legacy name migrations from earlier product names.
     let db_path = ratspeak_dir.join("ratspeak.db");
-    for old_name in &["netresist.db", "meshglobe.db"] {
-        let old_path = ratspeak_dir.join(old_name);
-        if old_path.exists() && !db_path.exists() {
-            std::fs::rename(&old_path, &db_path)?;
-        }
-    }
-
-    for old_dir in &[".netresist", ".meshglobe"] {
-        let old = data_dir.join(old_dir);
-        if old.is_dir() && !ratspeak_dir.exists() {
-            std::fs::rename(&old, &ratspeak_dir)?;
-        }
-    }
-
     let manager = SqliteConnectionManager::file(&db_path).with_init(|conn| {
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;

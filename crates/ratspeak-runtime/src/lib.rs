@@ -36,6 +36,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use ratspeak_core::{LXMF_DELIVERY_APP_NAME, LXMF_PROPAGATION_APP_NAME};
 use rns_identity::destination::Destination;
 use serde_json::{Value, json};
 
@@ -98,7 +99,6 @@ pub fn apply_lxmf_settings_from_state(state: &AppState, mgr: &mut lxmf::LxmfMana
     let stamp_cost = state
         .required_stamp_cost
         .load(std::sync::atomic::Ordering::Relaxed);
-    mgr.router.set_enforce_stamps(enforce);
     mgr.router.config.stamp_cost = if enforce && stamp_cost > 0 {
         Some(stamp_cost)
     } else {
@@ -987,7 +987,7 @@ pub async fn init_rns_lxmf(state: Arc<AppState>, data_dir: std::path::PathBuf) {
                     .send(
                         rns_transport::messages::TransportMessage::RegisterDestination {
                             hash: dest_hash,
-                            app_name: "lxmf.delivery".to_string(),
+                            app_name: LXMF_DELIVERY_APP_NAME.to_string(),
                             delivery_tx: Some(delivery_tx.clone()),
                         },
                     )
@@ -1075,7 +1075,7 @@ pub async fn init_rns_lxmf(state: Arc<AppState>, data_dir: std::path::PathBuf) {
                         .send(
                             rns_transport::messages::TransportMessage::RegisterDestination {
                                 hash: prop_dest_hash,
-                                app_name: "lxmf.propagation".to_string(),
+                                app_name: LXMF_PROPAGATION_APP_NAME.to_string(),
                                 delivery_tx: Some(prop_tx),
                             },
                         )
@@ -1153,7 +1153,7 @@ pub async fn init_rns_lxmf(state: Arc<AppState>, data_dir: std::path::PathBuf) {
                         rns_mgr.handle.transport_tx.clone(),
                         prop_rx,
                         &identity,
-                        "lxmf.propagation",
+                        LXMF_PROPAGATION_APP_NAME,
                         Some(signing_key),
                     );
 
@@ -1217,7 +1217,7 @@ pub async fn init_rns_lxmf(state: Arc<AppState>, data_dir: std::path::PathBuf) {
                             let client_dest_hash = remote_identity_hash
                                 .map(|identity_hash| {
                                     rns_identity::destination::Destination::hash_from_name_and_identity(
-                                        "lxmf.delivery",
+                                        LXMF_DELIVERY_APP_NAME,
                                         Some(&identity_hash),
                                     )
                                 })
@@ -1364,7 +1364,7 @@ pub async fn init_rns_lxmf(state: Arc<AppState>, data_dir: std::path::PathBuf) {
                             rns_mgr.handle.transport_tx.clone(),
                             link_rx,
                             &identity,
-                            "lxmf.delivery",
+                            LXMF_DELIVERY_APP_NAME,
                             signing_key,
                         );
 
@@ -2782,6 +2782,37 @@ fn inbound_stamp_allowed(state: &AppState, msg: &lxmf_core::message::LxMessage) 
     stamp_ok
 }
 
+/// Blackholed-source drop gate: inbound LXMs whose source resolves to a
+/// blackholed identity are dropped before any processing
+/// (LXMRouter.py:1739-1741 at 1.0.1). Fail-open like Python's recall-gated
+/// check (LXMessage.py:803-805): unknown sources, a missing transport, and
+/// query failures all pass.
+async fn inbound_source_blackholed(
+    source_identity: Option<[u8; 16]>,
+    transport_tx: Option<tokio::sync::mpsc::Sender<rns_transport::messages::TransportMessage>>,
+) -> bool {
+    let (Some(hash), Some(tx)) = (source_identity, transport_tx) else {
+        return false;
+    };
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    if tx
+        .send(rns_transport::messages::TransportMessage::Rpc {
+            query: rns_transport::messages::TransportQuery::IsBlackholed { hash },
+            response_tx,
+        })
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    matches!(
+        tokio::time::timeout(Duration::from_millis(100), response_rx).await,
+        Ok(Ok(
+            rns_transport::messages::TransportQueryResponse::BoolResult(true)
+        ))
+    )
+}
+
 /// Pre-decrypted inbound entry: `data` = [dest:16][src:16][sig:64][msgpack].
 async fn handle_decrypted_lxmf(state: &Arc<AppState>, data: Vec<u8>, source: InboundLxmfSource) {
     let msg = match lxmf_core::message::LxMessage::unpack(&data) {
@@ -2834,6 +2865,24 @@ async fn process_inbound_lxmf(
             &source_hash,
             "standard",
         );
+    }
+
+    let (source_identity, blackhole_tx) = state
+        .lxmf
+        .lock()
+        .ok()
+        .and_then(|l| {
+            l.as_ref().map(|mgr| {
+                (
+                    mgr.recall_identity_hash(&msg.source_hash),
+                    mgr.router.transport_tx.clone(),
+                )
+            })
+        })
+        .unwrap_or((None, None));
+    if inbound_source_blackholed(source_identity, blackhole_tx).await {
+        tracing::debug!(from = %source_hash, "Dropping LXM from blackholed identity");
+        return;
     }
 
     let sig_valid = state.lxmf.lock().ok().and_then(|mut l| {
@@ -4804,6 +4853,142 @@ mod inbound_pipeline_tests {
         assert_eq!(emitter.count("lxmf_message"), 0);
     }
 
+    /// Fake transport actor answering `IsBlackholed` with a fixed verdict.
+    fn spawn_blackhole_transport(
+        blackholed: bool,
+    ) -> tokio::sync::mpsc::Sender<rns_transport::messages::TransportMessage> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        tokio::spawn(async move {
+            while let Some(message) = rx.recv().await {
+                if let rns_transport::messages::TransportMessage::Rpc { query, response_tx } =
+                    message
+                    && matches!(
+                        query,
+                        rns_transport::messages::TransportQuery::IsBlackholed { .. }
+                    )
+                {
+                    let _ = response_tx.send(
+                        rns_transport::messages::TransportQueryResponse::BoolResult(blackholed),
+                    );
+                }
+            }
+        });
+        tx
+    }
+
+    fn set_blackhole_transport(
+        state: &AppState,
+        tx: Option<tokio::sync::mpsc::Sender<rns_transport::messages::TransportMessage>>,
+    ) {
+        state
+            .lxmf
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .router
+            .transport_tx = tx;
+    }
+
+    /// Register `src` as a known identity so the gate's recall resolves and
+    /// signatures verify (x25519 half is irrelevant to both).
+    fn register_source_identity(
+        state: &AppState,
+        src: [u8; 16],
+        signing: &rns_crypto::ed25519::Ed25519PrivateKey,
+    ) {
+        let mut pub_key = [0u8; 64];
+        pub_key[32..].copy_from_slice(&signing.public_key().to_bytes());
+        state
+            .lxmf
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .known_identities
+            .insert(hex::encode(src), pub_key);
+    }
+
+    fn packed_signed_inbound(
+        dest: [u8; 16],
+        src: [u8; 16],
+        content: &str,
+        signing: &rns_crypto::ed25519::Ed25519PrivateKey,
+    ) -> Vec<u8> {
+        let mut msg = lxmf_core::message::LxMessage::new(
+            dest,
+            src,
+            "",
+            content,
+            lxmf_core::constants::DeliveryMethod::Direct,
+        );
+        msg.sign(signing).unwrap();
+        msg.pack().unwrap()
+    }
+
+    /// Blackholed-source gate (LXMRouter.py:1739-1741): a resolvable source
+    /// with a blackholed identity is dropped; the same peer delivers once the
+    /// transport says not-blackholed.
+    #[tokio::test]
+    async fn blackholed_source_is_dropped() {
+        let (state, emitter) = pipeline_state();
+        let signing = rns_crypto::ed25519::Ed25519PrivateKey::generate();
+        let src = [0xBB; 16];
+        register_source_identity(&state, src, &signing);
+
+        set_blackhole_transport(&state, Some(spawn_blackhole_transport(true)));
+        let data = packed_signed_inbound(local_dest(&state), src, "should vanish", &signing);
+        handle_decrypted_lxmf(&state, data, InboundLxmfSource::Link { link_id: None }).await;
+        assert_eq!(message_rows(&state), 0, "blackholed source must be dropped");
+        assert_eq!(emitter.count("lxmf_message"), 0);
+
+        set_blackhole_transport(&state, Some(spawn_blackhole_transport(false)));
+        let data = packed_signed_inbound(local_dest(&state), src, "now allowed", &signing);
+        handle_decrypted_lxmf(&state, data, InboundLxmfSource::Link { link_id: None }).await;
+        assert_eq!(message_rows(&state), 1, "non-blackholed source delivers");
+    }
+
+    /// Unknown sources pass the gate without a transport query, mirroring
+    /// Python's recall-gated check (LXMessage.py:803-805).
+    #[tokio::test]
+    async fn unknown_source_passes_blackhole_gate() {
+        let (state, _emitter) = pipeline_state();
+        set_blackhole_transport(&state, Some(spawn_blackhole_transport(true)));
+
+        let data = packed_inbound(local_dest(&state), [0xEE; 16], "unknown sender");
+        handle_decrypted_lxmf(&state, data, InboundLxmfSource::Propagated).await;
+
+        assert_eq!(message_rows(&state), 1);
+    }
+
+    /// Query failure fails open: a dead transport channel and a dropped
+    /// response both deliver instead of dropping.
+    #[tokio::test]
+    async fn blackhole_query_failure_fails_open() {
+        let (state, _emitter) = pipeline_state();
+        let signing = rns_crypto::ed25519::Ed25519PrivateKey::generate();
+        let src = [0xBB; 16];
+        register_source_identity(&state, src, &signing);
+
+        // Transport channel closed.
+        let (dead_tx, dead_rx) =
+            tokio::sync::mpsc::channel::<rns_transport::messages::TransportMessage>(1);
+        drop(dead_rx);
+        set_blackhole_transport(&state, Some(dead_tx));
+        let data = packed_signed_inbound(local_dest(&state), src, "channel closed", &signing);
+        handle_decrypted_lxmf(&state, data, InboundLxmfSource::Link { link_id: None }).await;
+        assert_eq!(message_rows(&state), 1);
+
+        // Query accepted but the response never arrives.
+        let (mute_tx, mut mute_rx) =
+            tokio::sync::mpsc::channel::<rns_transport::messages::TransportMessage>(1);
+        tokio::spawn(async move { while mute_rx.recv().await.is_some() {} });
+        set_blackhole_transport(&state, Some(mute_tx));
+        let data = packed_signed_inbound(local_dest(&state), src, "response dropped", &signing);
+        handle_decrypted_lxmf(&state, data, InboundLxmfSource::Link { link_id: None }).await;
+        assert_eq!(message_rows(&state), 2);
+    }
+
     /// T1-9: with enforce_stamps on, an unstamped message is rejected on
     /// EVERY inbound source — the old link/propagated path skipped the check.
     #[tokio::test]
@@ -4888,6 +5073,88 @@ mod inbound_pipeline_tests {
         assert_eq!(message_rows(&state), 0, "reactions never hit the chat log");
         assert_eq!(emitter.count("reaction_update"), 1);
         assert_eq!(emitter.count("lxmf_message"), 0);
+    }
+
+    /// A standard-only peer's FIELD_REACTION (native msgpack dict, no
+    /// 0xFB/0xFC envelope) routes to the reaction store like ours.
+    #[tokio::test]
+    async fn standard_field_reaction_routes_to_reaction_store() {
+        let (state, emitter) = pipeline_state();
+        let target_hash = [0xAB; 32];
+
+        let mut msg = lxmf_core::message::LxMessage::new(
+            local_dest(&state),
+            [0xEE; 16],
+            "",
+            "Reacted to your message with \u{1F44D}.",
+            lxmf_core::constants::DeliveryMethod::Direct,
+        );
+        let dict_value = rmpv::Value::Map(vec![
+            (
+                rmpv::Value::from(lxmf_core::constants::REACTION_TO as u64),
+                rmpv::Value::Binary(target_hash.to_vec()),
+            ),
+            (
+                rmpv::Value::from(lxmf_core::constants::REACTION_CONTENT as u64),
+                rmpv::Value::Binary("\u{1F44D}".as_bytes().to_vec()),
+            ),
+        ]);
+        let mut dict = Vec::new();
+        rmpv::encode::write_value(&mut dict, &dict_value).unwrap();
+        msg.set_msgpack_field(lxmf_core::constants::FIELD_REACTION, dict)
+            .unwrap();
+        msg.signature = Some([0u8; 64]);
+        let data = msg.pack().unwrap();
+
+        handle_decrypted_lxmf(&state, data, InboundLxmfSource::Propagated).await;
+
+        assert_eq!(reaction_rows(&state), 1, "standard reaction recorded");
+        assert_eq!(message_rows(&state), 0, "reactions never hit the chat log");
+        assert_eq!(emitter.count("reaction_update"), 1);
+        let stored: String = state
+            .db
+            .get()
+            .unwrap()
+            .query_row("SELECT message_id FROM reactions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(stored, hex::encode(target_hash), "keys on full-hash hex id");
+    }
+
+    /// A standard-only peer's FIELD_REPLY_TO/FIELD_REPLY_QUOTE (e.g. MeshChatX
+    /// replies) persists as reply metadata on the saved message.
+    #[tokio::test]
+    async fn standard_field_reply_persists_reply_metadata() {
+        let (state, emitter) = pipeline_state();
+        let target_hash = [0xCD; 32];
+
+        let mut msg = lxmf_core::message::LxMessage::new(
+            local_dest(&state),
+            [0xEE; 16],
+            "",
+            "standard reply",
+            lxmf_core::constants::DeliveryMethod::Direct,
+        );
+        msg.set_field(lxmf_core::constants::FIELD_REPLY_TO, target_hash.to_vec());
+        msg.set_field(lxmf_core::constants::FIELD_REPLY_QUOTE, b"quoted".to_vec());
+        msg.signature = Some([0u8; 64]);
+        let data = msg.pack().unwrap();
+
+        handle_decrypted_lxmf(&state, data, InboundLxmfSource::Link { link_id: None }).await;
+
+        assert_eq!(message_rows(&state), 1);
+        assert_eq!(emitter.count("lxmf_message"), 1);
+        let (reply_to, preview): (String, String) = state
+            .db
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT reply_to_id, reply_to_preview FROM messages",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(reply_to, hex::encode(target_hash));
+        assert_eq!(preview, "quoted");
     }
 }
 

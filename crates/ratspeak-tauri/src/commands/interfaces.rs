@@ -919,19 +919,46 @@ pub async fn set_auto_announce(state: State<'_, Arc<AppState>>, interval: u64) -
 
 #[tauri::command]
 pub async fn api_app_settings(state: State<'_, Arc<AppState>>) -> AppResult<Value> {
-    let hw_timeout = db::spawn_db(state.db.clone(), |p| {
-        db::get_setting(&p, "hardware_session_timeout")
+    let (hw_timeout, developer_mode, window_decorations) = db::spawn_db(state.db.clone(), |p| {
+        let hw_timeout = db::get_setting(&p, "hardware_session_timeout")
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(0)
+            .unwrap_or(0);
+        let developer_mode =
+            db::get_setting(&p, "developer_mode_enabled").is_some_and(|v| v == "true");
+        let window_decorations =
+            db::get_setting(&p, "window_decorations").unwrap_or_else(|| "auto".to_string());
+        (hw_timeout, developer_mode, window_decorations)
     })
     .await
-    .unwrap_or(0);
+    .unwrap_or((0, false, "auto".to_string()));
     Ok(json!({
         "auto_announce_interval": *state.announce_interval_rx.borrow(),
         "announce_ratspeak_usage": state.announce_ratspeak_usage_enabled(),
         "peers_sort": persisted_peers_sort(&state),
         "hardware_session_timeout": hw_timeout,
+        "developer_mode": developer_mode,
+        "window_decorations": window_decorations,
     }))
+}
+
+/// Developer mode lives in SQLite, not WebView localStorage: WKWebView does
+/// not reliably persist localStorage for custom-scheme origins (macOS/iOS).
+#[tauri::command]
+pub async fn set_developer_mode(
+    state: State<'_, Arc<AppState>>,
+    enabled: bool,
+) -> AppResult<Value> {
+    db::spawn_db(state.db.clone(), move |p| {
+        db::try_set_setting(
+            &p,
+            "developer_mode_enabled",
+            if enabled { "true" } else { "false" },
+        )
+    })
+    .await
+    .map_err(|_| AppError::internal("set_developer_mode db task panicked"))?
+    .map_err(|e| AppError::database_unavailable(format!("Failed to save developer mode: {e}")))?;
+    Ok(json!({ "developer_mode": enabled }))
 }
 
 /// Auto-lock timeout for hardware identities (seconds; 0 = off). Applies on the
@@ -1431,6 +1458,7 @@ enum EditableInterfaceConfig {
         name: String,
         listen_ip: String,
         listen_port: u16,
+        ifac: InterfaceIfacSettings,
     },
     BackboneClient {
         name: String,
@@ -1448,6 +1476,7 @@ enum EditableInterfaceConfig {
         listen_port: u16,
         prefer_ipv6: bool,
         device: Option<String>,
+        ifac: InterfaceIfacSettings,
     },
 }
 
@@ -1598,6 +1627,8 @@ struct InterfaceIfacCommandFields {
     ifac_network_name: Option<String>,
     #[serde(default)]
     ifac_passphrase: Option<String>,
+    #[serde(default)]
+    ifac_size: Option<usize>,
 }
 
 fn ifac_settings_from_entry(entry: &Value) -> InterfaceIfacSettings {
@@ -1626,7 +1657,10 @@ fn ifac_settings_from_args(
                 .as_deref()
                 .map(|s| sanitize_text(s, 256))
                 .filter(|s| !s.is_empty()),
-            ifac_size: existing.and_then(|settings| settings.ifac_size),
+            ifac_size: fields
+                .ifac_size
+                .filter(|size| (1..=64).contains(size))
+                .or_else(|| existing.and_then(|settings| settings.ifac_size)),
         },
         Some(false) => InterfaceIfacSettings::default(),
         None => existing.cloned().unwrap_or_default(),
@@ -1635,9 +1669,9 @@ fn ifac_settings_from_args(
 
 fn cfg_rnode_mode(entry: &Value) -> String {
     let raw = cfg_str(entry, "mode").or_else(|| cfg_str(entry, "interface_mode"));
-    crate::rns_config::normalize_rnode_interface_mode(raw.as_deref())
-        .unwrap_or(crate::rns_config::RNODE_DEFAULT_INTERFACE_MODE)
-        .to_string()
+    // Unrecognized hand-edited modes pass through verbatim; runtime spawn maps
+    // them to Full via rnode_runtime_mode without rewriting the config value.
+    crate::rns_config::rnode_interface_mode_passthrough(raw.as_deref()).to_string()
 }
 
 fn cfg_csv(entry: &Value, key: &str) -> Option<Vec<String>> {
@@ -1787,6 +1821,7 @@ fn tcp_server_config_from_entry(entry: &Value) -> Option<EditableInterfaceConfig
         name: cfg_str(entry, "name")?,
         listen_ip: cfg_str(entry, "listen_ip").unwrap_or_else(default_tcp_server_ip),
         listen_port: cfg_u16(entry, "listen_port").unwrap_or_else(default_tcp_server_port),
+        ifac: ifac_settings_from_entry(entry),
     })
 }
 
@@ -1812,6 +1847,7 @@ fn backbone_server_config_from_entry(entry: &Value) -> Option<EditableInterfaceC
         listen_port: cfg_u16(entry, "listen_port").unwrap_or_else(default_backbone_server_port),
         prefer_ipv6: cfg_bool(entry, "prefer_ipv6"),
         device: cfg_str(entry, "device"),
+        ifac: ifac_settings_from_entry(entry),
     })
 }
 
@@ -2147,12 +2183,14 @@ async fn spawn_editable_interface(
             name,
             listen_ip,
             listen_port,
+            ifac,
         } => {
-            let id = rns_runtime::reticulum::spawn_tcp_server_runtime(
+            let id = rns_runtime::reticulum::spawn_tcp_server_runtime_with_ifac(
                 &handle,
                 name,
                 listen_ip,
                 *listen_port,
+                ifac.runtime_config(),
             )
             .await?;
             Ok(format!("TCP server listening (#{id})"))
@@ -2189,14 +2227,16 @@ async fn spawn_editable_interface(
             listen_port,
             prefer_ipv6,
             device,
+            ifac,
         } => {
-            let id = rns_runtime::reticulum::spawn_backbone_server_runtime(
+            let id = rns_runtime::reticulum::spawn_backbone_server_runtime_with_ifac(
                 &handle,
                 name,
                 listen_ip,
                 *listen_port,
                 *prefer_ipv6,
                 device.as_deref(),
+                ifac.runtime_config(),
             )
             .await?;
             Ok(format!("Backbone server listening (#{id})"))
@@ -3126,12 +3166,12 @@ pub async fn update_lora_interface(
         airtime_limit_short: args.airtime_limit_short,
         airtime_limit_long: args.airtime_limit_long,
     })?;
-    let mode = normalize_lora_interface_mode(args.mode.as_deref())?;
+    let ui_mode = normalize_lora_interface_mode(args.mode.as_deref())?;
     let public_map_update =
         resolve_rnode_public_map_update(&state_arc, args.public_map.as_ref()).await?;
 
     let config_dir = active_rns_config_dir(&state_arc);
-    let (old_runtime, old_config_content, config_written) =
+    let (old_runtime, old_config_content, config_written, mode) =
         with_rns_config_lock(&state_arc, || {
             let old_entry = find_config_interface(&config_dir, "rnode", &old_name)
                 .ok_or_else(|| AppError::bad_request("Interface not found"))?;
@@ -3144,6 +3184,16 @@ pub async fn update_lora_interface(
                 },
                 RnodePublicMapUpdate::Set(public_map) => public_map.clone(),
             };
+            // The dropdown coerces unknown modes to the default, so a default
+            // submission over a hand-edited mode is not a deliberate change.
+            let existing_mode = cfg_rnode_mode(&old_entry);
+            let mode = if ui_mode == crate::rns_config::RNODE_DEFAULT_INTERFACE_MODE
+                && crate::rns_config::normalize_rnode_interface_mode(Some(&existing_mode)).is_none()
+            {
+                existing_mode
+            } else {
+                ui_mode.to_string()
+            };
             let old_config_content =
                 crate::rns_config::read_config(&config_dir).unwrap_or_default();
             let config_written = crate::rns_config::update_rnode_interface(
@@ -3152,7 +3202,7 @@ pub async fn update_lora_interface(
                 crate::rns_config::RnodeInterfaceArgs {
                     name: &name,
                     port: &port,
-                    mode: Some(mode),
+                    mode: Some(&mode),
                     frequency: radio.frequency,
                     bandwidth: radio.bandwidth,
                     spreading_factor: radio.spreading_factor,
@@ -3165,7 +3215,7 @@ pub async fn update_lora_interface(
                     public_map: public_map.config_args(),
                 },
             );
-            Ok::<_, AppError>((old_runtime, old_config_content, config_written))
+            Ok::<_, AppError>((old_runtime, old_config_content, config_written, mode))
         })?;
 
     if !config_written {
@@ -3183,7 +3233,7 @@ pub async fn update_lora_interface(
     let new_runtime = EditableInterfaceConfig::RNode {
         name: name.clone(),
         port,
-        mode: mode.to_string(),
+        mode,
         frequency: radio.frequency,
         bandwidth: radio.bandwidth,
         spreading_factor: radio.spreading_factor,
@@ -4072,6 +4122,8 @@ pub struct TcpServerArgs {
     pub listen_port: u16,
     #[serde(default = "default_tcp_server_ip")]
     pub listen_ip: String,
+    #[serde(flatten)]
+    ifac: InterfaceIfacCommandFields,
 }
 
 fn default_tcp_server_name() -> String {
@@ -4093,10 +4145,17 @@ pub async fn add_tcp_server(
     let name = sanitize_text(&args.name, 64);
     let listen_ip = sanitize_text(&args.listen_ip, 64);
     let listen_port = args.listen_port;
+    let ifac = ifac_settings_from_args(&args.ifac, None);
 
     let config_dir = active_rns_config_dir(&state_arc);
     if !with_rns_config_lock(&state_arc, || {
-        crate::rns_config::add_tcp_server(&config_dir, &name, listen_port, &listen_ip)
+        crate::rns_config::add_tcp_server_with_ifac(
+            &config_dir,
+            &name,
+            listen_port,
+            &listen_ip,
+            ifac.config_args(),
+        )
     }) {
         emit_op_status_broadcast(
             &state_arc,
@@ -4115,6 +4174,7 @@ pub async fn add_tcp_server(
     let st = Arc::clone(&state_arc);
     let name_clone = name.clone();
     let listen_ip_clone = listen_ip.clone();
+    let ifac_clone = ifac.clone();
     let config_dir = config_dir.clone();
     tokio::spawn(async move {
         let rns_handle = st
@@ -4124,11 +4184,12 @@ pub async fn add_tcp_server(
             .and_then(|r| r.as_ref().map(|mgr| mgr.handle.clone()));
         if let Some(handle) = rns_handle {
             teardown_live_interface_by_name(&st, &name_clone, None).await;
-            match rns_runtime::reticulum::spawn_tcp_server_runtime(
+            match rns_runtime::reticulum::spawn_tcp_server_runtime_with_ifac(
                 &handle,
                 &name_clone,
                 &listen_ip_clone,
                 listen_port,
+                ifac_clone.runtime_config(),
             )
             .await
             {
@@ -4199,6 +4260,8 @@ pub struct UpdateTcpServerArgs {
     pub listen_port: u16,
     #[serde(default = "default_tcp_server_ip")]
     pub listen_ip: String,
+    #[serde(flatten)]
+    ifac: InterfaceIfacCommandFields,
 }
 
 #[tauri::command]
@@ -4223,22 +4286,25 @@ pub async fn update_tcp_server(
     }
 
     let config_dir = active_rns_config_dir(&state_arc);
-    let (old_runtime, old_config_content, config_written) =
+    let (old_runtime, old_config_content, config_written, ifac) =
         with_rns_config_lock(&state_arc, || {
             let old_entry = find_config_interface(&config_dir, "tcp_server", &old_name)
                 .ok_or_else(|| AppError::bad_request("Interface not found"))?;
             let old_runtime = tcp_server_config_from_entry(&old_entry)
                 .ok_or_else(|| AppError::bad_request("Invalid TCP server config"))?;
+            let existing_ifac = ifac_settings_from_entry(&old_entry);
+            let ifac = ifac_settings_from_args(&args.ifac, Some(&existing_ifac));
             let old_config_content =
                 crate::rns_config::read_config(&config_dir).unwrap_or_default();
-            let config_written = crate::rns_config::update_tcp_server(
+            let config_written = crate::rns_config::update_tcp_server_with_ifac(
                 &config_dir,
                 &old_name,
                 &name,
                 args.listen_port,
                 &listen_ip,
+                ifac.config_args(),
             );
-            Ok::<_, AppError>((old_runtime, old_config_content, config_written))
+            Ok::<_, AppError>((old_runtime, old_config_content, config_written, ifac))
         })?;
 
     if !config_written {
@@ -4257,6 +4323,7 @@ pub async fn update_tcp_server(
         name: name.clone(),
         listen_ip,
         listen_port: args.listen_port,
+        ifac,
     };
     emit_hub_interfaces(
         &state_arc,
@@ -4718,6 +4785,8 @@ pub struct BackboneServerArgs {
     pub prefer_ipv6: bool,
     #[serde(default)]
     pub device: Option<String>,
+    #[serde(flatten)]
+    ifac: InterfaceIfacCommandFields,
 }
 
 #[tauri::command]
@@ -4735,15 +4804,17 @@ pub async fn add_backbone_server(
         .map(|s| sanitize_text(s, 64))
         .filter(|s| !s.is_empty());
 
+    let ifac = ifac_settings_from_args(&args.ifac, None);
     let config_dir = active_rns_config_dir(&state_arc);
     if !with_rns_config_lock(&state_arc, || {
-        crate::rns_config::add_backbone_server(
+        crate::rns_config::add_backbone_server_with_ifac(
             &config_dir,
             &name,
             listen_port,
             &listen_ip,
             args.prefer_ipv6,
             device.as_deref(),
+            ifac.config_args(),
         )
     }) {
         emit_op_status_broadcast(
@@ -4765,6 +4836,7 @@ pub async fn add_backbone_server(
     let listen_ip_clone = listen_ip.clone();
     let device_clone = device.clone();
     let prefer_ipv6 = args.prefer_ipv6;
+    let ifac_clone = ifac.clone();
     let config_dir = config_dir.clone();
     tokio::spawn(async move {
         let rns_handle = st
@@ -4774,13 +4846,14 @@ pub async fn add_backbone_server(
             .and_then(|r| r.as_ref().map(|mgr| mgr.handle.clone()));
         if let Some(handle) = rns_handle {
             teardown_live_interface_by_name(&st, &name_clone, None).await;
-            match rns_runtime::reticulum::spawn_backbone_server_runtime(
+            match rns_runtime::reticulum::spawn_backbone_server_runtime_with_ifac(
                 &handle,
                 &name_clone,
                 &listen_ip_clone,
                 listen_port,
                 prefer_ipv6,
                 device_clone.as_deref(),
+                ifac_clone.runtime_config(),
             )
             .await
             {
@@ -4864,6 +4937,8 @@ pub struct UpdateBackboneServerArgs {
     #[serde(default)]
     pub prefer_ipv6: bool,
     pub device: Option<String>,
+    #[serde(flatten)]
+    ifac: InterfaceIfacCommandFields,
 }
 
 #[tauri::command]
@@ -4893,15 +4968,17 @@ pub async fn update_backbone_server(
     }
 
     let config_dir = active_rns_config_dir(&state_arc);
-    let (old_runtime, old_config_content, config_written) =
+    let (old_runtime, old_config_content, config_written, ifac) =
         with_rns_config_lock(&state_arc, || {
             let old_entry = find_config_interface(&config_dir, "backbone_server", &old_name)
                 .ok_or_else(|| AppError::bad_request("Interface not found"))?;
             let old_runtime = backbone_server_config_from_entry(&old_entry)
                 .ok_or_else(|| AppError::bad_request("Invalid Backbone server config"))?;
+            let existing_ifac = ifac_settings_from_entry(&old_entry);
+            let ifac = ifac_settings_from_args(&args.ifac, Some(&existing_ifac));
             let old_config_content =
                 crate::rns_config::read_config(&config_dir).unwrap_or_default();
-            let config_written = crate::rns_config::update_backbone_server(
+            let config_written = crate::rns_config::update_backbone_server_with_ifac(
                 &config_dir,
                 &old_name,
                 &name,
@@ -4909,8 +4986,9 @@ pub async fn update_backbone_server(
                 &listen_ip,
                 args.prefer_ipv6,
                 device.as_deref(),
+                ifac.config_args(),
             );
-            Ok::<_, AppError>((old_runtime, old_config_content, config_written))
+            Ok::<_, AppError>((old_runtime, old_config_content, config_written, ifac))
         })?;
 
     if !config_written {
@@ -4931,6 +5009,7 @@ pub async fn update_backbone_server(
         listen_port: args.listen_port,
         prefer_ipv6: args.prefer_ipv6,
         device,
+        ifac,
     };
     emit_hub_interfaces(
         &state_arc,
@@ -5042,6 +5121,18 @@ mod backbone_args_tests {
         assert_eq!(v.name, "Backbone Server");
         assert!(!v.prefer_ipv6);
         assert!(v.device.is_none());
+    }
+
+    #[test]
+    fn cfg_rnode_mode_passes_unrecognized_mode_through() {
+        let entry = serde_json::json!({ "name": "Radio", "mode": "internal" });
+        assert_eq!(cfg_rnode_mode(&entry), "internal");
+
+        let entry = serde_json::json!({ "name": "Radio", "mode": "gw" });
+        assert_eq!(cfg_rnode_mode(&entry), "gateway");
+
+        let entry = serde_json::json!({ "name": "Radio" });
+        assert_eq!(cfg_rnode_mode(&entry), "full");
     }
 
     #[test]
