@@ -4,53 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-visual">
     <meta name="theme-color" content="#FAF7F3">
-    <script src="/static/js/theme.js"></script>
-    <!-- Safe-area insets (--sat/--sab/--sal/--sar) are defined in 00-tokens.css
-         via env(safe-area-inset-*). iOS feeds env() through viewport-fit=cover +
-         WKWebView contentInsetAdjustmentBehavior=.never; Android MainActivity
-         injects pixel values via evaluateJavascript; desktop falls back to 0. -->
     <title>Ratspeak - Dashboard</title>
-    <!--    <link rel="stylesheet" href="/static/fonts/fonts.css">-->
-    <!--    <link rel="stylesheet" href="/static/style.css">-->
 </head>
 <body>
 
 
 <script type="module" src="/src/dashboard.jsx"></script>
-<!-- Synchronous load order matters: state/constants/setup/nav before any caller
-     of their module-level functions; tauri_events.js last (wires everything above).
-     Reordering breaks fresh boots silently. -->
-<!--<script src="/static/js/state.js"></script>-->
-<!--<script src="/static/js/constants.js"></script>-->
-<!--<script src="/static/js/no_pinch.js"></script>-->
-<!--<script src="/static/js/setup.js"></script>-->
-<!--<script src="/static/js/nav.js"></script>-->
-<!--<script src="/static/js/gestures.js"></script>-->
-<!--<script src="/static/js/view_stack.js"></script>-->
-
-<!--<script src="/static/js/peers_cache.js"></script>-->
-<!--<script src="/static/js/connections.js"></script>-->
-<!--<script src="/static/js/peers.js"></script>-->
-<!--<script src="/static/js/toasts.js"></script>-->
-<!--<script src="/static/js/dialogs.js"></script>-->
-<!--<script src="/static/js/action_popover.js"></script>-->
-<!--<script src="/static/js/ui_shared.js"></script>-->
-<!--<script src="/static/js/events.js"></script>-->
-<!--<script src="/static/js/activity.js"></script>-->
-<!--<script src="/static/js/health.js"></script>-->
-<!--<script src="/static/js/modals.js"></script>-->
-<!--<script src="/static/js/emoji_data.js"></script>-->
-<!--<script src="/static/js/emoji_picker.js"></script>-->
-<!--<script src="/static/js/voice_ringtones.js"></script>-->
-<!--<script src="/static/js/vendor/jsQR.js"></script>-->
-<!--<script src="/static/js/contact_card.js"></script>-->
-<!--<script src="/static/js/lxmf.js"></script>-->
-<!--<script src="/static/js/propagation.js"></script>-->
-<!--<script src="/static/js/settings.js"></script>-->
-<!--<script src="/static/js/identity.js"></script>-->
-<!--<script src="/static/js/confetti.js"></script>-->
-<!--<script src="/static/js/games_tab.js"></script>-->
-<!--<script src="/static/js/tauri_events.js"></script>-->
-<!--<script src="/static/js/init_dom_handlers.js"></script>-->
 </body>
 </html>

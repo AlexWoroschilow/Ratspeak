@@ -19,7 +19,7 @@ export class LoRaSettings extends React.Component<LoRaSettingsProps, LoRaSetting
             <div id="rnode-step-2">
                 <div className="modal-field">
                     <label>Name</label>
-                    <input type="text" id="rnode-iface-name" className="modal-input" placeholder="My LoRa Radio" maxLength="32" autoCorrect="off" autoCapitalize="none"
+                    <input type="text" id="rnode-iface-name" className="modal-input" placeholder="My LoRa Radio" maxLength={32} autoCorrect="off" autoCapitalize="none"
                            spellCheck="false"/>
                 </div>
                 <div className="modal-field">

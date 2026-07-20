@@ -233,7 +233,10 @@ fn open_external_url(url: String) -> Result<(), String> {
         Err("Android external links are opened through the native WebView bridge".into())
     }
 
-    #[cfg(all(not(any(target_os = "android", target_os = "ios")), target_os = "macos"))]
+    #[cfg(all(
+        not(any(target_os = "android", target_os = "ios")),
+        target_os = "macos"
+    ))]
     {
         std::process::Command::new("open")
             .arg(&clean)
@@ -242,7 +245,10 @@ fn open_external_url(url: String) -> Result<(), String> {
             .map_err(|e| format!("Failed to open link: {e}"))
     }
 
-    #[cfg(all(not(any(target_os = "android", target_os = "ios")), target_os = "windows"))]
+    #[cfg(all(
+        not(any(target_os = "android", target_os = "ios")),
+        target_os = "windows"
+    ))]
     {
         std::process::Command::new("rundll32")
             .args(["url.dll,FileProtocolHandler", &clean])
@@ -271,8 +277,8 @@ fn open_external_url_ios(url: &str) -> Result<(), String> {
     use std::ffi::CString;
 
     unsafe {
-        let ns_string_class = AnyClass::get(c"NSString")
-            .ok_or_else(|| "NSString class not found".to_string())?;
+        let ns_string_class =
+            AnyClass::get(c"NSString").ok_or_else(|| "NSString class not found".to_string())?;
         let ns_url_class =
             AnyClass::get(c"NSURL").ok_or_else(|| "NSURL class not found".to_string())?;
         let ui_app_class = AnyClass::get(c"UIApplication")
@@ -404,8 +410,8 @@ unsafe extern "C" {}
 
 #[cfg(target_os = "ios")]
 fn save_image_to_photos_ios(_filename: &str, mime: &str, data_base64: &str) -> Result<(), String> {
-    use base64::Engine;
     use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine;
     use block2::RcBlock;
     use objc2::msg_send;
     use objc2::runtime::{AnyClass, AnyObject};
@@ -566,7 +572,13 @@ pub fn run() {
         tracing::info!("WebKitGTK < 2.46: disabled DMA-BUF renderer for Wayland startup");
     }
 
-    let builder = tauri::Builder::default().plugin(tauri_plugin_notification::init());
+    let builder = tauri::Builder::default()
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(tauri_plugin_log::log::LevelFilter::Info)
+                .build(),
+        )
+        .plugin(tauri_plugin_notification::init());
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {

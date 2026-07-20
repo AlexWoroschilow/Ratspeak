@@ -38,7 +38,7 @@ export class NetworkRadio extends React.Component<NetworkRadioProps, NetworkRadi
 
                 <div id="rnode-step-1">
 
-                    <details style={{marginTop: "var(--space-3)"}} open="">
+                    <details style={{marginTop: "var(--space-3)"}} open={false}>
                         <summary className="rs-dialog-advanced-summary">Bluetooth</summary>
                         <div style={{paddingTop: "var(--space-2)"}}>
                             <Bluetooth>
@@ -47,7 +47,7 @@ export class NetworkRadio extends React.Component<NetworkRadioProps, NetworkRadi
                         </div>
                     </details>
 
-                    <details style={{marginTop: "var(--space-3)"}} open="">
+                    <details style={{marginTop: "var(--space-3)"}} open={false}>
                         <summary className="rs-dialog-advanced-summary">Serial</summary>
                         <div style={{paddingTop: "var(--space-2)"}}>
                             <Serial>
@@ -56,7 +56,7 @@ export class NetworkRadio extends React.Component<NetworkRadioProps, NetworkRadi
                         </div>
                     </details>
 
-                    <details style={{marginTop: "var(--space-3)"}} open="">
+                    <details style={{marginTop: "var(--space-3)"}} open={false}>
                         <summary className="rs-dialog-advanced-summary">USB</summary>
                         <div style={{paddingTop: "var(--space-2)"}}>
                             <USB>
@@ -66,7 +66,7 @@ export class NetworkRadio extends React.Component<NetworkRadioProps, NetworkRadi
                     </details>
 
 
-                    <details style={{marginTop: "var(--space-3)"}} open="">
+                    <details style={{marginTop: "var(--space-3)"}} open={false}>
                         <summary className="rs-dialog-advanced-summary">TCP</summary>
                         <div style={{paddingTop: "var(--space-2)"}}>
                             <TCP>

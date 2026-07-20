@@ -38,6 +38,8 @@
   "dependencies": {
     "@creativebulma/bulma-tooltip": "^1.2.0",
     "@swc/core": "^1.15.43",
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-log": "^2.9.0",
     "axios": "^1.18.1",
     "buffer": "^6.0.3",
     "bulma": "^1.0.4",

@@ -15,6 +15,8 @@ interface SettingsState {
     screen: "general" | "inbox" | "system" | "privacy" | "identity" | "network";
 }
 
+type Screen = SettingsState['screen']
+
 export class Settings extends React.Component<SettingsProps, SettingsState> {
     constructor(props: SettingsProps) {
         super(props);
@@ -25,7 +27,7 @@ export class Settings extends React.Component<SettingsProps, SettingsState> {
     }
 
 
-    route(screen) {
+    route(screen: Screen) {
         this.setState({
             screen: screen
         })

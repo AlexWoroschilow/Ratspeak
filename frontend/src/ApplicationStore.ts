@@ -1,4 +1,7 @@
 import {makeAutoObservable} from "mobx";
+import {invoke} from '@tauri-apps/api/core';
+import {info} from "@tauri-apps/plugin-log";
+
 //
 // Based on the investigation of the `@dashboard/static/js/setup.js` and `@dashboard/static/js/tauri_events.js` files, here are the `RS.invoke` methods related to the initial application setup:
 //
@@ -68,19 +71,46 @@ export class ApplicationStore {
         makeAutoObservable(this);
     }
 
-    isSetupRequired(): boolean {
-        return false
+    /**
+     *  `api_setup_status`: Checks if the application requires initial setup
+     * (e.g., if no identity exists). Returns a `needs_setup` flag.
+     *
+     */
+    async isSetupRequired(): Promise<boolean> {
+        return new Promise((resolve: any, reject) => {
+            invoke?.('api_setup_status')
+                .then(((data: SetupStatusResponse) => {
+                    return resolve(data.needs_setup);
+                }) as any)
+                .catch((error: any) => {
+                    return reject(new Error("Failed: api_setup_status"))
+                });
+        });
     }
 
-    setupRestart() {
-
+    /**
+     * `api_setup_restart`: Triggers a restart of the core service to apply
+     * the setup configuration and transition to the main dashboard.
+     *
+     */
+    doSetupRestart(): Promise<boolean> {
+        return new Promise((resolve, reject) => {
+            return resolve(true);
+        });
     }
 
-    setupComplete(): SetupCompleteResponse {
-        return {
-            ok: false,
-            error: "Not Implemented"
-        }
+    /**
+     * `api_setup_complete`: Finalizes the setup process.
+     * It can be called during identity generation or at the final step to save the user's display name and lock in the configuration.
+     *
+     */
+    async doSetupComplete(): Promise<SetupCompleteResponse> {
+        return new Promise((resolve, reject) => {
+            return resolve({
+                ok: false,
+                error: "Not Implemented",
+            } as SetupCompleteResponse);
+        });
     }
 }
 

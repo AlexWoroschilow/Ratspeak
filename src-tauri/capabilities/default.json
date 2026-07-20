@@ -1,7 +1,9 @@
 {
   "identifier": "default",
   "description": "Default capabilities for the main window",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "local": true,
   "permissions": [
     "core:default",
@@ -17,6 +19,7 @@
     "core:app:default",
     "notification:allow-notify",
     "notification:allow-request-permission",
-    "notification:allow-is-permission-granted"
+    "notification:allow-is-permission-granted",
+    "log:default"
   ]
 }

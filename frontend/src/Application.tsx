@@ -1,6 +1,7 @@
 "use strict";
 import React from "react";
-import {inject, observer, Provider} from "mobx-react";
+import {inject, Provider} from "mobx-react";
+import {info,} from '@tauri-apps/plugin-log';
 
 import {Layout} from "./Application/Layout";
 import {HashRouter, Route, Routes} from "react-router-dom";
@@ -29,46 +30,82 @@ interface ApplicationProps {
 }
 
 interface ApplicationState {
+    isSetupRequired?: boolean;
+    error?: string;
 }
 
 
 @inject("store")
 export class Application extends React.Component<ApplicationProps, ApplicationState> {
+    protected store?: ApplicationStore;
+
     constructor(props: ApplicationProps) {
         super(props);
 
-        console.info("??", props.store);
+        this.store = props.store;
+        this.state = {
+            isSetupRequired: undefined,
+            error: undefined,
+        }
+    }
+
+    componentDidMount() {
+        this.store?.isSetupRequired()
+            .then((response: boolean) => {
+                info(`???${response}`);
+                return this.setState({
+                    isSetupRequired: response
+                });
+
+            })
+            .catch((error) => {
+                info(`!!??${error}`);
+                return this.setState({
+                    error: error
+                });
+            });
+
+        return this.setState({
+            error: undefined
+        });
     }
 
     render() {
 
         return <>
-            <Provider store={new ApplicationStore()}>
+            <Provider store={this.store}>
                 <HashRouter>
                     <Routes>
                         <Route element={<Layout/>}>
 
-                            <Route index element={<Dashboard/>}/>
-                            <Route path="setup" element={<Setup/>}/>
-                            <Route path="dashboard" element={<Dashboard/>}/>
-                            <Route path="messages" element={<Messages/>}/>
-                            <Route path="contacts" element={<Contacts/>}/>
-                            <Route path="identity" element={<Identity/>}/>
-                            <Route path="identity" element={<Identity/>}/>
-                            <Route path="identity-import" element={<IdentityImport/>}/>
-                            <Route path="identity-create" element={<IdentityCreate/>}/>
-                            <Route path="identity-hardware" element={<IdentityHardware/>}/>
-                            <Route path="peers" element={<Peers/>}/>
-                            <Route path="network" element={<Network/>}/>
-                            <Route path="network-internet" element={<NetworkInternet/>}/>
-                            <Route path="network-bluetooth" element={<NetworkBluetooth/>}/>
-                            <Route path="network-local" element={<NetworkLocal/>}/>
-                            <Route path="network-radio" element={<NetworkRadio/>}/>
-                            <Route path="network-host" element={<NetworkHost/>}/>
-                            <Route path="settings" element={<Settings/>}/>
+
+                            {(this?.state?.isSetupRequired === true) && <>
+                                <Route index element={<Setup/>}/>
+                            </>}
+
+                            {(this?.state?.isSetupRequired === false) && <>
+                                <Route index element={<Dashboard/>}/>
+                                <Route path="setup" element={<Setup/>}/>
+                                <Route path="dashboard" element={<Dashboard/>}/>
+                                <Route path="messages" element={<Messages/>}/>
+                                <Route path="contacts" element={<Contacts/>}/>
+                                <Route path="identity" element={<Identity/>}/>
+                                <Route path="identity" element={<Identity/>}/>
+                                <Route path="identity-import" element={<IdentityImport/>}/>
+                                <Route path="identity-create" element={<IdentityCreate/>}/>
+                                <Route path="identity-hardware" element={<IdentityHardware/>}/>
+                                <Route path="peers" element={<Peers/>}/>
+                                <Route path="network" element={<Network/>}/>
+                                <Route path="network-internet" element={<NetworkInternet/>}/>
+                                <Route path="network-bluetooth" element={<NetworkBluetooth/>}/>
+                                <Route path="network-local" element={<NetworkLocal/>}/>
+                                <Route path="network-radio" element={<NetworkRadio/>}/>
+                                <Route path="network-host" element={<NetworkHost/>}/>
+                                <Route path="settings" element={<Settings/>}/>
+                            </>}
 
                             <Route path="*" element={
-                                <h3>Not implemented yet</h3>
+                                <h3>{`!!!${this?.state?.error}`}</h3>
                             }/>
 
                         </Route>

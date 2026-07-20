@@ -10,8 +10,10 @@ services:
       - /etc/localtime:/etc/localtime:ro
       - ./frontend:/srv:cached
     ports:
-      - "0.0.0.0:9999:9999"
+      - "9999:9999"
     command: sh -c "npm run dev"
+    network_mode: host
+
   ratspeak:
     restart: "no"
     build:
@@ -22,6 +24,8 @@ services:
       - WAYLAND_DISPLAY=${WAYLAND_DISPLAY}
       - RUST_BACKTRACE=full
       - DISPLAY=${DISPLAY}
+      - WEBKIT_DISABLE_COMPOSITING_MODE=1
+      - WEBKIT_DEBUG=1
       - CI=true
     volumes:
       - /etc/timezone:/etc/timezone:ro
@@ -30,8 +34,8 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix:ro
       - ./:/srv/ratspeak-src/Ratspeak:cached
       - ~/.local/share/:/root/.local/share/
-    tty: true
-    stdin_open: true
-    network_mode: host
     working_dir: /srv/ratspeak-src/Ratspeak/src-tauri
     command: cargo tauri dev
+    network_mode: host
+    stdin_open: true
+    tty: true

@@ -26,14 +26,14 @@ export class NetworkLocal extends React.Component<NetworkLocalProps, NetworkLoca
             </div>
             <div className="bottom-sheet-body"><label className="rs-dialog-field-label">Name</label><input type="text" className="rs-dialog-input" placeholder="Local Network"
                                                                                                            autoCorrect="off" autoCapitalize="none" spellCheck="false"
-                                                                                                           maxLength="64"/>
+                                                                                                           maxLength={64}/>
                 <div className="rs-dialog-field-help">Display name for this interface.</div>
                 <label className="rs-dialog-field-label">Group ID</label><input type="text" className="rs-dialog-input" placeholder="reticulum" autoCorrect="off"
-                                                                                autoCapitalize="none" spellCheck="false" maxLength="63"/>
+                                                                                                               autoCapitalize="none" spellCheck="false" maxLength={63}/>
                 <div className="rs-dialog-field-help">Devices with the same Group ID auto-discover each other; different IDs create isolated subnets on the same physical
                     network.
                 </div>
-                <details style={{marginTop: "var(--space-3)"}} open="">
+                <details style={{marginTop: "var(--space-3)"}} open={false}>
                     <summary className="rs-dialog-advanced-summary">Advanced</summary>
                     <div style={{paddingTop: "var(--space-2)"}}>
                         <label className="rs-dialog-field-label">Discovery Scope</label>

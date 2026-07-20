@@ -82,7 +82,7 @@ export class NetworkInternet extends React.Component<NetworkInternetProps, Netwo
                     </div>
                     <div className="modal-field" id="connect-name-field" style={{display: "none"}}>
                         <label>Name</label>
-                        <input type="text" id="connect-name" className="modal-input" placeholder="Ratspeak Hub" maxLength="32" autoCorrect="off" autoCapitalize="none"
+                        <input type="text" id="connect-name" className="modal-input" placeholder="Ratspeak Hub" maxLength={32} autoCorrect="off" autoCapitalize="none"
                                spellCheck="false"/>
                     </div>
                     <label className="rs-dialog-checkbox-wrap mt-4" id="connect-backbone-row" style={{display: "none"}}>
@@ -96,12 +96,12 @@ export class NetworkInternet extends React.Component<NetworkInternetProps, Netwo
                     <div id="connect-ifac-fields" style={{display: "none"}}>
                         <div className="modal-field">
                             <label>IFAC Network Name</label>
-                            <input type="text" id="connect-ifac-network-name" className="modal-input" placeholder="Optional" maxLength="128" autoCorrect="off"
+                            <input type="text" id="connect-ifac-network-name" className="modal-input" placeholder="Optional" maxLength={128} autoCorrect="off"
                                    autoCapitalize="none" spellCheck="false"/>
                         </div>
                         <div className="modal-field">
                             <label>IFAC Passphrase</label>
-                            <input type="password" id="connect-ifac-passphrase" className="modal-input" placeholder="Required for most IFAC networks" maxLength="256"
+                            <input type="password" id="connect-ifac-passphrase" className="modal-input" placeholder="Required for most IFAC networks" maxLength={256}
                                    autoCorrect="off" autoCapitalize="none" spellCheck="false"/>
                         </div>
                     </div>

@@ -39,7 +39,7 @@ export class NetworkHost extends React.Component<NetworkHostProps, NetworkHostSt
                 </div>
                 <div className="modal-field">
                     <label>Name (optional)</label>
-                    <input type="text" id="host-name" className="modal-input" placeholder="My Server" maxLength="32" autoCorrect="off" autoCapitalize="none"
+                    <input type="text" id="host-name" className="modal-input" placeholder="My Server" maxLength={32} autoCorrect="off" autoCapitalize="none"
                            spellCheck="false"/>
                 </div>
             </div>
