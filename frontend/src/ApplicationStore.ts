@@ -1,6 +1,5 @@
-import {makeAutoObservable} from "mobx";
+import {makeAutoObservable, observable} from "mobx";
 import {invoke} from '@tauri-apps/api/core';
-import {info} from "@tauri-apps/plugin-log";
 import {Peers} from "./ApplicationStore/Peers";
 
 //
@@ -71,9 +70,9 @@ export class ApplicationStore {
     public peers: Peers;
 
     constructor() {
-        makeAutoObservable(this);
-
         this.peers = new Peers(this);
+
+        makeAutoObservable(this);
         makeAutoObservable(this.peers);
     }
 
@@ -84,10 +83,6 @@ export class ApplicationStore {
      */
     async isSetupRequired(): Promise<boolean> {
         return new Promise((resolve: any, reject) => {
-
-            this.peers.getPeers();
-
-
             invoke?.('api_setup_status')
                 .then(((data: SetupStatusResponse) => {
                     return resolve(data.needs_setup);

@@ -36,6 +36,8 @@
 import {ApplicationStore} from "../ApplicationStore";
 import {invoke} from "@tauri-apps/api/core";
 import {listen} from "@tauri-apps/api/event";
+import {makeAutoObservable, observable} from "mobx";
+import {info} from "@tauri-apps/plugin-log";
 
 export interface Peer {
     hash: string;
@@ -129,21 +131,20 @@ export class Peers {
     public statistic?: Statistic;
 
     constructor(store: ApplicationStore) {
+
         this.listeners();
 
         this.getPeers().then((collection: Array<PeerEnriched>) => {
             this.collection = collection;
-        })
+        });
     }
 
     async listeners() {
         await listen<Statistic>("stats_update", (event: { payload: Statistic }) => {
-            this.statistic = event.payload
+            this.statistic = event.payload;
 
-            this.collection = this?.collection?.map?.((peer: Peer) => {
-                return this.enrich(peer)
-            }).filter((peer: PeerEnriched) => {
-                return peer.status == "reachable"
+            this.getPeers().then((collection: Array<PeerEnriched>) => {
+                this.collection = collection;
             });
         });
     }

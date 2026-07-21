@@ -1,8 +1,9 @@
 "use strict";
-import React from "react";
-import {Blockie} from "./Blockie";
+import React, {lazy, Suspense} from "react";
 import {Peer, PeerEnriched} from "../../ApplicationStore/Peers";
 import {PeerInterfaceBadge} from "./PeerNetworkView";
+
+const Blockie = lazy(() => import('./Blockie'));
 
 interface PeersProps {
     peer: PeerEnriched
@@ -12,8 +13,7 @@ interface PeersState {
     test: boolean
 }
 
-export class PeerView extends React.PureComponent<PeersProps, PeersState> {
-
+export default class PeerView extends React.PureComponent<PeersProps, PeersState> {
 
     constructor(props: PeersProps) {
         super(props);
@@ -37,8 +37,7 @@ export class PeerView extends React.PureComponent<PeersProps, PeersState> {
         return displayName;
     }
 
-
-    getAvatar(hashValue: string, size: number = 50) {
+    getAvatar(size: number = 50) {
         var color = 'var(--text-muted)';
         var radius = size / 2;
         return <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}
@@ -55,11 +54,13 @@ export class PeerView extends React.PureComponent<PeersProps, PeersState> {
     render() {
 
         return <>
-            <div className="peers-row [selected] [has-profile-status]" data-hash="{peer_hash}">
+            <div className="peers-row [selected] [has-profile-status]" data-hash={this.props.peer.hash}>
                 <span className={`conn-status-dot status-${this.props.peer?.status}`}></span>
 
                 <div className="peers-row-avatar">
-                    {/*<Blockie seed={this.props.peer.identity_hash} size={50}/>*/}
+                    <Suspense fallback={<div>{this.getAvatar()}</div>}>
+                        <Blockie seed={this.props.peer.identity_hash} size={50}/>
+                    </Suspense>
                 </div>
 
                 <span className="peers-row-main">

@@ -1,10 +1,10 @@
 "use strict";
-import React from "react";
-import {inject} from "mobx-react";
+import React, {lazy, Suspense} from "react";
+import {inject, observer} from "mobx-react"; // or 'mobx-react-lite' for functional components
 import {ApplicationStore} from "../ApplicationStore";
 import {PeerEnriched} from "../ApplicationStore/Peers";
 
-import {PeerView} from "./components/PeerView";
+const PeerView = lazy(() => import('./components/PeerView'));
 
 interface PeersProps {
     store?: ApplicationStore;
@@ -15,10 +15,10 @@ interface PeersState {
 }
 
 @inject("store")
+@observer
 export default class Peers extends React.PureComponent<PeersProps, PeersState> {
 
     render() {
-
 
         return <>
 
@@ -47,7 +47,9 @@ export default class Peers extends React.PureComponent<PeersProps, PeersState> {
                             <div className="peers-list-scroll" id="peers-list-scroll">
                                 <div className="peers-list-body" id="peers-list-body">
                                     {this?.props.store?.peers?.collection?.map?.((peer: PeerEnriched) => (
-                                        <PeerView peer={peer}/>
+                                        <Suspense fallback={<div className="peers-row">Loading...</div>}>
+                                            <PeerView peer={peer}/>
+                                        </Suspense>
                                     ))}
                                 </div>
                             </div>

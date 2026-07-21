@@ -15,7 +15,7 @@ interface BlockieProps {
     className?: string;
 }
 
-export const Blockie: React.FC<BlockieProps> = ({seed, size = 32, className}) => {
+const Blockie: React.FC<BlockieProps> = ({seed, size = 32, className}) => {
     const gridSize = 8;
 
     const {color, bgcolor, spotcolor, grid} = useMemo(() => {
@@ -103,3 +103,5 @@ export const Blockie: React.FC<BlockieProps> = ({seed, size = 32, className}) =>
         </svg>
     );
 };
+
+export default Blockie;
