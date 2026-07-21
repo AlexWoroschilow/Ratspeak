@@ -33,7 +33,39 @@
 // *   `dashboard/static/js/tauri_events.js`: Listens for real-time network events (like new peers or hop updates) and updates the peer snapshot.
 //
 //
+import {ApplicationStore, SetupStatusResponse} from "../ApplicationStore";
+import {invoke} from "@tauri-apps/api/core";
+import {info} from "@tauri-apps/plugin-log";
+
+export interface Peer {
+    hash: string;
+    iface: string;
+    identity_hash: string;
+    telephony_hash: string;
+    last_seen: number | null;
+    first_seen: number | null;
+    display_name: string;
+    profile_status: string;
+    is_contact: boolean;
+    last_interface: string;
+    services: string[];
+}
+
 export class Peers {
-    constructor() {
+    constructor(store: ApplicationStore) {
+    }
+
+
+    /**
+     * `api_get_peers_snapshot`: Retrieves a complete snapshot of all known peers in the Reticulum network, including their hashes, hop counts, and last-seen timestamps.
+     */
+    async getPeers(): Promise<Peer[]> {
+        return new Promise((resolve, reject) => {
+            invoke<Peer[]>('api_get_peers_snapshot')
+                .then(resolve)
+                .catch((error: any) => {
+                    return reject(new Error("Failed: api_get_peers_snapshot"))
+                });
+        });
     }
 }

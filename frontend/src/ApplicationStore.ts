@@ -1,6 +1,7 @@
 import {makeAutoObservable} from "mobx";
 import {invoke} from '@tauri-apps/api/core';
 import {info} from "@tauri-apps/plugin-log";
+import {Peers} from "./ApplicationStore/Peers";
 
 //
 // Based on the investigation of the `@dashboard/static/js/setup.js` and `@dashboard/static/js/tauri_events.js` files, here are the `RS.invoke` methods related to the initial application setup:
@@ -67,8 +68,13 @@ export interface StartupProgressResponse {
 
 export class ApplicationStore {
 
+    public peers: Peers;
+
     constructor() {
         makeAutoObservable(this);
+
+        this.peers = new Peers(this);
+        makeAutoObservable(this.peers);
     }
 
     /**
@@ -78,6 +84,10 @@ export class ApplicationStore {
      */
     async isSetupRequired(): Promise<boolean> {
         return new Promise((resolve: any, reject) => {
+
+            this.peers.getPeers();
+
+
             invoke?.('api_setup_status')
                 .then(((data: SetupStatusResponse) => {
                     return resolve(data.needs_setup);

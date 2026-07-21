@@ -1,15 +1,61 @@
 "use strict";
 import React from "react";
+import {inject} from "mobx-react";
+import {ApplicationStore} from "../ApplicationStore";
+import {info} from "@tauri-apps/plugin-log";
+import {Peer} from "../ApplicationStore/Peers";
 
 interface PeersProps {
+    store?: ApplicationStore;
 }
 
 interface PeersState {
+    collection: Array<Peer>
 }
 
+@inject("store")
 export class Peers extends React.Component<PeersProps, PeersState> {
+
+    protected store?: ApplicationStore;
+
     constructor(props: PeersProps) {
         super(props);
+
+        info(`${props.store}`);
+        this.store = props?.store;
+    }
+
+    componentDidMount() {
+        this?.store?.peers?.getPeers?.()
+            .then((collection: Peer[]) => {
+                collection.forEach((peer: Peer) => {
+                    info(`${peer.profile_status}`)
+
+                });
+
+                this.setState({
+                    collection: collection
+                });
+            });
+
+    }
+
+    getShortHash(fullHash: string, front: number = 8, back: number = 4) {
+        if (!fullHash) return '';
+        front = front || 8;
+        back = back || 4;
+        if (fullHash.length <= front + back + 1) return fullHash;
+        return fullHash.substring(0, front) + '\u2026' + fullHash.slice(-back);
+    }
+
+    getPeerName(peer: Peer, truncate = true): string {
+        if (!peer) return '';
+        let displayName = peer.display_name || this.getShortHash(peer.hash, 8, 4);
+        // Apply truncation logic consistent with the UI (line 378)
+        if (truncate && displayName.length > 40) {
+            displayName = displayName.substring(0, 40) + '\u2026';
+        }
+        return displayName;
     }
 
     render() {
@@ -39,7 +85,31 @@ export class Peers extends React.Component<PeersProps, PeersState> {
                                 </div>
                             </div>
                             <div className="peers-list-scroll" id="peers-list-scroll">
-                                <div className="peers-list-body" id="peers-list-body"></div>
+                                <div className="peers-list-body" id="peers-list-body">
+                                    {this?.state?.collection?.map((peer: Peer) => (<>
+                                        <div className="peers-row [selected] [has-profile-status]" data-hash="{peer_hash}">
+                                            <span className="conn-status-dot status-{status}"></span>
+
+                                            <div className="peers-row-avatar">
+                                                {/*{peer}*/}
+                                            </div>
+
+                                            <span className="peers-row-main">
+                                                <span className="peers-row-name [is-hash]">
+                                                    {this.getPeerName(peer)}
+                                                </span>
+                                                <span className="peers-row-status" title={`${peer?.profile_status}`}>
+                                                    {peer?.profile_status}
+                                                </span>
+                                            </span>
+                                            <span className="peers-row-meta">
+                                                <span className="peers-iface-badge" title="Live via {interface_name}">
+                                                    {peer.iface}
+                                                </span>
+                                            </span>
+                                        </div>
+                                    </>))}
+                                </div>
                             </div>
                         </div>
                         <div className="peers-detail-panel" id="peers-detail-panel">
