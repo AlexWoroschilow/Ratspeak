@@ -3,6 +3,7 @@ import React from "react";
 import {inject} from "mobx-react";
 import {ApplicationStore} from "../ApplicationStore";
 import {PeerEnriched} from "../ApplicationStore/Peers";
+
 import {PeerView} from "./components/PeerView";
 
 interface PeersProps {
@@ -14,25 +15,10 @@ interface PeersState {
 }
 
 @inject("store")
-export class Peers extends React.Component<PeersProps, PeersState> {
-
-    protected store?: ApplicationStore;
-
-    constructor(props: PeersProps) {
-        super(props);
-        this.store = props?.store;
-    }
-
-    componentDidMount() {
-        this?.store?.peers?.getPeers?.()
-            .then((collection: PeerEnriched[]) => {
-                this.setState({
-                    collection: collection
-                });
-            });
-    }
+export default class Peers extends React.PureComponent<PeersProps, PeersState> {
 
     render() {
+
 
         return <>
 
@@ -60,9 +46,9 @@ export class Peers extends React.Component<PeersProps, PeersState> {
                             </div>
                             <div className="peers-list-scroll" id="peers-list-scroll">
                                 <div className="peers-list-body" id="peers-list-body">
-                                    {this?.state?.collection?.map((peer: PeerEnriched) => (<>
+                                    {this?.props.store?.peers?.collection?.map?.((peer: PeerEnriched) => (
                                         <PeerView peer={peer}/>
-                                    </>))}
+                                    ))}
                                 </div>
                             </div>
                         </div>

@@ -12,20 +12,11 @@ interface PeersState {
     test: boolean
 }
 
-export class PeerView extends React.Component<PeersProps, PeersState> {
+export class PeerView extends React.PureComponent<PeersProps, PeersState> {
 
 
     constructor(props: PeersProps) {
         super(props);
-    }
-
-    componentDidMount() {
-        const timeout = setTimeout(() => {
-            clearTimeout(timeout);
-            return this.setState({
-                test: true
-            });
-        }, Math.round(Math.random() * 1000));
     }
 
     getShortHash(fullHash: string, front: number = 8, back: number = 4) {
@@ -68,26 +59,19 @@ export class PeerView extends React.Component<PeersProps, PeersState> {
                 <span className={`conn-status-dot status-${this.props.peer?.status}`}></span>
 
                 <div className="peers-row-avatar">
-                    {(this?.state?.test == undefined) && <>
-                        {this.getAvatar(this.props.peer.identity_hash)}
-                    </>}
-
-                    {(this?.state?.test == true) && <>
-                        <Blockie seed={this.props.peer.identity_hash} size={50}/>
-                    </>}
-
+                    {/*<Blockie seed={this.props.peer.identity_hash} size={50}/>*/}
                 </div>
 
                 <span className="peers-row-main">
                     <span className="peers-row-name [is-hash]">
                         {this.getPeerName(this.props.peer)}
-
                     </span>
                     <span className="peers-row-status" title={`${this.props.peer?.profile_status}`}>
                         {this.props.peer?.profile_status}
                     </span>
                 </span>
                 <span className="peers-row-meta">
+                    Hops: {this?.props?.peer?.hops}
                     <div className="peer-meta">
                         <PeerInterfaceBadge peer={this.props.peer}/>
                     </div>

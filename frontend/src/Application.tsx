@@ -9,7 +9,9 @@ import {Dashboard} from "./Application/Dashboard";
 import {Messages} from "./Application/Messages";
 import {Contacts} from "./Application/Contacts";
 import {Identity} from "./Application/Identity";
-import {Peers} from "./Application/Peers";
+
+const Peers = React.lazy(() => import("./Application/Peers"));
+
 import {Network} from "./Application/Network";
 import {Settings} from "./Application/Settings";
 import {IdentityImport} from "./Application/IdentityImport";
@@ -94,7 +96,11 @@ export class Application extends React.Component<ApplicationProps, ApplicationSt
                                 <Route path="identity-import" element={<IdentityImport/>}/>
                                 <Route path="identity-create" element={<IdentityCreate/>}/>
                                 <Route path="identity-hardware" element={<IdentityHardware/>}/>
-                                <Route path="peers" element={<Peers/>}/>
+                                <Route path="peers" element={
+                                    <React.Suspense fallback={<div className="peers-row-loading">Loading...</div>}>
+                                        <Peers/>
+                                    </React.Suspense>
+                                }/>
                                 <Route path="network" element={<Network/>}/>
                                 <Route path="network-internet" element={<NetworkInternet/>}/>
                                 <Route path="network-bluetooth" element={<NetworkBluetooth/>}/>

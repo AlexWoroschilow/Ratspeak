@@ -33,9 +33,9 @@
 // *   `dashboard/static/js/tauri_events.js`: Listens for real-time network events (like new peers or hop updates) and updates the peer snapshot.
 //
 //
-import {ApplicationStore, SetupStatusResponse} from "../ApplicationStore";
+import {ApplicationStore} from "../ApplicationStore";
 import {invoke} from "@tauri-apps/api/core";
-import {info} from "@tauri-apps/plugin-log";
+import {listen} from "@tauri-apps/api/event";
 
 export interface Peer {
     hash: string;
@@ -62,10 +62,91 @@ export interface PeerEnriched extends Peer {
     via?: string | null;
 }
 
+export interface Statistic {
+    timestamp: number;
+    connected: boolean;
+    interface_stats: {
+        interfaces: Array<{
+            name: string;
+            rxb: number;
+            txb: number;
+            online: boolean;
+            bitrate: number;
+            mtu: number;
+            mode: number;
+            role: number;
+            announce_queue: number;
+            held_announces: number;
+            incoming_announce_frequency: number;
+            outgoing_announce_frequency: number;
+            incoming_pr_frequency: number;
+            outgoing_pr_frequency: number;
+            burst_active: boolean;
+            burst_activated: boolean;
+            pr_burst_active: boolean;
+            pr_burst_activated: boolean;
+            announce_rate_target: number;
+            announce_rate_grace: number;
+            announce_rate_penalty: number;
+            announce_cap: number;
+            ifac_size: number;
+            tx_drops: number;
+        }>;
+    };
+
+    path_table: Array<{
+        hash: string;
+        via: string | null;
+        hops: number;
+        expires: number;
+        timestamp: number;
+        interface: string;
+    }>;
+
+    path_index: Record<string, {
+        via: string | null;
+        hops: number;
+        expires: number;
+        timestamp: number;
+        interface: string;
+    }>;
+    path_table_total: number;
+    path_table_truncated: boolean;
+    rate_table: Array<{
+        hash: string;
+        rate: number;
+        last: number;
+        rate_violations: number;
+        blocked_until: number;
+        samples: number;
+    }>;
+    link_count: number;
+}
+
 export class Peers {
+
+    public collection?: Array<PeerEnriched>;
+    public statistic?: Statistic;
+
     constructor(store: ApplicationStore) {
+        this.listeners();
+
+        this.getPeers().then((collection: Array<PeerEnriched>) => {
+            this.collection = collection;
+        })
     }
 
+    async listeners() {
+        await listen<Statistic>("stats_update", (event: { payload: Statistic }) => {
+            this.statistic = event.payload
+
+            this.collection = this?.collection?.map?.((peer: Peer) => {
+                return this.enrich(peer)
+            }).filter((peer: PeerEnriched) => {
+                return peer.status == "reachable"
+            });
+        });
+    }
 
     /**
      * `api_get_peers_snapshot`: Retrieves a complete snapshot of all known peers in the Reticulum network, including their hashes, hop counts, and last-seen timestamps.
@@ -120,18 +201,36 @@ export class Peers {
             }
         }
 
-        // 3. Routing (Simplified based on Peer interface properties)
-        const hops = null; // In a full implementation, this would come from a path table lookup
-        const iface_is_live = false; // Determined by presence in the active path table
-        const route_label = peer.iface ? `via ${peer.iface}` : 'No current path';
+        // 3. Routing (Lookup from stats if available)
+        let hops: number | null = null;
+        let via: string | null = null;
+        let iface_is_live = false;
+        let path_age: number | null = null;
+        let iface = peer.iface;
+
+        // if (this?.statistic?.path_index?.[peer.hash]) {
+        //     const path = this.statistic.path_index[peer.hash];
+        //     hops = path.hops;
+        //     via = path.via;
+        //     iface_is_live = true;
+        //     iface = path.interface;
+        //     if (path.timestamp) {
+        //         path_age = Math.max(0, nowSecs - path.timestamp);
+        //     }
+        // }
+
+        const route_label = iface ? `via ${iface}` : 'No current path';
 
         return {
             ...peer,
+            iface,
             status,
             activity_tier: tier,
             activity_label: label,
             hops,
+            via,
             iface_is_live,
+            path_age,
             route_label
         };
     }
