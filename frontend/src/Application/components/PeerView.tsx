@@ -1,0 +1,98 @@
+"use strict";
+import React from "react";
+import {Blockie} from "./Blockie";
+import {Peer, PeerEnriched} from "../../ApplicationStore/Peers";
+import {PeerInterfaceBadge} from "./PeerNetworkView";
+
+interface PeersProps {
+    peer: PeerEnriched
+}
+
+interface PeersState {
+    test: boolean
+}
+
+export class PeerView extends React.Component<PeersProps, PeersState> {
+
+
+    constructor(props: PeersProps) {
+        super(props);
+    }
+
+    componentDidMount() {
+        const timeout = setTimeout(() => {
+            clearTimeout(timeout);
+            return this.setState({
+                test: true
+            });
+        }, Math.round(Math.random() * 1000));
+    }
+
+    getShortHash(fullHash: string, front: number = 8, back: number = 4) {
+        if (!fullHash) return '';
+        front = front || 8;
+        back = back || 4;
+        if (fullHash.length <= front + back + 1) return fullHash;
+        return fullHash.substring(0, front) + '\u2026' + fullHash.slice(-back);
+    }
+
+    getPeerName(peer: Peer, truncate = true): string {
+        if (!peer) return '';
+        let displayName = peer.display_name || this.getShortHash(peer.hash, 8, 4);
+        // Apply truncation logic consistent with the UI (line 378)
+        if (truncate && displayName.length > 40) {
+            displayName = displayName.substring(0, 40) + '\u2026';
+        }
+        return displayName;
+    }
+
+
+    getAvatar(hashValue: string, size: number = 50) {
+        var color = 'var(--text-muted)';
+        var radius = size / 2;
+        return <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}
+                    style={{
+                        display: "block",
+                        borderRadius: "50%",
+                        clipPath: "circle(50% at 50% 50%)",
+                        overflow: "hidden"
+                    }}>
+            <circle cx={radius} cy={radius} r={radius} fill={color} opacity="0.3"/>
+        </svg>
+    }
+
+    render() {
+
+        return <>
+            <div className="peers-row [selected] [has-profile-status]" data-hash="{peer_hash}">
+                <span className={`conn-status-dot status-${this.props.peer?.status}`}></span>
+
+                <div className="peers-row-avatar">
+                    {(this?.state?.test == undefined) && <>
+                        {this.getAvatar(this.props.peer.identity_hash)}
+                    </>}
+
+                    {(this?.state?.test == true) && <>
+                        <Blockie seed={this.props.peer.identity_hash} size={50}/>
+                    </>}
+
+                </div>
+
+                <span className="peers-row-main">
+                    <span className="peers-row-name [is-hash]">
+                        {this.getPeerName(this.props.peer)}
+
+                    </span>
+                    <span className="peers-row-status" title={`${this.props.peer?.profile_status}`}>
+                        {this.props.peer?.profile_status}
+                    </span>
+                </span>
+                <span className="peers-row-meta">
+                    <div className="peer-meta">
+                        <PeerInterfaceBadge peer={this.props.peer}/>
+                    </div>
+                </span>
+            </div>
+        </>
+    }
+}

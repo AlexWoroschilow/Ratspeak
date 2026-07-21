@@ -51,6 +51,17 @@ export interface Peer {
     services: string[];
 }
 
+export interface PeerEnriched extends Peer {
+    status: 'reachable' | 'stale' | 'offline' | 'unreachable';
+    activity_tier: 'recent' | 'today' | 'older' | 'never';
+    activity_label: string;
+    hops: number | null;
+    iface_is_live: boolean;
+    route_label: string;
+    path_age?: number | null;
+    via?: string | null;
+}
+
 export class Peers {
     constructor(store: ApplicationStore) {
     }
@@ -59,13 +70,70 @@ export class Peers {
     /**
      * `api_get_peers_snapshot`: Retrieves a complete snapshot of all known peers in the Reticulum network, including their hashes, hop counts, and last-seen timestamps.
      */
-    async getPeers(): Promise<Peer[]> {
+    async getPeers(): Promise<PeerEnriched[]> {
         return new Promise((resolve, reject) => {
             invoke<Peer[]>('api_get_peers_snapshot')
-                .then(resolve)
+                .then((collection: Peer[]) => {
+                    resolve(collection.map((peer: Peer) => {
+                        return this.enrich(peer)
+                    }).filter((peer: PeerEnriched) => {
+                        return peer.status == "reachable"
+                    }));
+                })
                 .catch((error: any) => {
                     return reject(new Error("Failed: api_get_peers_snapshot"))
                 });
         });
     }
+
+    enrich(peer: Peer): PeerEnriched {
+        const nowSecs = Date.now() / 1000;
+
+        // 1. Calculate Status (Matching PeersCache.computeStatus)
+        const STALE_AFTER_SECS = 2 * 60 * 60;    // 2 hours
+        const OFFLINE_AFTER_SECS = 24 * 60 * 60; // 24 hours
+        const CULL_AFTER_SECS = 7 * 24 * 60 * 60; // 7 days
+
+        let status: PeerEnriched['status'] = 'unreachable';
+        if (peer.last_seen !== null) {
+            const age = nowSecs - peer.last_seen;
+            if (age < STALE_AFTER_SECS) status = 'reachable';
+            else if (age < OFFLINE_AFTER_SECS) status = 'stale';
+            else status = 'offline';
+        }
+
+        // 2. Calculate Activity Tier (Matching PeersCache.computeActivity)
+        let tier: PeerEnriched['activity_tier'] = 'never';
+        let label = 'Never seen';
+        if (peer.last_seen !== null) {
+            const age = Math.max(0, nowSecs - peer.last_seen);
+            if (age < STALE_AFTER_SECS) {
+                tier = 'recent';
+                label = 'Last heard recently';
+            } else if (age < OFFLINE_AFTER_SECS) {
+                tier = 'today';
+                label = 'Last heard today';
+            } else {
+                tier = 'older';
+                // Note: prettyTime() would be a separate utility to format the age
+                label = `Last heard some time ago`;
+            }
+        }
+
+        // 3. Routing (Simplified based on Peer interface properties)
+        const hops = null; // In a full implementation, this would come from a path table lookup
+        const iface_is_live = false; // Determined by presence in the active path table
+        const route_label = peer.iface ? `via ${peer.iface}` : 'No current path';
+
+        return {
+            ...peer,
+            status,
+            activity_tier: tier,
+            activity_label: label,
+            hops,
+            iface_is_live,
+            route_label
+        };
+    }
+
 }

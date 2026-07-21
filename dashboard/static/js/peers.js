@@ -381,15 +381,9 @@ function buildPeersHTML(flatItems, start, end, rowHeights) {
             var statusClass = 'status-' + c.status;
             var avatarSize = window.innerWidth <= 768 ? 44 : 28;
             var av = (typeof identityAvatar === 'function') ? identityAvatar(c.hash, avatarSize) : '';
-            var ifaceLabel = c.iface_is_live ? ifaceShortLabel(c.iface) : '';
-            var ifaceBadge = ifaceLabel
-                ? '<span class="peers-iface-badge" title="' + escapeHtml('Live via ' + (c.iface || '')) + '">'
-                  + escapeHtml(ifaceLabel) + '</span>'
-                : '';
+            var ifaceBadge = renderPeerIfaceBadgeHtml(c);
             var profileStatus = _peerRowProfileStatus(c);
-            var statusHtml = profileStatus
-                ? '<span class="peers-row-status" title="' + escapeHtml(profileStatus) + '">' + escapeHtml(profileStatus) + '</span>'
-                : '';
+            var statusHtml = renderPeerRowStatusHtml(c);
 
             html += '<div class="peers-row' + (isSelected ? ' selected' : '') + (profileStatus ? ' has-profile-status' : '') + '" data-hash="' + escapeHtml(c.hash) + '" style="height:' + rowHeight + 'px;flex-shrink:0">' +
                 '<span class="conn-status-dot ' + statusClass + '"></span>' +
@@ -405,6 +399,21 @@ function buildPeersHTML(flatItems, start, end, rowHeights) {
         }
     }
     return html;
+}
+
+function renderPeerRowStatusHtml(peer) {
+    var profileStatus = _peerRowProfileStatus(peer);
+    return profileStatus
+        ? '<span class="peers-row-status" title="' + escapeHtml(profileStatus) + '">' + escapeHtml(profileStatus) + '</span>'
+        : '';
+}
+
+function renderPeerIfaceBadgeHtml(peer) {
+    var ifaceLabel = peer.iface_is_live ? ifaceShortLabel(peer.iface) : '';
+    return ifaceLabel
+        ? '<span class="peers-iface-badge" title="' + escapeHtml('Live via ' + (peer.iface || '')) + '">'
+          + escapeHtml(ifaceLabel) + '</span>'
+        : '';
 }
 
 function renderPeersDetailPanel(hash) {
