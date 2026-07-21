@@ -58,9 +58,9 @@ export default class PeerView extends React.PureComponent<PeersProps, PeersState
                 <span className={`conn-status-dot status-${this.props.peer?.status}`}></span>
 
                 <div className="peers-row-avatar">
-                    <Suspense fallback={<div>{this.getAvatar()}</div>}>
-                        <Blockie seed={this.props.peer.identity_hash} size={50}/>
-                    </Suspense>
+                    {/*<Suspense fallback={<div>{this.getAvatar()}</div>}>*/}
+                    {/*    <Blockie seed={this.props.peer.identity_hash} size={50}/>*/}
+                    {/*</Suspense>*/}
                 </div>
 
                 <span className="peers-row-main">
