@@ -23,12 +23,11 @@ import {NetworkLocal} from "./Application/NetworkLocal";
 import {NetworkRadio} from "./Application/NetworkRadio";
 import {NetworkHost} from "./Application/NetworkHost";
 import {Setup} from "./Application/Setup";
-import {ApplicationStore} from "./ApplicationStore";
+import {ApplicationStore, store, network, peers} from "./ApplicationStore";
 
 import "./Application.scss";
 
 interface ApplicationProps {
-    store?: ApplicationStore;
 }
 
 interface ApplicationState {
@@ -37,14 +36,11 @@ interface ApplicationState {
 }
 
 
-@inject("store")
 export class Application extends React.Component<ApplicationProps, ApplicationState> {
-    protected store?: ApplicationStore;
 
     constructor(props: ApplicationProps) {
         super(props);
 
-        this.store = props.store;
         this.state = {
             isSetupRequired: undefined,
             error: undefined,
@@ -52,9 +48,8 @@ export class Application extends React.Component<ApplicationProps, ApplicationSt
     }
 
     componentDidMount() {
-        this.store?.isSetupRequired()
+        store?.isSetupRequired()
             .then((response: boolean) => {
-                info(`???${response}`);
                 return this.setState({
                     isSetupRequired: response
                 });
@@ -74,7 +69,7 @@ export class Application extends React.Component<ApplicationProps, ApplicationSt
     render() {
 
         return <>
-            <Provider store={this.store}>
+            <Provider store={store} network={network} peers={peers}>
                 <HashRouter>
                     <Routes>
                         <Route element={<Layout/>}>

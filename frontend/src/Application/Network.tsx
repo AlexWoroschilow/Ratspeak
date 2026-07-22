@@ -4,8 +4,15 @@ import React from "react";
 
 import "./Network.scss";
 import {Activity} from "./Network/Activity";
+import {inject, observer} from "mobx-react";
+import {ApplicationStore} from "../ApplicationStore";
+import {info} from "@tauri-apps/plugin-log";
+
+
+import {Network as NetworkStore} from "../ApplicationStore/Network";
 
 interface NetworkProps {
+    network?: NetworkStore;
 }
 
 interface NetworkState {
@@ -13,6 +20,8 @@ interface NetworkState {
 }
 
 
+@inject("network")
+@observer
 export class Network extends React.Component<NetworkProps, NetworkState> {
     constructor(props: NetworkProps) {
         super(props);
@@ -22,7 +31,6 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
         }
     }
 
-
     doToggleActivity() {
         this.setState({
             isEnabledActivity: !this.state.isEnabledActivity
@@ -30,6 +38,9 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
     }
 
     render() {
+
+        const {network} = this.props;
+        let collection = network?.logs || [];
 
         return <>
 
@@ -191,7 +202,12 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
                             </div>
 
                             <div className="activity-header">
-                                <span className="activity-title">Network Activity</span>
+                                <span className="activity-title">
+                                    Network Activity
+                                    {(this?.state?.isEnabledActivity === true) && <>
+                                        &nbsp;({network?.logs?.length})
+                                    </>}
+                                </span>
                                 <label className="prop-toggle activity-toggle">
                                     <input type="checkbox" id="activity-enabled-toggle" checked={this?.state?.isEnabledActivity}
                                            onChange={this.doToggleActivity.bind(this)}/>

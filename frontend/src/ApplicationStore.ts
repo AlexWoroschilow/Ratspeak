@@ -1,6 +1,7 @@
 import {makeAutoObservable, observable} from "mobx";
 import {invoke} from '@tauri-apps/api/core';
 import {Peers} from "./ApplicationStore/Peers";
+import {Network} from "./ApplicationStore/Network";
 
 //
 // Based on the investigation of the `@dashboard/static/js/setup.js` and `@dashboard/static/js/tauri_events.js` files, here are the `RS.invoke` methods related to the initial application setup:
@@ -68,12 +69,15 @@ export interface StartupProgressResponse {
 export class ApplicationStore {
 
     public peers: Peers;
+    public network: Network;
 
     constructor() {
         this.peers = new Peers(this);
+        this.network = new Network(this);
 
         makeAutoObservable(this);
-        makeAutoObservable(this.peers);
+        // makeAutoObservable(this.peers);
+        // makeAutoObservable(this.network);
     }
 
     /**
@@ -120,3 +124,5 @@ export class ApplicationStore {
 }
 
 export const store = new ApplicationStore();
+export const network = store?.network;
+export const peers = store?.peers;

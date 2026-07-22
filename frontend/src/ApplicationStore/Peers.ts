@@ -139,9 +139,9 @@ export class Peers {
     }
 
     async listeners() {
-        await listen<Statistic>("stats_update", (event: { payload: Statistic }) => {
-            info(`\nstats_update: ${JSON.stringify(event.payload)}`)
-        });
+        // await listen<Statistic>("stats_update", (event: { payload: Statistic }) => {
+        //     info(`\nstats_update: ${JSON.stringify(event.payload)}`)
+        // });
         // await listen<Statistic>("paths_cleared", (event: { payload: Statistic }) => {
         //     // info(`\paths_cleared: ${JSON.stringify(event.payload)}`)
         // });

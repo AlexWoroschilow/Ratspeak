@@ -1,19 +1,27 @@
 "use strict";
-import React from "react";
+import React, {Suspense} from "react";
+import {Network, NetworkLog} from "../../ApplicationStore/Network";
+import {inject, observer} from "mobx-react";
+import {ActivityRow} from "./ActivityRow";
 
 interface ActivityProps {
+    network?: Network;
 }
 
 interface ActivityState {
 }
 
-
+@inject("network")
+@observer
 export class Activity extends React.Component<ActivityProps, ActivityState> {
     constructor(props: ActivityProps) {
         super(props);
     }
 
     render() {
+
+        const {network} = this.props;
+        let collection = network?.logs || [];
 
         return <>
             <div className="activity-active" id="activity-active">
@@ -26,7 +34,17 @@ export class Activity extends React.Component<ActivityProps, ActivityState> {
                 </div>
                 <div className="activity-filters" id="activity-filters"></div>
                 <div className="activity-feed" id="activity-feed">
-                    <div className="activity-empty">Listening for network events...</div>
+                    {collection?.map?.((entity: NetworkLog) => (
+                        <Suspense key={entity.timestamp} fallback={<div className="peers-row">Loading...</div>}>
+                            <ActivityRow entity={entity}/>
+                        </Suspense>
+                    ))}
+
+                    {(collection?.length == 0) &&
+                        <div className="activity-empty">
+                            Listening for network events...
+                        </div>}
+
                 </div>
             </div>
 
