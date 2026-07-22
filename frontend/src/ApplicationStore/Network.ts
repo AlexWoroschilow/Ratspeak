@@ -10,11 +10,9 @@
 //
 import {listen} from "@tauri-apps/api/event";
 import {info} from "@tauri-apps/plugin-log";
-import {Statistic} from "./Peers";
 import {ApplicationStore} from "../ApplicationStore";
 import {invoke} from "@tauri-apps/api/core";
-import {action, makeAutoObservable, runInAction} from "mobx";
-import {observer} from "mobx-react";
+import {action, makeAutoObservable} from "mobx";
 
 
 interface NetworkLogArgs {
@@ -23,8 +21,8 @@ interface NetworkLogArgs {
 }
 
 export interface NetworkLogStatus {
-    enabled: boolean;          // The new enabled state
-    level: string;             // The current active log level (e.g., "standard")
+    enabled: boolean | undefined;          // The new enabled state
+    level: string | undefined;             // The current active log level (e.g., "standard")
     restart_required: boolean; // Indicates if a node restart is needed (currently always false for this command)
 }
 
@@ -36,25 +34,45 @@ export interface NetworkLog {
     level: 'essential' | 'standard' | 'detailed';
 }
 
+export type NetworkLogLevel = NetworkLog['level'];
+
 export class Network {
 
     public logs?: Array<NetworkLog> = [];
+    public status?: NetworkLogStatus;
 
     constructor(store: ApplicationStore) {
         makeAutoObservable(this, {
-            addLog: action, // Explicitly bind action
+            setStatus: action,
+            clearLog: action,
+            addLog: action,
         });
 
         this.listeners();
-        invoke<NetworkLogStatus>('enable_network_log', {
-            args: {
-                enabled: true,
-                level: 'detailed'
-            } as NetworkLogArgs
-        }).then((data: NetworkLogStatus) => {
-            info(`enable_network_log???: ${JSON.stringify(data)}`);
-        }).catch((error: any) => {
+    }
+
+    listeners() {
+        listen<NetworkLog>("network_event",
+            (event: { payload: NetworkLog }) => {
+                this.addLog(event.payload);
+            });
+
+        listen<NetworkLogStatus>("network_log_level_changed",
+            (event: { payload: NetworkLogStatus }) => {
+                this.setStatus(event.payload);
+            });
+
+        listen("announces_cleared", (event: any) => {
+            info(`\n\nannounces_cleared: ${JSON.stringify(event)}\n`)
         });
+
+        listen("hub_interfaces_update", (event: any) => {
+            info(`\n\nhub_interfaces_update: ${JSON.stringify(event)}\n`)
+        });
+    }
+
+    clearLog() {
+        this.logs = [];
     }
 
     addLog(entity: NetworkLog) {
@@ -64,21 +82,46 @@ export class Network {
         });
     }
 
-    async listeners() {
-        listen<NetworkLog>("network_event", (event: { payload: NetworkLog }) => {
-            this.addLog(event.payload);
-        });
+    setStatus(status: NetworkLogStatus): NetworkLogStatus {
+        this.status = status;
 
-        listen<NetworkLogStatus>("network_log_level_changed", (event: { payload: NetworkLogStatus }) => {
-            info(`\n\nnetwork_log_level_changed: ${JSON.stringify(event)}\n`)
-        });
+        (this.status?.enabled == false) &&
+        (this.clearLog());
 
-        listen("announces_cleared", (event: any) => {
-            info(`\n\nannounces_cleared: ${JSON.stringify(event)}\n`)
-        });
-        listen("hub_interfaces_update", (event: any) => {
-            info(`\n\nhub_interfaces_update: ${JSON.stringify(event)}\n`)
+        return this.status;
+    }
+
+
+    async doSetNetworkLogLevel(level: NetworkLogLevel) {
+        return new Promise((resolve: (value: NetworkLogStatus) => void, reject) => {
+            invoke<NetworkLogStatus>('set_network_log_level', {
+                level: level
+            }).then((status: NetworkLogStatus) => {
+                return resolve(this.setStatus(status));
+            }).catch((error: any) => {
+                return reject(error);
+            });
         });
     }
 
+    async doClearNetworkLog() {
+        return new Promise((resolve: (value: void) => void) => {
+            return resolve(this.clearLog());
+        });
+    }
+
+    async doToggleNetworkLog(isEnabled: boolean, level: string = "detailed") {
+        return new Promise((resolve: (value: NetworkLogStatus) => void, reject) => {
+            invoke<NetworkLogStatus>('enable_network_log', {
+                args: {
+                    enabled: isEnabled,
+                    level: level
+                } as NetworkLogArgs
+            }).then((status: NetworkLogStatus) => {
+                return resolve(this.setStatus(status));
+            }).catch((error: any) => {
+                return reject(error);
+            });
+        });
+    }
 }

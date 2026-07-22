@@ -9,14 +9,15 @@ import {ApplicationStore} from "../ApplicationStore";
 import {info} from "@tauri-apps/plugin-log";
 
 
-import {Network as NetworkStore} from "../ApplicationStore/Network";
+import {Network as NetworkStore, NetworkLogStatus} from "../ApplicationStore/Network";
+import {BallTriangle} from "react-loader-spinner";
 
 interface NetworkProps {
     network?: NetworkStore;
 }
 
 interface NetworkState {
-    isEnabledActivity: boolean;
+    status?: NetworkLogStatus | undefined;
 }
 
 
@@ -27,14 +28,38 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
         super(props);
 
         this.state = {
-            isEnabledActivity: false
+            status: {
+                enabled: false,
+                level: "detailed",
+                restart_required: false
+            } as NetworkLogStatus
         }
     }
 
     doToggleActivity() {
-        this.setState({
-            isEnabledActivity: !this.state.isEnabledActivity
-        })
+        const {network} = this.props;
+
+        network?.doToggleNetworkLog?.(!this.state.status?.enabled)
+            .then((status: NetworkLogStatus) => {
+                return this.setState({
+                    status: status
+                });
+            });
+
+        return this.setState({
+            status: {
+                ...this.state.status, ...{
+                    enabled: undefined
+                }
+            } as NetworkLogStatus
+        });
+    }
+
+    doClearActivity() {
+        const {network} = this.props;
+        network?.doClearNetworkLog().then(() => {
+
+        });
     }
 
     render() {
@@ -204,29 +229,40 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
                             <div className="activity-header">
                                 <span className="activity-title">
                                     Network Activity
-                                    {(this?.state?.isEnabledActivity === true) && <>
+                                    {(this?.state?.status?.enabled === true) && <>
                                         &nbsp;({network?.logs?.length})
                                     </>}
                                 </span>
+
                                 <label className="prop-toggle activity-toggle">
-                                    <input type="checkbox" id="activity-enabled-toggle" checked={this?.state?.isEnabledActivity}
-                                           onChange={this.doToggleActivity.bind(this)}/>
-                                    <span className="prop-slider"></span>
+                                    {(this?.state?.status?.enabled === undefined) && <>
+                                        <BallTriangle
+                                            color="#000000"
+                                            height={20}
+                                            width={20}
+                                        />
+                                    </>}
+                                    {(this?.state?.status?.enabled !== undefined) && <>
+                                        <input type="checkbox" id="activity-enabled-toggle" checked={this?.state?.status?.enabled}
+                                               onChange={this.doToggleActivity.bind(this)}/>
+                                        <span className="prop-slider"></span>
+                                    </>}
                                 </label>
 
-                                {(this?.state?.isEnabledActivity === true) &&
+                                {(this?.state?.status?.enabled === true) &&
                                     <div className="activity-controls">
-                                        <button className="nr-btn nr-btn-xs" id="activity-clear-btn">
+                                        <button className="nr-btn nr-btn-xs" id="activity-clear-btn"
+                                                onClick={this.doClearActivity.bind(this)}>
                                             Clear
                                         </button>
                                     </div>}
                             </div>
 
-                            {(this?.state?.isEnabledActivity === true) && <>
-                                <Activity/>
+                            {(this?.state?.status?.enabled === true) && <>
+                                <Activity status={this?.state?.status}/>
                             </>}
 
-                            {(this?.state?.isEnabledActivity === false) &&
+                            {(this?.state?.status?.enabled === false) &&
                                 <div className="activity-privacy-gate" id="activity-privacy-gate">
                                     <svg className="activity-privacy-icon" viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" strokeWidth="1.5">
                                         <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
