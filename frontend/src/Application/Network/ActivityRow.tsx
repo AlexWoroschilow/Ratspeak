@@ -24,7 +24,10 @@ export class ActivityRow extends React.Component<ActivityRowProps, ActivityRowSt
 
         return <>
             <div className="activity-entry" data-type="announce">
-                <span className="activity-entry-time">{moment.unix(entity.timestamp / 1000).format("DD.MM.YYYY")}</span>
+                <span className="activity-entry-time">
+                    {moment.unix(entity.timestamp / 1000)
+                        .format("H:mm:ss DD.MM.YYYY")}
+                </span>
                 <span className="activity-entry-text">{entity.message}</span>
                 <span className="activity-entry-detail">{entity.type}</span>
             </div>
