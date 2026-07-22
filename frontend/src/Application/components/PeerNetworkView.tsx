@@ -23,17 +23,17 @@ const getIfaceShortLabel = (name: string | null): string => {
 };
 
 interface PeerInterfaceBadgeProps {
-    peer: PeerEnriched;
+    peer?: PeerEnriched | undefined;
     className?: string;
 }
 
 export const PeerInterfaceBadge: React.FC<PeerInterfaceBadgeProps> = ({peer, className}) => {
     // Only render the badge if the interface is currently live
-    if (!peer.iface_is_live || !peer.iface) {
+    if (!peer?.iface_is_live || !peer?.iface) {
         return null;
     }
 
-    const shortLabel = getIfaceShortLabel(peer.iface);
+    const shortLabel = getIfaceShortLabel(peer?.iface);
 
 
     return <>

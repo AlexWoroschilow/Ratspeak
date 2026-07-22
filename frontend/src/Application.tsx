@@ -61,7 +61,6 @@ export class Application extends React.Component<ApplicationProps, ApplicationSt
 
             })
             .catch((error) => {
-                info(`!!??${error}`);
                 return this.setState({
                     error: error
                 });

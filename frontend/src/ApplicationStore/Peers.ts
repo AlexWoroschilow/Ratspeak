@@ -36,7 +36,6 @@
 import {ApplicationStore} from "../ApplicationStore";
 import {invoke} from "@tauri-apps/api/core";
 import {listen} from "@tauri-apps/api/event";
-import {makeAutoObservable, observable} from "mobx";
 import {info} from "@tauri-apps/plugin-log";
 
 export interface Peer {
@@ -54,13 +53,13 @@ export interface Peer {
 }
 
 export interface PeerEnriched extends Peer {
-    status: 'reachable' | 'stale' | 'offline' | 'unreachable';
+    status: 'reachable' | 'stale' | 'offline' | 'unreachable' | 'direct';
     activity_tier: 'recent' | 'today' | 'older' | 'never';
     activity_label: string;
     hops: number | null;
     iface_is_live: boolean;
     route_label: string;
-    path_age?: number | null;
+    path_age?: number;
     via?: string | null;
 }
 
@@ -141,13 +140,35 @@ export class Peers {
 
     async listeners() {
         await listen<Statistic>("stats_update", (event: { payload: Statistic }) => {
-            this.statistic = event.payload;
+            info(`\nstats_update: ${JSON.stringify(event.payload)}`)
+        });
+        // await listen<Statistic>("paths_cleared", (event: { payload: Statistic }) => {
+        //     // info(`\paths_cleared: ${JSON.stringify(event.payload)}`)
+        // });
+        // await listen<Statistic>("announce_received", (event: { payload: Statistic }) => {
+        //     // info(`\announce_received: ${JSON.stringify(event.payload)}`)
+        // });
+        // await listen<Statistic>("announces_cleared", (event: { payload: Statistic }) => {
+        //     // info(`\announces_cleared: ${JSON.stringify(event.payload)}`)
+        // });
+        // await listen<Statistic>("hub_interfaces_update", (event: { payload: Statistic }) => {
+        //     // info(`\hub_interfaces_update: ${JSON.stringify(event.payload)}`)
+        // });
 
-            this.getPeers().then((collection: Array<PeerEnriched>) => {
-                this.collection = collection;
-            });
+
+        await listen<any>("peers_updated", (payload: any) => {
+            info(`\npeers_updated: ${JSON.stringify(payload)}`)
+        });
+
+        await listen<any>("peer_updated", (payload: any) => {
+            info(`\npeer_updated: ${JSON.stringify(payload)}`)
+        });
+
+        await listen<any>("peer_removed", (payload: any) => {
+            info(`\npeer_removed: ${JSON.stringify(payload)}`)
         });
     }
+
 
     /**
      * `api_get_peers_snapshot`: Retrieves a complete snapshot of all known peers in the Reticulum network, including their hashes, hop counts, and last-seen timestamps.
@@ -159,7 +180,7 @@ export class Peers {
                     resolve(collection.map((peer: Peer) => {
                         return this.enrich(peer)
                     }).filter((peer: PeerEnriched) => {
-                        return peer.status == "reachable"
+                        return peer.status === "reachable"
                     }));
                 })
                 .catch((error: any) => {
@@ -206,19 +227,31 @@ export class Peers {
         let hops: number | null = null;
         let via: string | null = null;
         let iface_is_live = false;
-        let path_age: number | null = null;
+        let path_age: number = 0;
         let iface = peer.iface;
 
-        // if (this?.statistic?.path_index?.[peer.hash]) {
-        //     const path = this.statistic.path_index[peer.hash];
-        //     hops = path.hops;
-        //     via = path.via;
-        //     iface_is_live = true;
-        //     iface = path.interface;
-        //     if (path.timestamp) {
-        //         path_age = Math.max(0, nowSecs - path.timestamp);
-        //     }
-        // }
+
+//         const nowSecs = Date.now() / 1000;
+// // ...
+// if (this?.statistic?.path_index?.[peer.hash]) {
+//     const path = this.statistic.path_index[peer.hash];
+//     if (path.timestamp) {
+//         path_age = Math.max(0, nowSecs - path.timestamp);
+//     }
+// }
+
+        if (this?.statistic?.path_index?.[peer.hash]) {
+            const path = this.statistic.path_index[peer.hash];
+            info(`!!${path}`);
+
+            hops = path.hops;
+            via = path.via;
+            iface_is_live = true;
+            iface = path.interface;
+            if (path.timestamp) {
+                path_age = Math.max(0, nowSecs - path.timestamp);
+            }
+        }
 
         const route_label = iface ? `via ${iface}` : 'No current path';
 
