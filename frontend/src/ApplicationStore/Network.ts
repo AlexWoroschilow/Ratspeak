@@ -13,18 +13,18 @@ import {info} from "@tauri-apps/plugin-log";
 import {ApplicationStore} from "../ApplicationStore";
 import {invoke} from "@tauri-apps/api/core";
 import {action, makeAutoObservable} from "mobx";
-import {PeerEnriched} from "./Peers";
+import {Peer, PeerEnriched} from "./Peers";
 
 
 interface NetworkLogArgs {
-    enabled: boolean;        // Whether to turn logging on or off
-    level?: 'essential' | 'standard' | 'detailed'; // Optional: The granularity of logs
+    enabled: boolean;
+    level?: 'essential' | 'standard' | 'detailed';
 }
 
 export interface NetworkLogStatus {
-    enabled: boolean | undefined;          // The new enabled state
-    level: string | undefined;             // The current active log level (e.g., "standard")
-    restart_required: boolean; // Indicates if a node restart is needed (currently always false for this command)
+    enabled: boolean | undefined;
+    level: string | undefined;
+    restart_required: boolean;
 }
 
 export interface NetworkLog {
@@ -101,15 +101,83 @@ export interface Statistic {
 
 export type StatisticInterface = Statistic['interface_stats']['interfaces'][number];
 
+export interface Interfaces {
+
+    rnode: Array<{
+        type: 'RNodeInterface';
+        port: string;
+        frequency?: string;
+        bandwidth?: string;
+        txpower?: string;
+        spreadfactor?: string;
+        codingrate?: string;
+        flow_control?: string;
+        id_interval?: string;
+        mode?: 'full' | 'gateway' | 'access_point' | 'boundary' | 'roaming';
+        name: string;
+
+        [key: string]: string | number | boolean | undefined;
+    }>;
+
+    auto: Array<{
+        name: string;
+        type: string;
+
+        [key: string]: string | number | boolean | undefined;
+    }>;
+
+    tcp_client: Array<{
+        type: 'TCPClientInterface';
+        target_host: string;
+        target_port: string;
+        name: string;
+
+        [key: string]: string | number | boolean | undefined;
+    }>;
+
+    tcp_server: Array<{
+        type: 'TCPServerInterface';
+        listen_ip?: string;
+        listen_port: string;
+        name: string;
+
+        [key: string]: string | number | boolean | undefined;
+    }>;
+
+    backbone_client: Array<{
+        name: string;
+        type: string;
+
+        [key: string]: string | number | boolean | undefined;
+    }>;
+
+    backbone_server: Array<{
+        name: string;
+        type: string;
+
+        [key: string]: string | number | boolean | undefined;
+    }>;
+
+    transport: {
+        mode: 'on' | 'off' | 'auto';
+        enabled: boolean;
+        configured_enabled: boolean;
+        suppressed: boolean;
+    };
+}
+
+
 export class Network {
 
-    public logs?: Array<NetworkLog> = [];
-    public status?: NetworkLogStatus;
-    public statistic: Statistic = {} as Statistic;
+    public logs: Array<NetworkLog> = [];
+    public interfaces: Interfaces = {} as Interfaces;
 
+    public status: NetworkLogStatus = {} as NetworkLogStatus;
+    public statistic: Statistic = {} as Statistic;
 
     constructor(store: ApplicationStore) {
         makeAutoObservable(this, {
+            setInterfaces: action,
             setStatistic: action,
             setStatus: action,
             clearLog: action,
@@ -117,6 +185,11 @@ export class Network {
         });
 
         this.listeners();
+
+        this.getInterfaces()
+            .then((interfaces: Interfaces) => {
+                this.setInterfaces(interfaces);
+            });
     }
 
     listeners() {
@@ -155,6 +228,12 @@ export class Network {
         });
     }
 
+    setInterfaces(interfaces: Interfaces): Interfaces {
+        this.interfaces = interfaces;
+        return this.interfaces;
+    }
+
+
     setStatus(status: NetworkLogStatus): NetworkLogStatus {
         this.status = status;
 
@@ -167,6 +246,19 @@ export class Network {
     setStatistic(statistic: Statistic): Statistic {
         this.statistic = statistic;
         return this.statistic;
+    }
+
+
+    async getInterfaces(): Promise<Interfaces> {
+        return new Promise((resolve: (value: Interfaces) => void, reject) => {
+            invoke<Interfaces>('api_hub_interfaces')
+                .then((interfaces: Interfaces) => {
+                    return resolve(interfaces)
+                })
+                .catch((error: any) => {
+                    return reject(new Error("Failed: api_get_peers_snapshot"))
+                });
+        });
     }
 
 

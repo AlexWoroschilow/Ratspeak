@@ -136,9 +136,6 @@ export class Peers {
         });
     }
 
-    /**
-     * `api_get_peers_snapshot`: Retrieves a complete snapshot of all known peers in the Reticulum network, including their hashes, hop counts, and last-seen timestamps.
-     */
     async getPeers(): Promise<PeerEnriched[]> {
         return new Promise((resolve, reject) => {
             invoke<Peer[]>('api_get_peers_snapshot')
