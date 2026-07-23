@@ -13,6 +13,7 @@ import {info} from "@tauri-apps/plugin-log";
 import {ApplicationStore} from "../ApplicationStore";
 import {invoke} from "@tauri-apps/api/core";
 import {action, makeAutoObservable} from "mobx";
+import {PeerEnriched} from "./Peers";
 
 
 interface NetworkLogArgs {
@@ -36,13 +37,80 @@ export interface NetworkLog {
 
 export type NetworkLogLevel = NetworkLog['level'];
 
+
+export interface Statistic {
+    timestamp: number;
+    connected: boolean;
+    interface_stats: {
+        interfaces: Array<{
+            name: string;
+            rxb: number;
+            txb: number;
+            online: boolean;
+            bitrate: number;
+            mtu: number;
+            mode: number;
+            role: number;
+            announce_queue: number;
+            held_announces: number;
+            incoming_announce_frequency: number;
+            outgoing_announce_frequency: number;
+            incoming_pr_frequency: number;
+            outgoing_pr_frequency: number;
+            burst_active: boolean;
+            burst_activated: boolean;
+            pr_burst_active: boolean;
+            pr_burst_activated: boolean;
+            announce_rate_target: number;
+            announce_rate_grace: number;
+            announce_rate_penalty: number;
+            announce_cap: number;
+            ifac_size: number;
+            tx_drops: number;
+        }>;
+    };
+
+    path_table: Array<{
+        hash: string;
+        via: string | null;
+        hops: number;
+        expires: number;
+        timestamp: number;
+        interface: string;
+    }>;
+
+    path_index: Record<string, {
+        via: string | null;
+        hops: number;
+        expires: number;
+        timestamp: number;
+        interface: string;
+    }>;
+    path_table_total: number;
+    path_table_truncated: boolean;
+    rate_table: Array<{
+        hash: string;
+        rate: number;
+        last: number;
+        rate_violations: number;
+        blocked_until: number;
+        samples: number;
+    }>;
+    link_count: number;
+}
+
+export type StatisticInterface = Statistic['interface_stats']['interfaces'][number];
+
 export class Network {
 
     public logs?: Array<NetworkLog> = [];
     public status?: NetworkLogStatus;
+    public statistic: Statistic = {} as Statistic;
+
 
     constructor(store: ApplicationStore) {
         makeAutoObservable(this, {
+            setStatistic: action,
             setStatus: action,
             clearLog: action,
             addLog: action,
@@ -52,6 +120,11 @@ export class Network {
     }
 
     listeners() {
+        listen<Statistic>("stats_update",
+            (event: { payload: Statistic }) => {
+                return this.setStatistic(event.payload);
+            });
+
         listen<NetworkLog>("network_event",
             (event: { payload: NetworkLog }) => {
                 this.addLog(event.payload);
@@ -89,6 +162,11 @@ export class Network {
         (this.clearLog());
 
         return this.status;
+    }
+
+    setStatistic(statistic: Statistic): Statistic {
+        this.statistic = statistic;
+        return this.statistic;
     }
 
 

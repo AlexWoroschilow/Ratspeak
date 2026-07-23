@@ -72,8 +72,8 @@ export class ApplicationStore {
     public network: Network;
 
     constructor() {
-        this.peers = new Peers(this);
         this.network = new Network(this);
+        this.peers = new Peers(this.network);
 
         makeAutoObservable(this);
     }

@@ -11,6 +11,7 @@ import {info} from "@tauri-apps/plugin-log";
 
 import {Network as NetworkStore, NetworkLogStatus} from "../ApplicationStore/Network";
 import {BallTriangle} from "react-loader-spinner";
+import {Status} from "./Network/Status";
 
 interface NetworkProps {
     network?: NetworkStore;
@@ -65,36 +66,12 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
     render() {
 
         const {network} = this.props;
-        let collection = network?.logs || [];
 
         return <>
 
             <div className="view" id="view-network">
                 <div className="network-layout">
-                    <div className="network-pulse" id="network-pulse">
-                        <div className="pulse-identity" id="pulse-identity">
-                            <div className="loading-state"><span className="loading-spinner"></span></div>
-                        </div>
-                        <div className="pulse-throughput">
-                        <span className="pulse-throughput-item" title="Total uploaded">
-                            <span className="pulse-throughput-arrow" aria-hidden="true">&uarr;</span>
-                            <span className="pulse-throughput-value" id="net-stat-tx">0 B</span>
-                        </span>
-                            <span className="pulse-throughput-item" title="Total downloaded">
-                            <span className="pulse-throughput-arrow" aria-hidden="true">&darr;</span>
-                            <span className="pulse-throughput-value" id="net-stat-rx">0 B</span>
-                        </span>
-                        </div>
-                        <div className="pulse-actions">
-                            <button className="pulse-announce-btn" id="network-announce-btn">
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"
-                                     strokeLinejoin="round" aria-hidden="true">
-                                    <path d="M3 11l18-8-8 18-2-8-8-2z"/>
-                                </svg>
-                                <span>Announce</span>
-                            </button>
-                        </div>
-                    </div>
+                    <Status/>
                     {/**/}
                     <div className="network-subtabs" id="network-subtabs">
                         <button className="network-subtab-btn active" data-subtab="connections">Connections</button>
