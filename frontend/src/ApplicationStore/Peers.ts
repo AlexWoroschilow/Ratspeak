@@ -140,8 +140,9 @@ export class Peers {
     constructor(store: ApplicationStore) {
 
         makeAutoObservable(this, {
+            setCollectionItem: action,
             setCollection: action,
-            // clearLog: action,
+            setStatistic: action,
             // addLog: action,
         });
         this.listeners();
@@ -151,20 +152,39 @@ export class Peers {
         });
     }
 
+    setStatistic(statistic: Statistic): Statistic {
+        this.statistic = statistic;
+        Object.entries(this.collection)
+            .forEach(([key, peer]: [string, PeerEnriched | undefined]) => {
+                (peer !== undefined) &&
+                this.setCollectionItem(this.enrich(peer));
+            });
+        return this.statistic;
+    }
+
     setCollection(collection: Array<PeerEnriched>): PeerCache | undefined {
         collection?.forEach?.((peer: PeerEnriched) => {
-            this.collection[`${peer?.hash}`] = peer;
+            this.setCollectionItem(peer);
         });
         return this.collection;
     }
 
+    setCollectionItem(peer: PeerEnriched): void {
+        this.collection[`${peer?.hash}`] = peer;
+    }
+
     listeners() {
-        // listen<Statistic>("stats_update", (event: { payload: Statistic }) => {
-        //     info(`\n\nstats_update: ${JSON.stringify(event.payload)}\n`)
-        // });
+        listen<Statistic>("stats_update", (event: { payload: Statistic }) => {
+            return this.setStatistic(event.payload);
+        });
 
         listen<any>("peers_updated", (event: { payload: { peers: Array<Peer> } }) => {
-            // info(`\n\npeers_updated: ${JSON.stringify(payload)}\n`)
+            const {peers} = event.payload;
+            peers.forEach((peer: Peer) => {
+                return this.setCollectionItem(
+                    this.enrich(peer)
+                );
+            });
         });
 
         listen<any>("peer_updated", (payload: any) => {
@@ -175,7 +195,6 @@ export class Peers {
             info(`\n\npeer_removed: ${JSON.stringify(payload)}\n`)
         });
     }
-
 
     /**
      * `api_get_peers_snapshot`: Retrieves a complete snapshot of all known peers in the Reticulum network, including their hashes, hop counts, and last-seen timestamps.
@@ -196,7 +215,7 @@ export class Peers {
         });
     }
 
-    enrich(peer: Peer): PeerEnriched {
+    enrich(peer: Peer | PeerEnriched): PeerEnriched {
         const nowSecs = Date.now() / 1000;
 
         // 1. Calculate Status (Matching PeersCache.computeStatus)
@@ -238,19 +257,8 @@ export class Peers {
         let iface = peer.iface;
 
 
-//         const nowSecs = Date.now() / 1000;
-// // ...
-// if (this?.statistic?.path_index?.[peer.hash]) {
-//     const path = this.statistic.path_index[peer.hash];
-//     if (path.timestamp) {
-//         path_age = Math.max(0, nowSecs - path.timestamp);
-//     }
-// }
-
         if (this?.statistic?.path_index?.[peer.hash]) {
             const path = this.statistic.path_index[peer.hash];
-            info(`!!${path}`);
-
             hops = path.hops;
             via = path.via;
             iface_is_live = true;

@@ -1,8 +1,9 @@
 "use strict";
-import React, {lazy} from "react";
+import React, {lazy, Suspense} from "react";
 import {PeerEnriched} from "../../ApplicationStore/Peers";
-import {PeerInterfaceBadge} from "./PeerNetworkView";
+import {PeerInterfaceBadge} from "./PeerInterface";
 import {PeerName} from "./PeerName";
+import {PeerHops} from "./PeerHops";
 
 const Blockie = lazy(() => import('./Blockie'));
 
@@ -29,29 +30,40 @@ export default class PeerRow extends React.PureComponent<PeersProps, PeersState>
 
     render() {
 
+        const {peer} = this.props;
+
         return <>
             <div className={`peers-row ${this?.isSelected() && "selected"} [has-profile-status]`} onClick={this.onSelectedPeer.bind(this)}>
-                <span className={`conn-status-dot status-${this.props.peer?.status}`}></span>
+                <span className={`conn-status-dot status-${peer?.status}`}></span>
 
                 {/*<div className="peers-row-avatar">*/}
-                {/*    /!*<Suspense fallback={<div>{this.getAvatar()}</div>}>*!/*/}
-                {/*    /!*    <Blockie seed={this.props.peer.identity_hash} size={50}/>*!/*/}
-                {/*    /!*</Suspense>*!/*/}
+                {/*    <Suspense fallback={<div>...</div>}>*/}
+                {/*        <Blockie seed={peer?.identity_hash} size={50}/>*/}
+                {/*    </Suspense>*/}
                 {/*</div>*/}
 
                 <span className="peers-row-main">
                     <span className="peers-row-name [is-hash]">
-                        <PeerName peer={this?.props?.peer}/>
+                        <PeerName peer={peer}/>
                     </span>
-                    <span className="peers-row-status" title={`${this.props.peer?.profile_status}`}>
-                        {this.props.peer?.profile_status}
+                    <span className="peers-row-status" title={`${peer?.profile_status}`}>
+                        {peer?.profile_status}
                     </span>
                 </span>
                 <span className="peers-row-meta">
-                    Hops: {this?.props?.peer?.hops}
-                    <div className="peer-meta">
-                        <PeerInterfaceBadge peer={this.props.peer}/>
-                    </div>
+                        {(peer?.hops != undefined) && <>
+                            <div className="peer-meta">
+                                <PeerHops peer={peer}/>
+                            </div>
+                        </>}
+
+                    {(peer?.iface_is_live && peer?.iface) && <>
+                        <div className="peer-meta">
+                            <PeerInterfaceBadge peer={peer}/>
+                        </div>
+                    </>}
+
+
                 </span>
             </div>
         </>
