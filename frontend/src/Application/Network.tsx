@@ -28,7 +28,7 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
         super(props);
 
         this.state = {
-            status: {
+            status: props.network?.status || {
                 enabled: false,
                 level: "detailed",
                 restart_required: false
