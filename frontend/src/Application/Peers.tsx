@@ -4,6 +4,7 @@ import {inject, observer} from "mobx-react"; // or 'mobx-react-lite' for functio
 import {PeerCache, PeerEnriched, Peers as PeersStore} from "../ApplicationStore/Peers";
 import PeerDetail from "./components/PeerDetail";
 import {info} from "@tauri-apps/plugin-log";
+import {ActivityStateType} from "./Network/Activity";
 
 const PeerView = lazy(() => import('./components/PeerRow'));
 
@@ -52,15 +53,6 @@ export default class Peers extends React.PureComponent<PeersProps, PeersState> {
         const {peers} = this.props;
         const {searchQuery, sortKey} = this.state;
         const collection: PeerCache = peers?.collection || {};
-        // const collection = Object.entries(collection).filter(([key: string, peer: PeerEnriched]) => {
-        //     return value !== undefined && value.status === "active";
-        // })
-        // const filteredCollection = Object.entries(collection)
-        //     .filter(([key: string, peer: PeerEnriched]) => {
-        //         if (!searchQuery) return true;
-        //         const name = peer.display_name || peer.hash;
-        //         return name.toLowerCase().includes(searchQuery.toLowerCase());
-        //     });
 
         const filteredCollection: PeerCache = Object.fromEntries(
             Object.entries(collection).filter(([key, peer]: [string, PeerEnriched | undefined]) => {
@@ -68,6 +60,12 @@ export default class Peers extends React.PureComponent<PeersProps, PeersState> {
                 const name = `${peer?.display_name || peer?.hash}`;
                 return name.toLowerCase().includes(searchQuery.toLowerCase());
             })
+        );
+
+        const interfaces = Array.from(
+            new Map(Object.entries(filteredCollection).map(([key, peer]: [string, PeerEnriched | undefined]) => [
+                `${peer?.iface}`, peer?.iface
+            ])).values()
         );
 
         return <>
@@ -98,6 +96,17 @@ export default class Peers extends React.PureComponent<PeersProps, PeersState> {
                                 </div>
                             </div>
                             <div className="peers-list-scroll" id="peers-list-scroll">
+                                <div className="activity-filters" id="activity-filters">
+                                    <button className={`activity-level-btn`} data-type={'all'}> All</button>
+                                    {interfaces.map((iface: string | undefined) => (<>
+                                        {iface !== undefined &&
+                                            <button className={`activity-level-btn`}
+                                                    data-type={iface}>
+                                                {iface}
+                                            </button>}
+                                    </>))}
+                                </div>
+
                                 <div className="peers-list-body" id="peers-list-body">
                                     {Object.entries(filteredCollection).map(([key, peer]: [string, PeerEnriched | undefined]) => (
                                         <Suspense key={`${peer?.hash}`} fallback={<div className="peers-row">Loading...</div>}>
