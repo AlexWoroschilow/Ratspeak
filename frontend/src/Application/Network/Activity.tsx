@@ -1,9 +1,8 @@
 "use strict";
-import React, {MouseEvent, Suspense} from "react";
+import React, {MouseEvent} from "react";
 import {Network, NetworkLog, NetworkLogLevel, NetworkLogStatus} from "../../ApplicationStore/Network";
 import {inject, observer} from "mobx-react";
 import {ActivityRow} from "./ActivityRow";
-import {info} from "@tauri-apps/plugin-log";
 
 interface ActivityProps {
     network?: Network;

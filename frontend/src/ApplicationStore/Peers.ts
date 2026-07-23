@@ -64,8 +64,8 @@ export interface PeerEnriched extends Peer {
     via?: string | null;
 }
 
-type PeerEnrichedStatus = PeerEnriched['status'];
-type PeerEnrichedActivityTier = PeerEnriched['activity_tier'];
+export type PeerEnrichedStatus = PeerEnriched['status'];
+export type PeerEnrichedActivityTier = PeerEnriched['activity_tier'];
 
 export interface Statistic {
     timestamp: number;
@@ -205,8 +205,6 @@ export class Peers {
                 .then((collection: Peer[]) => {
                     resolve(collection.map((peer: Peer) => {
                         return this.enrich(peer)
-                    }).filter((peer: PeerEnriched) => {
-                        return peer.status === "reachable"
                     }));
                 })
                 .catch((error: any) => {

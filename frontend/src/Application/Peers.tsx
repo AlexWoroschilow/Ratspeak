@@ -1,10 +1,8 @@
 "use strict";
-import React, {lazy, Suspense} from "react";
+import React, {lazy, Suspense, MouseEvent} from "react";
 import {inject, observer} from "mobx-react"; // or 'mobx-react-lite' for functional components
-import {PeerCache, PeerEnriched, Peers as PeersStore} from "../ApplicationStore/Peers";
+import {PeerCache, PeerEnriched, PeerEnrichedStatus, Peers as PeersStore} from "../ApplicationStore/Peers";
 import PeerDetail from "./components/PeerDetail";
-import {info} from "@tauri-apps/plugin-log";
-import {ActivityStateType} from "./Network/Activity";
 
 const PeerView = lazy(() => import('./components/PeerRow'));
 
@@ -13,9 +11,18 @@ interface PeersProps {
 }
 
 interface PeersState {
-    selected?: PeerEnriched,
-    searchQuery: string,
-    sortKey: string
+    selected?: PeerEnriched;
+    searchQuery: string;
+    sortKey: string;
+
+    filter?: {
+        interface?: string | undefined;
+        status?: string | undefined;
+    }
+
+    statuses: {
+        [key in PeerEnrichedStatus]: string;
+    }
 }
 
 @inject("peers")
@@ -27,7 +34,20 @@ export default class Peers extends React.PureComponent<PeersProps, PeersState> {
         this.state = {
             selected: undefined,
             searchQuery: "",
-            sortKey: "last_seen"
+            sortKey: "last_seen",
+
+            filter: {
+                interface: undefined,
+                status: 'reachable',
+            },
+
+            statuses: {
+                reachable: "Reachable",
+                stale: "Stale",
+                offline: "Offline",
+                unreachable: "Unreachable",
+                direct: "Direct",
+            }
         }
     }
 
@@ -49,24 +69,81 @@ export default class Peers extends React.PureComponent<PeersProps, PeersState> {
         });
     }
 
+    doApplyFilter(event: MouseEvent) {
+        const filterType: string = `${event.currentTarget.getAttribute('data-filter')}`;
+
+        let filter = {...this.state.filter};
+        const status: string = `${event.currentTarget.getAttribute('data-status')}`;
+        const iface: string = `${event.currentTarget.getAttribute('data-interface')}`;
+
+        (filterType == "all") &&
+        (filter = {
+            ...filter, ...{
+                interface: undefined,
+                status: undefined
+            }
+        });
+
+        (filterType == "interface") &&
+        (filter = {
+            ...filter, ...{
+                interface: (filter?.interface == iface) //
+                    ? undefined //
+                    : iface
+            }
+        });
+
+        (filterType == "status") &&
+        (filter = {
+            ...filter, ...{
+                status: (filter?.status == status) //
+                    ? undefined //
+                    : status
+            }
+        });
+
+        (filter != this?.state?.filter) &&
+        (this.setState({filter: filter}));
+    }
+
     render() {
         const {peers} = this.props;
-        const {searchQuery, sortKey} = this.state;
+        const {searchQuery, sortKey, statuses, filter} = this.state;
         const collection: PeerCache = peers?.collection || {};
 
-        const filteredCollection: PeerCache = Object.fromEntries(
-            Object.entries(collection).filter(([key, peer]: [string, PeerEnriched | undefined]) => {
-                if (!searchQuery) return true;
-                const name = `${peer?.display_name || peer?.hash}`;
-                return name.toLowerCase().includes(searchQuery.toLowerCase());
-            })
-        );
-
         const interfaces = Array.from(
-            new Map(Object.entries(filteredCollection).map(([key, peer]: [string, PeerEnriched | undefined]) => [
+            new Map(Object.entries(collection).map(([key, peer]: [string, PeerEnriched | undefined]) => [
                 `${peer?.iface}`, peer?.iface
             ])).values()
         );
+
+
+        let filtered = Object.entries(collection);
+
+        (searchQuery?.length > 0) &&
+        (filtered = filtered.filter(([key, peer]: [string, PeerEnriched | undefined]) => {
+            if (!searchQuery) return true;
+            const name = `${peer?.display_name || peer?.hash}`;
+            return name.toLowerCase().includes(searchQuery.toLowerCase());
+        }));
+
+        (filter?.interface !== undefined) &&
+        (filtered = filtered.filter(([key, peer]: [string, PeerEnriched | undefined]) => {
+            return `${peer?.iface}` == `${filter?.interface}`;
+        }));
+
+        (filter?.status !== undefined) &&
+        (filtered = filtered.filter(([key, peer]: [string, PeerEnriched | undefined]) => {
+            return `${peer?.status}` == `${filter?.status}`;
+        }));
+
+
+        filtered.sort(([aKey, a]: [string, PeerEnriched | undefined], [bKey, b]: [string, PeerEnriched | undefined]) => {
+            return (b?.last_seen || 0) - (a?.last_seen || 0);
+        })
+
+        const filteredCollection: PeerCache = Object.fromEntries(filtered);
+
 
         return <>
 
@@ -77,34 +154,34 @@ export default class Peers extends React.PureComponent<PeersProps, PeersState> {
                             <div className="peers-toolbar">
                                 <input type="text" id="peers-search" className="conn-search-input" placeholder="Search..." autoCorrect="off" autoCapitalize="none"
                                        spellCheck="false" value={searchQuery} onChange={this.onSearchChange.bind(this)}/>
-                                <div className="toolbar-dropdown peers-sort-dropdown">
-                                    <button className="toolbar-dropdown-btn" id="peers-sort-btn" type="button" aria-label="Sort peers" title="Sort peers">
-                                        <span className="peers-sort-label">Sort by</span>
-                                        <svg className="peers-sort-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"
-                                             strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                                            <polyline points="6 9 12 15 18 9"/>
-                                        </svg>
-                                    </button>
-                                    <div className="toolbar-dropdown-menu" id="peers-sort-menu">
-                                        <button className={`toolbar-dropdown-item ${sortKey === 'name' ? 'active' : ''}`} onClick={() => this.onSortChange('name')}>Alphabetical
-                                        </button>
-                                        <button className={`toolbar-dropdown-item ${sortKey === 'hops' ? 'active' : ''}`} onClick={() => this.onSortChange('hops')}>Hops</button>
-                                        <button className={`toolbar-dropdown-item ${sortKey === 'last_seen' ? 'active' : ''}`} onClick={() => this.onSortChange('last_seen')}>Last
-                                            Seen
-                                        </button>
-                                    </div>
-                                </div>
                             </div>
                             <div className="peers-list-scroll" id="peers-list-scroll">
                                 <div className="activity-filters" id="activity-filters">
-                                    <button className={`activity-level-btn`} data-type={'all'}> All</button>
+                                    <button className={`activity-level-btn ${(!filter?.interface && !filter?.status) && "active"}`}
+                                            onClick={this.doApplyFilter.bind(this)}
+                                            data-filter={"all"}
+                                            data-type={'all'}>
+                                        All
+                                    </button>
                                     {interfaces.map((iface: string | undefined) => (<>
                                         {iface !== undefined &&
-                                            <button className={`activity-level-btn`}
-                                                    data-type={iface}>
+                                            <button className={`activity-level-btn ${(filter?.interface == iface) && "active"}`}
+                                                    onClick={this.doApplyFilter.bind(this)}
+                                                    data-filter={"interface"}
+                                                    data-interface={iface}>
                                                 {iface}
                                             </button>}
                                     </>))}
+
+                                    {Object.entries(statuses).map(([status, label]) => (
+                                        <button className={`activity-level-btn ${(filter?.status == status) && "active"}`}
+                                                onClick={this.doApplyFilter.bind(this)}
+                                                data-filter={"status"}
+                                                data-status={status}>
+                                            {label}
+                                        </button>
+                                    ))}
+
                                 </div>
 
                                 <div className="peers-list-body" id="peers-list-body">
