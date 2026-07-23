@@ -1,7 +1,6 @@
 import React from 'react';
 import {PeerEnriched} from '../../ApplicationStore/Peers';
 import Blockie from './Blockie';
-import {PeerInterfaceBadge} from './PeerNetworkView';
 import {PeerName} from "./PeerName";
 
 interface PeerDetailProps {
@@ -125,8 +124,6 @@ export default class PeerDetail extends React.PureComponent<PeerDetailProps> {
                     <div className="peers-detail-field">
                         <span className="peers-detail-field-label">Interface</span>
                         <span className="peers-detail-field-value">
-                        {peer.iface ? `${peer.iface}${peer.iface_is_live ? '' : ' (last known)'}` : '\u2014'}
-                            <PeerInterfaceBadge peer={peer} className="ml-2"/>
                     </span>
                     </div>
                 </div>
