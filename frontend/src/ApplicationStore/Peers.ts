@@ -37,6 +37,7 @@ import {ApplicationStore} from "../ApplicationStore";
 import {invoke} from "@tauri-apps/api/core";
 import {listen} from "@tauri-apps/api/event";
 import {info} from "@tauri-apps/plugin-log";
+import {action, makeAutoObservable} from "mobx";
 
 export interface Peer {
     hash: string;
@@ -62,6 +63,9 @@ export interface PeerEnriched extends Peer {
     path_age?: number;
     via?: string | null;
 }
+
+type PeerEnrichedStatus = PeerEnriched['status'];
+type PeerEnrichedActivityTier = PeerEnriched['activity_tier'];
 
 export interface Statistic {
     timestamp: number;
@@ -124,48 +128,51 @@ export interface Statistic {
     link_count: number;
 }
 
+export interface PeerCache {
+    [key: string]: PeerEnriched | undefined;
+}
+
 export class Peers {
 
-    public collection?: Array<PeerEnriched>;
-    public statistic?: Statistic;
+    public collection: PeerCache = {};
+    public statistic: Statistic = {} as Statistic;
 
     constructor(store: ApplicationStore) {
 
+        makeAutoObservable(this, {
+            setCollection: action,
+            // clearLog: action,
+            // addLog: action,
+        });
         this.listeners();
 
         this.getPeers().then((collection: Array<PeerEnriched>) => {
-            this.collection = collection;
+            return this.setCollection(collection);
         });
     }
 
-    async listeners() {
-        // await listen<Statistic>("stats_update", (event: { payload: Statistic }) => {
-        //     info(`\nstats_update: ${JSON.stringify(event.payload)}`)
-        // });
-        // await listen<Statistic>("paths_cleared", (event: { payload: Statistic }) => {
-        //     // info(`\paths_cleared: ${JSON.stringify(event.payload)}`)
-        // });
-        // await listen<Statistic>("announce_received", (event: { payload: Statistic }) => {
-        //     // info(`\announce_received: ${JSON.stringify(event.payload)}`)
-        // });
-        // await listen<Statistic>("announces_cleared", (event: { payload: Statistic }) => {
-        //     // info(`\announces_cleared: ${JSON.stringify(event.payload)}`)
-        // });
-        // await listen<Statistic>("hub_interfaces_update", (event: { payload: Statistic }) => {
-        //     // info(`\hub_interfaces_update: ${JSON.stringify(event.payload)}`)
+    setCollection(collection: Array<PeerEnriched>): PeerCache | undefined {
+        collection?.forEach?.((peer: PeerEnriched) => {
+            this.collection[`${peer?.hash}`] = peer;
+        });
+        return this.collection;
+    }
+
+    listeners() {
+        // listen<Statistic>("stats_update", (event: { payload: Statistic }) => {
+        //     info(`\n\nstats_update: ${JSON.stringify(event.payload)}\n`)
         // });
 
-
-        await listen<any>("peers_updated", (payload: any) => {
-            info(`\npeers_updated: ${JSON.stringify(payload)}`)
+        listen<any>("peers_updated", (event: { payload: { peers: Array<Peer> } }) => {
+            // info(`\n\npeers_updated: ${JSON.stringify(payload)}\n`)
         });
 
-        await listen<any>("peer_updated", (payload: any) => {
-            info(`\npeer_updated: ${JSON.stringify(payload)}`)
+        listen<any>("peer_updated", (payload: any) => {
+            info(`\n\npeer_updated: ${JSON.stringify(payload)}\n`)
         });
 
-        await listen<any>("peer_removed", (payload: any) => {
-            info(`\npeer_removed: ${JSON.stringify(payload)}`)
+        listen<any>("peer_removed", (payload: any) => {
+            info(`\n\npeer_removed: ${JSON.stringify(payload)}\n`)
         });
     }
 

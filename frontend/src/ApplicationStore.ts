@@ -76,8 +76,6 @@ export class ApplicationStore {
         this.network = new Network(this);
 
         makeAutoObservable(this);
-        // makeAutoObservable(this.peers);
-        // makeAutoObservable(this.network);
     }
 
     /**

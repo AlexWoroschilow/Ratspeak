@@ -1,14 +1,14 @@
 "use strict";
 import React, {lazy, Suspense} from "react";
 import {inject, observer} from "mobx-react"; // or 'mobx-react-lite' for functional components
-import {ApplicationStore} from "../ApplicationStore";
-import {PeerEnriched} from "../ApplicationStore/Peers";
+import {PeerCache, PeerEnriched, Peers as PeersStore} from "../ApplicationStore/Peers";
 import PeerDetail from "./components/PeerDetail";
+import {info} from "@tauri-apps/plugin-log";
 
 const PeerView = lazy(() => import('./components/PeerRow'));
 
 interface PeersProps {
-    store?: ApplicationStore;
+    peers?: PeersStore;
 }
 
 interface PeersState {
@@ -17,7 +17,7 @@ interface PeersState {
     sortKey: string
 }
 
-@inject("store")
+@inject("peers")
 @observer
 export default class Peers extends React.PureComponent<PeersProps, PeersState> {
     constructor(props: PeersProps) {
@@ -49,14 +49,26 @@ export default class Peers extends React.PureComponent<PeersProps, PeersState> {
     }
 
     render() {
+        const {peers} = this.props;
         const {searchQuery, sortKey} = this.state;
-        const collection = this.props.store?.peers?.collection || [];
+        const collection: PeerCache = peers?.collection || {};
+        // const collection = Object.entries(collection).filter(([key: string, peer: PeerEnriched]) => {
+        //     return value !== undefined && value.status === "active";
+        // })
+        // const filteredCollection = Object.entries(collection)
+        //     .filter(([key: string, peer: PeerEnriched]) => {
+        //         if (!searchQuery) return true;
+        //         const name = peer.display_name || peer.hash;
+        //         return name.toLowerCase().includes(searchQuery.toLowerCase());
+        //     });
 
-        const filteredCollection = collection.filter((peer: PeerEnriched) => {
-            if (!searchQuery) return true;
-            const name = peer.display_name || peer.hash;
-            return name.toLowerCase().includes(searchQuery.toLowerCase());
-        });
+        const filteredCollection: PeerCache = Object.fromEntries(
+            Object.entries(collection).filter(([key, peer]: [string, PeerEnriched | undefined]) => {
+                if (!searchQuery) return true;
+                const name = `${peer?.display_name || peer?.hash}`;
+                return name.toLowerCase().includes(searchQuery.toLowerCase());
+            })
+        );
 
         return <>
 
@@ -87,8 +99,8 @@ export default class Peers extends React.PureComponent<PeersProps, PeersState> {
                             </div>
                             <div className="peers-list-scroll" id="peers-list-scroll">
                                 <div className="peers-list-body" id="peers-list-body">
-                                    {filteredCollection.map((peer: PeerEnriched) => (
-                                        <Suspense key={peer.hash} fallback={<div className="peers-row">Loading...</div>}>
+                                    {Object.entries(filteredCollection).map(([key, peer]: [string, PeerEnriched | undefined]) => (
+                                        <Suspense key={`${peer?.hash}`} fallback={<div className="peers-row">Loading...</div>}>
                                             <PeerView onSelectedPeer={this.onSelectedPeer.bind(this)}
                                                       selected={this?.state?.selected}
                                                       peer={peer}/>
