@@ -26,6 +26,7 @@ import {Setup} from "./Application/Setup";
 import {ApplicationStore, store, network, peers} from "./ApplicationStore";
 
 import "./Application.scss";
+import {NetworkActivity} from "./Application/NetworkActivity";
 
 interface ApplicationProps {
 }
@@ -79,7 +80,7 @@ export class Application extends React.Component<ApplicationProps, ApplicationSt
                                 <Route index element={<Setup/>}/>
                             </>}
 
-                            {(this?.state?.isSetupRequired === false) && <>
+                            {/*{(this?.state?.isSetupRequired === false) && <>*/}
                                 <Route index element={<Dashboard/>}/>
                                 <Route path="setup" element={<Setup/>}/>
                                 <Route path="dashboard" element={<Dashboard/>}/>
@@ -96,13 +97,14 @@ export class Application extends React.Component<ApplicationProps, ApplicationSt
                                     </React.Suspense>
                                 }/>
                                 <Route path="network" element={<Network/>}/>
+                                <Route path="network-activity" element={<NetworkActivity/>}/>
                                 <Route path="network-internet" element={<NetworkInternet/>}/>
                                 <Route path="network-bluetooth" element={<NetworkBluetooth/>}/>
                                 <Route path="network-local" element={<NetworkLocal/>}/>
                                 <Route path="network-radio" element={<NetworkRadio/>}/>
                                 <Route path="network-host" element={<NetworkHost/>}/>
                                 <Route path="settings" element={<Settings/>}/>
-                            </>}
+                            {/*</>}*/}
 
                             <Route path="*" element={
                                 <h3>{`!!!${this?.state?.error}`}</h3>

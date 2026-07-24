@@ -13,7 +13,6 @@ import {info} from "@tauri-apps/plugin-log";
 import {ApplicationStore} from "../ApplicationStore";
 import {invoke} from "@tauri-apps/api/core";
 import {action, makeAutoObservable} from "mobx";
-import {Peer, PeerEnriched} from "./Peers";
 
 
 interface NetworkLogArgs {
@@ -167,10 +166,24 @@ export interface Interfaces {
 }
 
 
+export interface Blackholes {
+    entries: Array<{
+        hash: string;
+        reason: 'Manual' | 'Malformed' | 'RateLimit' | 'ProtocolViolation' | string;
+        created: number;
+        expires_in: number | null;
+        verified?: boolean;
+    }>;
+}
+
+export type BlackholeReason = Blackholes['entries'][number]['reason'];
+export type Blackhole = Blackholes['entries'][number];
+
 export class Network {
 
     public logs: Array<NetworkLog> = [];
     public interfaces: Interfaces = {} as Interfaces;
+    public blackholes: Blackholes = {} as Blackholes;
 
     public status: NetworkLogStatus = {
         enabled: false,
@@ -182,6 +195,7 @@ export class Network {
 
     constructor(store: ApplicationStore) {
         makeAutoObservable(this, {
+            setBlackholes: action,
             setInterfaces: action,
             setStatistic: action,
             setStatus: action,
@@ -191,35 +205,17 @@ export class Network {
 
         this.listeners();
 
+
+        this.getBlackholes()
+            .then((blackholes: Blackholes) => {
+                info(`${JSON.stringify(blackholes)}`);
+                this.setBlackholes(blackholes);
+            });
+
         this.getInterfaces()
             .then((interfaces: Interfaces) => {
                 this.setInterfaces(interfaces);
             });
-    }
-
-    listeners() {
-        listen<Statistic>("stats_update",
-            (event: { payload: Statistic }) => {
-                return this.setStatistic(event.payload);
-            });
-
-        listen<NetworkLog>("network_event",
-            (event: { payload: NetworkLog }) => {
-                this.addLog(event.payload);
-            });
-
-        listen<NetworkLogStatus>("network_log_level_changed",
-            (event: { payload: NetworkLogStatus }) => {
-                this.setStatus(event.payload);
-            });
-
-        listen("announces_cleared", (event: any) => {
-            info(`\n\nannounces_cleared: ${JSON.stringify(event)}\n`)
-        });
-
-        listen("hub_interfaces_update", (event: any) => {
-            info(`\n\nhub_interfaces_update: ${JSON.stringify(event)}\n`)
-        });
     }
 
     clearLog() {
@@ -231,6 +227,11 @@ export class Network {
         this?.logs?.sort?.((a, b) => {
             return b.timestamp - a.timestamp
         });
+    }
+
+    setBlackholes(blackholes: Blackholes): Blackholes {
+        this.blackholes = blackholes;
+        return this.blackholes;
     }
 
     setInterfaces(interfaces: Interfaces): Interfaces {
@@ -251,6 +252,18 @@ export class Network {
     setStatistic(statistic: Statistic): Statistic {
         this.statistic = statistic;
         return this.statistic;
+    }
+
+    async getBlackholes(): Promise<Blackholes> {
+        return new Promise((resolve: (value: Blackholes) => void, reject) => {
+            invoke<Blackholes>('api_network_blackhole')
+                .then((blackholes: Blackholes) => {
+                    return resolve(blackholes)
+                })
+                .catch((error: any) => {
+                    return reject(new Error("Failed: api_get_peers_snapshot"))
+                });
+        });
     }
 
 
@@ -300,4 +313,50 @@ export class Network {
             });
         });
     }
+
+
+    listeners() {
+        listen<Statistic>("stats_update",
+            (event: { payload: Statistic }) => {
+                return this.setStatistic(event.payload);
+            });
+
+        listen<NetworkLog>("network_event",
+            (event: { payload: NetworkLog }) => {
+                this.addLog(event.payload);
+            });
+
+        listen<NetworkLogStatus>("network_log_level_changed",
+            (event: { payload: NetworkLogStatus }) => {
+                this.setStatus(event.payload);
+            });
+
+        setInterval(() => {
+            this.setBlackholes({
+                "entries": [
+                    {
+                        "hash": "asdasdfads",
+                        "reason": "Manual",
+                        "created": Date.now(),
+                        "expires_in": Date.now(),
+                        "verified": true
+                    }
+                ]
+            } as Blackholes);
+        }, 1000);
+
+        listen<Blackholes>("blackhole_update",
+            (event: { payload: Blackholes }) => {
+                this.setBlackholes(event.payload);
+            });
+
+        listen("announces_cleared", (event: any) => {
+            info(`\n\nannounces_cleared: ${JSON.stringify(event)}\n`)
+        });
+
+        listen("hub_interfaces_update", (event: any) => {
+            info(`\n\nhub_interfaces_update: ${JSON.stringify(event)}\n`)
+        });
+    }
+
 }

@@ -1,0 +1,13 @@
+.network-activity-main {
+  display: grid;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+
+  .activity-controls {
+    .nr-btn {
+      margin-left: 0.3rem;
+    }
+  }
+}
