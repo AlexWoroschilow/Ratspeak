@@ -81,9 +81,8 @@ export class Application extends React.Component<ApplicationProps, ApplicationSt
                             </>}
 
                             {/*{(this?.state?.isSetupRequired === false) && <>*/}
-                            <Route index element={<Dashboard/>}/>
+                            <Route index element={<Messages/>}/>
                             <Route path="setup" element={<Setup/>}/>
-                            <Route path="dashboard" element={<Dashboard/>}/>
                             <Route path="messages" element={<Messages/>}/>
                             <Route path="contacts" element={<Contacts/>}/>
                             <Route path="identity" element={<Identity/>}/>

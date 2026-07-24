@@ -162,6 +162,9 @@ export default class Peers extends React.PureComponent<PeersProps, PeersState> {
                                             data-filter={"all"}
                                             data-type={'all'}>
                                         All
+                                        {(!filter?.interface && !filter?.status) && <>
+                                            &nbsp;({Object.entries(filteredCollection).length})
+                                        </>}
                                     </button>
                                     {interfaces.map((iface: string | undefined) => (<>
                                         {iface !== undefined &&
@@ -170,6 +173,11 @@ export default class Peers extends React.PureComponent<PeersProps, PeersState> {
                                                     data-filter={"interface"}
                                                     data-interface={iface}>
                                                 {iface}
+
+                                                {(filter?.interface == iface) && <>
+                                                    &nbsp;({Object.entries(filteredCollection).length})
+                                                </>}
+
                                             </button>}
                                     </>))}
 
@@ -178,7 +186,13 @@ export default class Peers extends React.PureComponent<PeersProps, PeersState> {
                                                 onClick={this.doApplyFilter.bind(this)}
                                                 data-filter={"status"}
                                                 data-status={status}>
+
                                             {label}
+
+                                            {(filter?.status == status) && <>
+                                                &nbsp;({Object.entries(filteredCollection).length})
+                                            </>}
+
                                         </button>
                                     ))}
 

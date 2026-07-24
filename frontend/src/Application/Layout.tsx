@@ -48,7 +48,6 @@ export class Layout extends React.Component<LayoutProps, LayoutState> {
 
     isActive(pathPrefix: string) {
         const currentPath = this.state.location;
-        info(`??${currentPath}`);
         if (pathPrefix === '/') return currentPath === '/' || currentPath === '';
         return currentPath.startsWith(pathPrefix);
     }
@@ -114,10 +113,6 @@ export class Layout extends React.Component<LayoutProps, LayoutState> {
                         <span className="sidebar-brand-text">Ratspeak</span>
                     </div>
                     <div className="sidebar-divider"></div>
-                    <a className={`nav-item ${this.isActive('#dashboard') && 'active'}`} href="#dashboard" title="Home">
-                        <IoHomeOutline size={20}/>
-                        <span className="nav-label">Home</span>
-                    </a>
                     <a className={`nav-item ${this.isActive('#messages') && 'active'}`} href="#messages" title="Messages">
                         <LuMessageSquare size={20}/>
                         <span className="nav-label">Messages</span>
@@ -126,10 +121,6 @@ export class Layout extends React.Component<LayoutProps, LayoutState> {
                     <a className={`nav-item ${this.isActive('#contacts') && 'active'}`} href="#contacts" title="Contacts">
                         <LuUsers size={20}/>
                         <span className="nav-label">Contacts</span>
-                    </a>
-                    <a className={`nav-item ${this.isActive('#identity') && 'active'}`} href="#identity" title="Identity">
-                        <IoKeyOutline size={20}/>
-                        <span className="nav-label">Identity</span>
                     </a>
                     <a className={`nav-item ${this.isActive('#peers') && 'active'}`} href="#peers" title="Peers">
                         <CiGlobe size={20}/>
@@ -143,8 +134,10 @@ export class Layout extends React.Component<LayoutProps, LayoutState> {
                         <FiActivity size={20}/>
                         <span className="nav-label">Activity</span>
                     </a>
-
-
+                    <a className={`nav-item ${this.isActive('#identity') && 'active'}`} href="#identity" title="Identity">
+                        <IoKeyOutline size={20}/>
+                        <span className="nav-label">Identities</span>
+                    </a>
                     <a className={`nav-item ${this.isActive('#settings') && 'active'}`} href="#settings" title="Settings">
                         <PiGearSix size={20}/>
                         <span className="nav-label">Settings</span>
