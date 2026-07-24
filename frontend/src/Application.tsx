@@ -81,29 +81,29 @@ export class Application extends React.Component<ApplicationProps, ApplicationSt
                             </>}
 
                             {/*{(this?.state?.isSetupRequired === false) && <>*/}
-                                <Route index element={<Dashboard/>}/>
-                                <Route path="setup" element={<Setup/>}/>
-                                <Route path="dashboard" element={<Dashboard/>}/>
-                                <Route path="messages" element={<Messages/>}/>
-                                <Route path="contacts" element={<Contacts/>}/>
-                                <Route path="identity" element={<Identity/>}/>
-                                <Route path="identity" element={<Identity/>}/>
-                                <Route path="identity-import" element={<IdentityImport/>}/>
-                                <Route path="identity-create" element={<IdentityCreate/>}/>
-                                <Route path="identity-hardware" element={<IdentityHardware/>}/>
-                                <Route path="peers" element={
-                                    <React.Suspense fallback={<div className="peers-row-loading">Loading...</div>}>
-                                        <Peers/>
-                                    </React.Suspense>
-                                }/>
-                                <Route path="network" element={<Network/>}/>
-                                <Route path="network-activity" element={<NetworkActivity/>}/>
-                                <Route path="network-internet" element={<NetworkInternet/>}/>
-                                <Route path="network-bluetooth" element={<NetworkBluetooth/>}/>
-                                <Route path="network-local" element={<NetworkLocal/>}/>
-                                <Route path="network-radio" element={<NetworkRadio/>}/>
-                                <Route path="network-host" element={<NetworkHost/>}/>
-                                <Route path="settings" element={<Settings/>}/>
+                            <Route index element={<Dashboard/>}/>
+                            <Route path="setup" element={<Setup/>}/>
+                            <Route path="dashboard" element={<Dashboard/>}/>
+                            <Route path="messages" element={<Messages/>}/>
+                            <Route path="contacts" element={<Contacts/>}/>
+                            <Route path="identity" element={<Identity/>}/>
+                            <Route path="identity" element={<Identity/>}/>
+                            <Route path="identity-import" element={<IdentityImport/>}/>
+                            <Route path="identity-create" element={<IdentityCreate/>}/>
+                            <Route path="identity-hardware" element={<IdentityHardware/>}/>
+                            <Route path="peers" element={
+                                <React.Suspense fallback={<div className="peers-row-loading">Loading...</div>}>
+                                    <Peers/>
+                                </React.Suspense>
+                            }/>
+                            <Route path="network-interfaces" element={<Network/>}/>
+                            <Route path="network-activity" element={<NetworkActivity/>}/>
+                            <Route path="network-internet" element={<NetworkInternet/>}/>
+                            <Route path="network-bluetooth" element={<NetworkBluetooth/>}/>
+                            <Route path="network-local" element={<NetworkLocal/>}/>
+                            <Route path="network-radio" element={<NetworkRadio/>}/>
+                            <Route path="network-host" element={<NetworkHost/>}/>
+                            <Route path="settings" element={<Settings/>}/>
                             {/*</>}*/}
 
                             <Route path="*" element={

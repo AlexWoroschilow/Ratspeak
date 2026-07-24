@@ -3,12 +3,10 @@ import React from "react";
 
 
 import "./Network.scss";
-import {Activity} from "./Network/Activity";
 import {inject, observer} from "mobx-react";
 
 
 import {Network as NetworkStore, NetworkLogStatus} from "../ApplicationStore/Network";
-import {BallTriangle} from "react-loader-spinner";
 import {Status} from "./Network/Status";
 
 interface NetworkProps {

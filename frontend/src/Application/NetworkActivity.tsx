@@ -92,10 +92,7 @@ export class NetworkActivity extends React.Component<NetworkActivityProps, Netwo
 
                             <div className="activity-header">
                                 <span className="activity-title">
-                                    Network Activity
-                                    {(this?.state?.status?.enabled === true) && <>
-                                        &nbsp;({network?.logs?.length})
-                                    </>}
+                                    Network Activity &nbsp;({network?.logs?.length})
                                 </span>
 
                                 <label className="prop-toggle activity-toggle">

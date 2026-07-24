@@ -8,7 +8,7 @@
 // *   `announce_triggered`: Confirms that a local announcement has been sent.
 // *   `node_operation_status`: General status updates for RNode/interface operations.
 //
-import {listen} from "@tauri-apps/api/event";
+import {listen, UnlistenFn} from "@tauri-apps/api/event";
 import {info} from "@tauri-apps/plugin-log";
 import {ApplicationStore} from "../ApplicationStore";
 import {invoke} from "@tauri-apps/api/core";
@@ -185,6 +185,12 @@ export class Network {
     public interfaces: Interfaces = {} as Interfaces;
     public blackholes: Blackholes = {} as Blackholes;
 
+    protected unlistenNetworkEvent: Promise<UnlistenFn> | undefined = undefined;
+    protected unlistenNetworkLogLevel: Promise<UnlistenFn> | undefined = undefined;
+    protected unlistenBlackholeUpdate: Promise<UnlistenFn> | undefined = undefined;
+    protected unlistenStatisticUpdate: Promise<UnlistenFn> | undefined = undefined;
+
+
     public status: NetworkLogStatus = {
         enabled: false,
         level: "detailed",
@@ -203,12 +209,8 @@ export class Network {
             addLog: action,
         });
 
-        this.listeners();
-
-
         this.getBlackholes()
             .then((blackholes: Blackholes) => {
-                info(`${JSON.stringify(blackholes)}`);
                 this.setBlackholes(blackholes);
             });
 
@@ -216,6 +218,11 @@ export class Network {
             .then((interfaces: Interfaces) => {
                 this.setInterfaces(interfaces);
             });
+
+        this.doToggleListenerStatisticUpdate()
+            .doToggleListenerBlackholeUpdate()
+            .doToggleListenerNetworkEvent()
+            .doToggleListenerNetworkLog();
     }
 
     clearLog() {
@@ -243,8 +250,12 @@ export class Network {
     setStatus(status: NetworkLogStatus): NetworkLogStatus {
         this.status = status;
 
+        this.doToggleListenerNetworkEvent()
+            .doToggleListenerNetworkLog();
+
         (this.status?.enabled == false) &&
         (this.clearLog());
+
 
         return this.status;
     }
@@ -285,7 +296,6 @@ export class Network {
             invoke<NetworkLogStatus>('set_network_log_level', {
                 level: level
             }).then((status: NetworkLogStatus) => {
-                info(`\n\nset_network_log_level: ${JSON.stringify(status)}\n`);
                 return resolve(this.setStatus(status));
             }).catch((error: any) => {
                 return reject(error);
@@ -314,49 +324,62 @@ export class Network {
         });
     }
 
+    doToggleListenerStatisticUpdate(): this {
+        // (this?.unlistenStatisticUpdate != undefined) &&
+        // (this?.unlistenStatisticUpdate?.then?.(() => {
+        //     info("done: unlisten stats_update");
+        // }));
 
-    listeners() {
-        listen<Statistic>("stats_update",
+        this.unlistenStatisticUpdate = listen<Statistic>("stats_update",
             (event: { payload: Statistic }) => {
                 return this.setStatistic(event.payload);
             });
+        return this;
+    }
 
-        listen<NetworkLog>("network_event",
-            (event: { payload: NetworkLog }) => {
-                this.addLog(event.payload);
-            });
 
-        listen<NetworkLogStatus>("network_log_level_changed",
-            (event: { payload: NetworkLogStatus }) => {
-                this.setStatus(event.payload);
-            });
+    doToggleListenerBlackholeUpdate(): this {
+        // (this?.unlistenBlackholeUpdate != undefined) &&
+        // (this?.unlistenBlackholeUpdate?.then?.(() => {
+        //     info("done: unlisten blackhole_update");
+        // }));
 
-        setInterval(() => {
-            this.setBlackholes({
-                "entries": [
-                    {
-                        "hash": "asdasdfads",
-                        "reason": "Manual",
-                        "created": Date.now(),
-                        "expires_in": Date.now(),
-                        "verified": true
-                    }
-                ]
-            } as Blackholes);
-        }, 1000);
-
-        listen<Blackholes>("blackhole_update",
+        this.unlistenBlackholeUpdate = listen<Blackholes>("blackhole_update",
             (event: { payload: Blackholes }) => {
                 this.setBlackholes(event.payload);
             });
-
-        listen("announces_cleared", (event: any) => {
-            info(`\n\nannounces_cleared: ${JSON.stringify(event)}\n`)
-        });
-
-        listen("hub_interfaces_update", (event: any) => {
-            info(`\n\nhub_interfaces_update: ${JSON.stringify(event)}\n`)
-        });
+        return this;
     }
+
+
+    doToggleListenerNetworkLog(): this {
+        // (this?.unlistenNetworkLogLevel != undefined) &&
+        // (this?.unlistenNetworkLogLevel?.then?.(() => {
+        //     info("done: unlisten network_log_level_changed");
+        // }));
+
+        this.unlistenNetworkLogLevel = listen<NetworkLogStatus>("network_log_level_changed",
+            (event: { payload: NetworkLogStatus }) => {
+                this.setStatus(event.payload);
+            });
+        return this;
+    }
+
+    doToggleListenerNetworkEvent(): this {
+        if (this?.status?.enabled !== true) {
+            (this?.unlistenNetworkEvent != undefined) &&
+            (this?.unlistenNetworkEvent?.then?.(() => {
+                info("done: unlisten network_event");
+            }));
+            return this;
+        }
+
+        this.unlistenNetworkEvent = listen<NetworkLog>("network_event",
+            (event: { payload: NetworkLog }) => {
+                this.addLog(event.payload);
+            });
+        return this;
+    }
+
 
 }
