@@ -179,6 +179,14 @@ export interface Blackholes {
 export type BlackholeReason = Blackholes['entries'][number]['reason'];
 export type Blackhole = Blackholes['entries'][number];
 
+
+// RS.invoke('enable_auto_interface', { name: result.name, options: result.options }).catch(function(err) {
+//     if (window._activeProgressDialog && window._activeProgressDialog.error) {
+//         window._activeProgressDialog.error((err && err.message) || 'Failed to enable Local Network');
+//     }
+// });
+
+
 export class Network {
 
     public logs: Array<NetworkLog> = [];
@@ -223,6 +231,25 @@ export class Network {
             .doToggleListenerBlackholeUpdate()
             .doToggleListenerNetworkEvent()
             .doToggleListenerNetworkLog();
+
+
+        listen<NetworkLog>("hub_interfaces_update",
+            (event: { payload: any }) => {
+                info(`???hub_interfaces_update: ${JSON.stringify(event)}`);
+            });
+
+// var PUBLIC_TCP_SERVERS = [
+//     { id: 'ratspeak-ruby', name: 'Ruby', host: '1.ratspeak.org', port: 4141, ... },
+//     { id: 'ratspeak-emerald', name: 'Emerald', host: '2.ratspeak.org', port: 4242, ... },
+//     { id: 'ratspeak-diamond', name: 'Diamond', host: '3.ratspeak.org', port: 4343, ... },
+//     { id: 'beleth', name: 'Beleth', host: 'rns.beleth.net', port: 4242, ... },
+//     { id: 'rmap', name: 'RMAP', host: 'rmap.world', port: 4242, ... },
+// ];
+
+        invoke<Blackholes>('api_hub_interfaces')
+            .then((data: any) => {
+                info(`???hub_interfaces_update: ${JSON.stringify(data)}`);
+            });
     }
 
     clearLog() {

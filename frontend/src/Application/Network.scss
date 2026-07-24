@@ -3,4 +3,8 @@
     margin-left: 1rem;
     margin-right: auto;
   }
+
+  .network-main {
+    grid-template-columns: 1fr 5fr;
+  }
 }

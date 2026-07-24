@@ -39,3 +39,5 @@ services:
     network_mode: host
     stdin_open: true
     tty: true
+    depends_on:
+      - frontend
