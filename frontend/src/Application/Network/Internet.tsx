@@ -1,20 +1,22 @@
 "use strict";
 import React from "react";
 import {GoGlobe} from "react-icons/go";
-import {IoGitNetworkOutline, IoStopOutline} from "react-icons/io5";
-import {VscDebugConnected, VscDebugDisconnect, VscDebugDisconnectCompact, VscDebugStart} from "react-icons/vsc";
+import {IoGitNetworkOutline} from "react-icons/io5";
+import {VscDebugDisconnect} from "react-icons/vsc";
 import "./Internet.scss";
-import {PiLinkBreak, PiLinkBreakLight, PiLinkBreakThin, PiPlugsConnected, PiPlugsConnectedBold, PiPlugsConnectedLight} from "react-icons/pi";
-import {CiPlay1} from "react-icons/ci";
-import {IoMdClose} from "react-icons/io";
-import {AiOutlineDisconnect} from "react-icons/ai";
-import {RxLinkBreak1, RxLinkBreak2} from "react-icons/rx";
-import {BallTriangle} from "react-loader-spinner";
+import {inject, observer} from "mobx-react";
+import {Interfaces, Network as NetworkStore} from "../../ApplicationStore/Network";
+import {PiPlugsConnectedLight} from "react-icons/pi";
 
 interface InternetProps {
+    network?: NetworkStore;
 }
 
 interface InternetState {
+    error?: {
+        code: string;
+        message: string
+    } | undefined;
     servers: Array<{
         id?: string;
         name?: string;
@@ -24,6 +26,7 @@ interface InternetState {
         mark_icon?: string;
         mark?: string;
         tags?: Array<string>;
+        isConnected: boolean;
         aliases?: Array<{
             host: string;
             port: number,
@@ -31,70 +34,129 @@ interface InternetState {
     }>
 }
 
+@inject("network")
+@observer
 class Internet extends React.Component<InternetProps, InternetState> {
     constructor(props: InternetProps) {
         super(props);
 
         this.state = {
-            servers: [
-                {
-                    id: 'ratspeak-ruby',
-                    name: 'Ruby',
-                    host: '1.ratspeak.org',
-                    port: 4141,
-                    tone: 'ruby',
-                    mark_icon: 'gem',
-                    tags: ['OFFICIAL']
-                },
-                {
-                    id: 'ratspeak-emerald',
-                    name: 'Emerald',
-                    host: '2.ratspeak.org',
-                    port: 4242,
-                    tone: 'emerald',
-                    mark_icon: 'gem',
-                    tags: ['OFFICIAL'],
-                    aliases: [
-                        {
-                            host: 'rns.ratspeak.org',
-                            port: 4242
-                        }
-                    ]
-                },
-                {
-                    id: 'ratspeak-diamond',
-                    name: 'Diamond',
-                    host: '3.ratspeak.org',
-                    port: 4343,
-                    tone: 'diamond',
-                    mark_icon: 'gem',
-                    tags: ['OFFICIAL']
-                },
-                {
-                    id: 'beleth',
-                    name: 'Beleth',
-                    host: 'rns.beleth.net',
-                    port: 4242,
-                    tone: 'beleth',
-                    mark: 'B',
-                    tags: ['UNOFFICIAL']
-                },
-                {
-                    id: 'rmap',
-                    name: 'RMAP',
-                    host: 'rmap.world',
-                    port: 4242,
-                    tone: 'rmap',
-                    mark: 'R',
-                    tags: ['UNOFFICIAL']
-                }
-            ]
+            servers: this.getServers()
         }
+    }
+
+    getServers() {
+        const servers = [
+            {
+                id: 'ratspeak-ruby',
+                name: 'Ruby',
+                host: '1.ratspeak.org',
+                port: 4141,
+                tone: 'ruby',
+                mark_icon: 'gem',
+                isConnected: false,
+                tags: ['OFFICIAL'],
+            },
+            {
+                id: 'ratspeak-emerald',
+                name: 'Emerald',
+                host: '2.ratspeak.org',
+                port: 4242,
+                tone: 'emerald',
+                mark_icon: 'gem',
+                isConnected: false,
+                tags: ['OFFICIAL'],
+            },
+            {
+                id: 'ratspeak-diamond',
+                name: 'Diamond',
+                host: '3.ratspeak.org',
+                port: 4343,
+                tone: 'diamond',
+                mark_icon: 'gem',
+                isConnected: false,
+                tags: ['OFFICIAL']
+            },
+            {
+                id: 'beleth',
+                name: 'Beleth',
+                host: 'rns.beleth.net',
+                port: 4242,
+                tone: 'beleth',
+                mark: 'B',
+                isConnected: false,
+                tags: ['UNOFFICIAL']
+            },
+            {
+                id: 'rmap',
+                name: 'RMAP',
+                host: 'rmap.world',
+                port: 4242,
+                tone: 'rmap',
+                mark: 'R',
+                isConnected: false,
+                tags: ['UNOFFICIAL']
+            }
+        ];
+
+        const {network} = this.props;
+        const {tcp_client} = network?.interfaces as Interfaces;
+        const enabled = tcp_client.map((server) => {
+            return server.name;
+        })
+
+        servers.forEach((server) => {
+            (enabled.includes(server.name)) &&
+            (server.isConnected = true);
+        });
+
+        return servers;
+    }
+
+
+    doToggleServer(event: any) {
+        const {network} = this.props;
+        const servers = this.getServers();
+
+        const unique: string = `${event.currentTarget.getAttribute('data-server')}`;
+        const serversSelected: any = servers.filter((server) => {
+            return server.id == unique;
+        });
+
+        serversSelected?.forEach?.((server: any) => {
+
+            (server.isConnected === false) &&
+            network?.doConnectTCP(server).then(() => {
+
+                servers.forEach((server) => {
+                    server.isConnected = server.id == unique;
+                });
+
+                return this.setState({servers: servers});
+            }).catch((error) => {
+                return this.setState({error: error});
+            });
+
+            (server.isConnected === true) &&
+            network?.doDisconnectTCP(server).then(() => {
+
+                servers.forEach((server) => {
+                    (server.id == unique) &&
+                    (server.isConnected = false)
+                });
+
+                return this.setState({servers: servers});
+            }).catch((error) => {
+                return this.setState({error: error});
+            });
+        });
+
+        return this.setState({error: undefined});
     }
 
     render() {
 
-        const {servers} = this.state;
+        const {servers, error} = this.state;
 
         return <>
             <div className="bottom-sheet-header">
@@ -106,13 +168,20 @@ class Internet extends React.Component<InternetProps, InternetState> {
                 </div>
             </div>
             <div className="bottom-sheet-body">
+                {(error?.message != undefined) && <>
+                    <div className="rs-dialog-field-error" id="rnode-public-map-error">
+                        {error?.message}
+                    </div>
+                </>}
                 <div className="connect-tab-panel active" id="connect-public-panel" role="tabpanel" aria-labelledby="connect-tab-public">
                     <div className="public-server-list" id="public-server-list">
                         {servers?.map?.((server) => (
                             <button type="button" className={`public-server-card public-server-card--${server.tone}`} aria-label="Connect Ruby" title="Connect Ruby">
                             <span className="public-server-mark">
-                                <VscDebugDisconnect size={20}/>
-                                {/*<PiPlugsConnectedLight size={20}/>*/}
+
+                                {(server?.isConnected === true) && <PiPlugsConnectedLight size={20}/>}
+                                {(server?.isConnected === false) && <VscDebugDisconnect size={20}/>}
+
                             </span>
                                 <span className="public-server-main">
                                     <span className="public-server-name">
@@ -127,7 +196,9 @@ class Internet extends React.Component<InternetProps, InternetState> {
                                 </span>
                                 <span className="public-server-action">
                                     <label className="prop-toggle activity-toggle">
-                                        <input type="checkbox" data-server={server.id} checked={true}/>
+                                        <input type="checkbox" data-server={server.id}
+                                               checked={server.isConnected}
+                                               onChange={this.doToggleServer.bind(this)}/>
                                         <span className="prop-slider"></span>
                                     </label>
                                 </span>

@@ -180,6 +180,15 @@ export type BlackholeReason = Blackholes['entries'][number]['reason'];
 export type Blackhole = Blackholes['entries'][number];
 
 
+export interface ConfigTCP {
+    host: string;
+    port: number;
+    name?: string;
+    ifac_enabled?: boolean
+    ifac_network_name?: string;
+    ifac_passphrase?: string;
+}
+
 // RS.invoke('enable_auto_interface', { name: result.name, options: result.options }).catch(function(err) {
 //     if (window._activeProgressDialog && window._activeProgressDialog.error) {
 //         window._activeProgressDialog.error((err && err.message) || 'Failed to enable Local Network');
@@ -197,6 +206,7 @@ export class Network {
     protected unlistenNetworkLogLevel: Promise<UnlistenFn> | undefined = undefined;
     protected unlistenBlackholeUpdate: Promise<UnlistenFn> | undefined = undefined;
     protected unlistenStatisticUpdate: Promise<UnlistenFn> | undefined = undefined;
+    protected unlistenInterfacesUpdate: Promise<UnlistenFn> | undefined = undefined;
 
 
     public status: NetworkLogStatus = {
@@ -228,23 +238,10 @@ export class Network {
             });
 
         this.doToggleListenerStatisticUpdate()
+            .doToggleListenerInterfacesUpdate()
             .doToggleListenerBlackholeUpdate()
             .doToggleListenerNetworkEvent()
             .doToggleListenerNetworkLog();
-
-
-        listen<NetworkLog>("hub_interfaces_update",
-            (event: { payload: any }) => {
-                info(`???hub_interfaces_update: ${JSON.stringify(event)}`);
-            });
-
-// var PUBLIC_TCP_SERVERS = [
-//     { id: 'ratspeak-ruby', name: 'Ruby', host: '1.ratspeak.org', port: 4141, ... },
-//     { id: 'ratspeak-emerald', name: 'Emerald', host: '2.ratspeak.org', port: 4242, ... },
-//     { id: 'ratspeak-diamond', name: 'Diamond', host: '3.ratspeak.org', port: 4343, ... },
-//     { id: 'beleth', name: 'Beleth', host: 'rns.beleth.net', port: 4242, ... },
-//     { id: 'rmap', name: 'RMAP', host: 'rmap.world', port: 4242, ... },
-// ];
 
         invoke<Blackholes>('api_hub_interfaces')
             .then((data: any) => {
@@ -292,6 +289,31 @@ export class Network {
         return this.statistic;
     }
 
+    async doConnectTCP(config: ConfigTCP) {
+        return new Promise((resolve: (value: boolean) => void, reject) => {
+            invoke('add_tcp_connection', {
+                args: {...config}
+            }).then(() => {
+                info(`!!!${"success!"}`);
+                return resolve(true);
+            }).catch((error: any) => {
+                return reject(error)
+            });
+        });
+    }
+
+    async doDisconnectTCP(config: Partial<ConfigTCP>) {
+        return new Promise((resolve: (value: boolean) => void, reject) => {
+            invoke('remove_tcp_connection', config)
+                .then(() => {
+                    return resolve(true);
+                }).catch((error: any) => {
+                return reject(error)
+            });
+        });
+    }
+
+
     async getBlackholes(): Promise<Blackholes> {
         return new Promise((resolve: (value: Blackholes) => void, reject) => {
             invoke<Blackholes>('api_network_blackhole')
@@ -299,7 +321,7 @@ export class Network {
                     return resolve(blackholes)
                 })
                 .catch((error: any) => {
-                    return reject(new Error("Failed: api_get_peers_snapshot"))
+                    return reject(error)
                 });
         });
     }
@@ -408,5 +430,17 @@ export class Network {
         return this;
     }
 
+    doToggleListenerInterfacesUpdate() {
+        // (this?.unlistenInterfacesUpdate != undefined) &&
+        // (this?.unlistenInterfacesUpdate?.then?.(() => {
+        //     info("done: unlisten hub_interfaces_update");
+        // }));
+
+        this.unlistenInterfacesUpdate = listen<Interfaces>("hub_interfaces_update",
+            (event: { payload: Interfaces }) => {
+                this.setInterfaces(event.payload);
+            });
+        return this;
+    }
 
 }
