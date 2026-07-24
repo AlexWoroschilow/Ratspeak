@@ -172,7 +172,12 @@ export class Network {
     public logs: Array<NetworkLog> = [];
     public interfaces: Interfaces = {} as Interfaces;
 
-    public status: NetworkLogStatus = {} as NetworkLogStatus;
+    public status: NetworkLogStatus = {
+        enabled: false,
+        level: "detailed",
+        restart_required: false
+    } as NetworkLogStatus;
+
     public statistic: Statistic = {} as Statistic;
 
     constructor(store: ApplicationStore) {
@@ -267,6 +272,7 @@ export class Network {
             invoke<NetworkLogStatus>('set_network_log_level', {
                 level: level
             }).then((status: NetworkLogStatus) => {
+                info(`\n\nset_network_log_level: ${JSON.stringify(status)}\n`);
                 return resolve(this.setStatus(status));
             }).catch((error: any) => {
                 return reject(error);

@@ -5,8 +5,6 @@ import React from "react";
 import "./Network.scss";
 import {Activity} from "./Network/Activity";
 import {inject, observer} from "mobx-react";
-import {ApplicationStore} from "../ApplicationStore";
-import {info} from "@tauri-apps/plugin-log";
 
 
 import {Network as NetworkStore, NetworkLogStatus} from "../ApplicationStore/Network";
@@ -29,11 +27,7 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
         super(props);
 
         this.state = {
-            status: props.network?.status || {
-                enabled: false,
-                level: "detailed",
-                restart_required: false
-            } as NetworkLogStatus
+            status: props?.network?.status
         }
     }
 
