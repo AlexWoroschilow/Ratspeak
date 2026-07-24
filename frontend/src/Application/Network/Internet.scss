@@ -4,8 +4,13 @@
 }
 
 .public-server-action {
-  width: initial;
-  height: initial;
-  background: none;
-  border: none;
+  min-width: initial !important;;
+  height: initial !important;;
+  background: none !important;
+  border: none !important;
+
+  .prop-toggle {
+    margin-left: auto !important;
+    margin-right: auto !important;
+  }
 }
