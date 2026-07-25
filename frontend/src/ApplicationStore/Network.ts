@@ -98,6 +98,7 @@ export interface Statistic {
     link_count: number;
 }
 
+export type StatisticInterfaces = Statistic['interface_stats']['interfaces'];
 export type StatisticInterface = Statistic['interface_stats']['interfaces'][number];
 
 export interface Interfaces {
@@ -201,13 +202,7 @@ export class Network {
     public logs: Array<NetworkLog> = [];
     public interfaces: Interfaces = {} as Interfaces;
     public blackholes: Blackholes = {} as Blackholes;
-
-    protected unlistenNetworkEvent: Promise<UnlistenFn> | undefined = undefined;
-    protected unlistenNetworkLogLevel: Promise<UnlistenFn> | undefined = undefined;
-    protected unlistenBlackholeUpdate: Promise<UnlistenFn> | undefined = undefined;
-    protected unlistenStatisticUpdate: Promise<UnlistenFn> | undefined = undefined;
-    protected unlistenInterfacesUpdate: Promise<UnlistenFn> | undefined = undefined;
-
+    public statistic: Statistic = {} as Statistic;
 
     public status: NetworkLogStatus = {
         enabled: false,
@@ -215,7 +210,12 @@ export class Network {
         restart_required: false
     } as NetworkLogStatus;
 
-    public statistic: Statistic = {} as Statistic;
+
+    protected unlistenNetworkEvent: Promise<UnlistenFn> | undefined = undefined;
+    protected unlistenNetworkLogLevel: Promise<UnlistenFn> | undefined = undefined;
+    protected unlistenBlackholeUpdate: Promise<UnlistenFn> | undefined = undefined;
+    protected unlistenStatisticUpdate: Promise<UnlistenFn> | undefined = undefined;
+    protected unlistenInterfacesUpdate: Promise<UnlistenFn> | undefined = undefined;
 
     constructor(store: ApplicationStore) {
         makeAutoObservable(this, {
@@ -289,12 +289,11 @@ export class Network {
         return this.statistic;
     }
 
-    async doConnectTCP(config: ConfigTCP) {
+    async addConnectionTCP(config: ConfigTCP) {
         return new Promise((resolve: (value: boolean) => void, reject) => {
             invoke('add_tcp_connection', {
                 args: {...config}
             }).then(() => {
-                info(`!!!${"success!"}`);
                 return resolve(true);
             }).catch((error: any) => {
                 return reject(error)
@@ -302,7 +301,7 @@ export class Network {
         });
     }
 
-    async doDisconnectTCP(config: Partial<ConfigTCP>) {
+    async removeConnectionTCP(config: Partial<ConfigTCP>) {
         return new Promise((resolve: (value: boolean) => void, reject) => {
             invoke('remove_tcp_connection', config)
                 .then(() => {

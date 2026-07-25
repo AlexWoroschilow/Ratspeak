@@ -5,8 +5,9 @@ import {IoGitNetworkOutline} from "react-icons/io5";
 import {VscDebugDisconnect} from "react-icons/vsc";
 import "./Internet.scss";
 import {inject, observer} from "mobx-react";
-import {Interfaces, Network as NetworkStore} from "../../ApplicationStore/Network";
+import {Interfaces, Network as NetworkStore, Statistic, StatisticInterface, StatisticInterfaces} from "../../ApplicationStore/Network";
 import {PiPlugsConnectedLight} from "react-icons/pi";
+import {info} from "@tauri-apps/plugin-log";
 
 interface InternetProps {
     network?: NetworkStore;
@@ -126,7 +127,7 @@ class Internet extends React.Component<InternetProps, InternetState> {
         serversSelected?.forEach?.((server: any) => {
 
             (server.isConnected === false) &&
-            network?.doConnectTCP(server).then(() => {
+            network?.addConnectionTCP(server).then(() => {
 
                 servers.forEach((server) => {
                     server.isConnected = server.id == unique;
@@ -138,7 +139,7 @@ class Internet extends React.Component<InternetProps, InternetState> {
             });
 
             (server.isConnected === true) &&
-            network?.doDisconnectTCP(server).then(() => {
+            network?.removeConnectionTCP(server).then(() => {
 
                 servers.forEach((server) => {
                     (server.id == unique) &&
@@ -156,7 +157,12 @@ class Internet extends React.Component<InternetProps, InternetState> {
 
     render() {
 
+        const {network} = this.props;
         const {servers, error} = this.state;
+        const {tcp_client} = network?.interfaces as Interfaces;
+        const interfaces = tcp_client.filter((iface: any) => {
+            return iface.type == "TCPClientInterface";
+        })
 
         return <>
             <div className="bottom-sheet-header">
@@ -220,7 +226,17 @@ class Internet extends React.Component<InternetProps, InternetState> {
                 <div className="connect-tab-panel active" id="connect-custom-panel" role="tabpanel" aria-labelledby="connect-tab-custom">
                     <div className="modal-field" id="connect-quick-field">
                         <div className="quick-connect-options" id="quick-connect-list">
-                            <div id="qc-empty" className="inline-hint" style={{padding: "8px 0"}}>No saved custom connections. Connect to a node below to save it here.</div>
+                            {(!interfaces?.length) && <>
+                                <div id="qc-empty" className="inline-hint" style={{padding: "8px 0"}}>
+                                    No saved custom connections. Connect to a node below to save it here.
+                                </div>
+                            </>}
+
+                            {(interfaces.length > 0) && <>
+                                {interfaces?.map?.((iface) => (
+                                    <h3>{iface.name}</h3>
+                                ))}
+                            </>}
                         </div>
                     </div>
                     <div className="modal-field">
@@ -233,20 +249,20 @@ class Internet extends React.Component<InternetProps, InternetState> {
                         <input type="number" id="connect-port" className="modal-input" placeholder="4242" min="1" max="65535" autoCorrect="off" autoCapitalize="none"
                                spellCheck="false"/>
                     </div>
-                    <div className="modal-field" id="connect-name-field" style={{display: "none"}}>
+                    <div className="modal-field" id="connect-name-field">
                         <label>Name</label>
                         <input type="text" id="connect-name" className="modal-input" placeholder="Ratspeak Hub" maxLength={32} autoCorrect="off" autoCapitalize="none"
                                spellCheck="false"/>
                     </div>
-                    <label className="rs-dialog-checkbox-wrap mt-4" id="connect-backbone-row" style={{display: "none"}}>
+                    <label className="rs-dialog-checkbox-wrap mt-4" id="connect-backbone-row">
                         <input type="checkbox" id="connect-use-backbone" className="rs-dialog-checkbox"/>
                         <span className="rs-dialog-checkbox-label">Experimental: Use Backbone</span>
                     </label>
-                    <label className="rs-dialog-checkbox-wrap mt-4" id="connect-ifac-row" style={{display: "none"}}>
+                    <label className="rs-dialog-checkbox-wrap mt-4" id="connect-ifac-row">
                         <input type="checkbox" id="connect-use-ifac" className="rs-dialog-checkbox" data-bound="1"/>
                         <span className="rs-dialog-checkbox-label">Use IFAC</span>
                     </label>
-                    <div id="connect-ifac-fields" style={{display: "none"}}>
+                    <div id="connect-ifac-fields">
                         <div className="modal-field">
                             <label>IFAC Network Name</label>
                             <input type="text" id="connect-ifac-network-name" className="modal-input" placeholder="Optional" maxLength={128} autoCorrect="off"
