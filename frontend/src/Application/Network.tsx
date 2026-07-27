@@ -6,7 +6,7 @@ import "./Network.scss";
 import {inject, observer} from "mobx-react";
 
 
-import {Network as NetworkStore, NetworkLogStatus} from "../ApplicationStore/Network";
+import {Interfaces, Network as NetworkStore, NetworkLogStatus} from "../ApplicationStore/Network";
 import {Status} from "./Network/Status";
 import {IoRadioOutline, IoWifi} from "react-icons/io5";
 import {RxServer} from "react-icons/rx";
@@ -35,6 +35,14 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
     render() {
 
         const {network} = this.props;
+        const {tcp_client, tcp_server} = network?.interfaces as Interfaces;
+        const tcp = tcp_client?.filter?.((iface: any) => {
+            return iface.type == "TCPClientInterface";
+        })
+
+        const hosts = tcp_server?.filter?.((iface: any) => {
+            return iface.type == "TCPServerInterface";
+        })
 
         return <>
 
@@ -43,9 +51,9 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
                     <Status/>
                     <div className="network-main">
                         <nav className="sidebar">
-                            <a className={`nav-item`} title="Internet / TCP">
+                            <a className={`nav-item active`} title="Internet / TCP">
                                 <GoGlobe size={20}/>
-                                <span className="nav-label">Internet / TCP</span>
+                                <span className="nav-label">Internet / TCP ({tcp?.length || 0})</span>
                             </a>
                             <a className={`nav-item`} title="Bluetooth Peer">
                                 <IoIosBluetooth size={20}/>
@@ -61,7 +69,7 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
                             </a>
                             <a className={`nav-item`} title="Host">
                                 <RxServer size={20}/>
-                                <span className="nav-label">Host</span>
+                                <span className="nav-label">Host ({hosts?.length || 0})</span>
                             </a>
                         </nav>
                         <div className={"main-content"}>

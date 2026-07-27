@@ -9,7 +9,7 @@
 // *   `node_operation_status`: General status updates for RNode/interface operations.
 //
 import {listen, UnlistenFn} from "@tauri-apps/api/event";
-import {info} from "@tauri-apps/plugin-log";
+import {error, info} from "@tauri-apps/plugin-log";
 import {ApplicationStore} from "../ApplicationStore";
 import {invoke} from "@tauri-apps/api/core";
 import {action, makeAutoObservable} from "mobx";
@@ -131,6 +131,7 @@ export interface Interfaces {
         target_host: string;
         target_port: string;
         name: string;
+        enabled: boolean;
 
         [key: string]: string | number | boolean | undefined;
     }>;
