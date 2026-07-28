@@ -365,6 +365,7 @@ export class Network {
             invoke('add_tcp_connection', {
                 args: {...config}
             }).then(() => {
+                this.updatePublicServers();
                 return resolve(true);
             }).catch((error: any) => {
                 return reject(error)

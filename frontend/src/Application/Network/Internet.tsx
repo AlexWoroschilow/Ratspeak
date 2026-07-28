@@ -64,39 +64,22 @@ class Internet extends React.Component<InternetProps, InternetState> {
         serversSelected?.forEach?.((server: any) => {
 
             (server.isConnected === false) &&
-            network?.addConnectionTCP(server).then(() => {
-
-                servers?.forEach?.((server: PublicServer) => {
-                    server.isConnected = server.id == unique;
+            network?.addConnectionTCP(server)
+                .catch((error) => {
+                    return this.setState({error: error});
                 });
-
-                return this.setState({servers: servers});
-            }).catch((error) => {
-                return this.setState({error: error});
-            });
 
             (server.isConnected === true) &&
-            network?.removeConnectionTCP(server).then(() => {
-
-                servers?.forEach?.((server: PublicServer) => {
-                    (server.id == unique) &&
-                    (server.isConnected = false)
+            network?.removeConnectionTCP(server)
+                .catch((error) => {
+                    return this.setState({error: error});
                 });
-
-                return this.setState({servers: servers});
-            }).catch((error) => {
-                return this.setState({error: error});
-            });
         });
 
         return this.setState({error: undefined});
     }
 
     onCloseForm() {
-        const enabled = network?.publicServers.filter((server) => {
-            return server.isConnected;
-        })
-
         return this.setState({
             isEnabledForm: false
         });
