@@ -5,11 +5,12 @@ import {IoGitNetworkOutline} from "react-icons/io5";
 import {VscDebugDisconnect} from "react-icons/vsc";
 import "./Internet.scss";
 import {inject, observer} from "mobx-react";
-import {Interfaces, Network as NetworkStore, Statistic, StatisticInterface, StatisticInterfaces} from "../../ApplicationStore/Network";
+import {ConfigTCP, Interfaces, Network as NetworkStore, PublicServer, Statistic, StatisticInterface, StatisticInterfaces} from "../../ApplicationStore/Network";
 import {PiPlugsConnectedLight} from "react-icons/pi";
 import {info} from "@tauri-apps/plugin-log";
-import {ServerAdd} from "./ServerAdd";
+import {ServerForm} from "./ServerForm";
 import {ServerList} from "./ServerList";
+import {network} from "../../ApplicationStore";
 
 interface InternetProps {
     network?: NetworkStore;
@@ -20,6 +21,8 @@ interface InternetState {
         code: string;
         message: string
     } | undefined;
+    isEnabledForm: boolean,
+    iface?: ConfigTCP;
     servers: Array<{
         id?: string;
         name?: string;
@@ -34,7 +37,7 @@ interface InternetState {
             host: string;
             port: number,
         }>
-    }>
+    }> | undefined;
 }
 
 @inject("network")
@@ -44,85 +47,17 @@ class Internet extends React.Component<InternetProps, InternetState> {
         super(props);
 
         this.state = {
-            servers: this.getServers()
+            isEnabledForm: false,
+            servers: this.props?.network?.publicServers
         }
     }
 
-    getServers() {
-        const servers = [
-            {
-                id: 'ratspeak-ruby',
-                name: 'Ruby',
-                host: '1.ratspeak.org',
-                port: 4141,
-                tone: 'ruby',
-                mark_icon: 'gem',
-                isConnected: false,
-                tags: ['OFFICIAL'],
-            },
-            {
-                id: 'ratspeak-emerald',
-                name: 'Emerald',
-                host: '2.ratspeak.org',
-                port: 4242,
-                tone: 'emerald',
-                mark_icon: 'gem',
-                isConnected: false,
-                tags: ['OFFICIAL'],
-            },
-            {
-                id: 'ratspeak-diamond',
-                name: 'Diamond',
-                host: '3.ratspeak.org',
-                port: 4343,
-                tone: 'diamond',
-                mark_icon: 'gem',
-                isConnected: false,
-                tags: ['OFFICIAL']
-            },
-            {
-                id: 'beleth',
-                name: 'Beleth',
-                host: 'rns.beleth.net',
-                port: 4242,
-                tone: 'beleth',
-                mark: 'B',
-                isConnected: false,
-                tags: ['UNOFFICIAL']
-            },
-            {
-                id: 'rmap',
-                name: 'RMAP',
-                host: 'rmap.world',
-                port: 4242,
-                tone: 'rmap',
-                mark: 'R',
-                isConnected: false,
-                tags: ['UNOFFICIAL']
-            }
-        ];
-
-        const {network} = this.props;
-        const {tcp_client} = network?.interfaces as Interfaces;
-        const enabled = tcp_client?.map?.((server) => {
-            return server.name;
-        })
-
-        servers.forEach((server) => {
-            (enabled?.includes?.(server.name)) &&
-            (server.isConnected = true);
-        });
-
-        return servers;
-    }
-
-
     doToggleServer(event: any) {
         const {network} = this.props;
-        const servers = this.getServers();
+        const servers = network?.publicServers;
 
         const unique: string = `${event.currentTarget.getAttribute('data-server')}`;
-        const serversSelected: any = servers.filter((server) => {
+        const serversSelected: any = servers?.filter?.((server) => {
             return server.id == unique;
         });
 
@@ -131,7 +66,7 @@ class Internet extends React.Component<InternetProps, InternetState> {
             (server.isConnected === false) &&
             network?.addConnectionTCP(server).then(() => {
 
-                servers.forEach((server) => {
+                servers?.forEach?.((server: PublicServer) => {
                     server.isConnected = server.id == unique;
                 });
 
@@ -143,7 +78,7 @@ class Internet extends React.Component<InternetProps, InternetState> {
             (server.isConnected === true) &&
             network?.removeConnectionTCP(server).then(() => {
 
-                servers.forEach((server) => {
+                servers?.forEach?.((server: PublicServer) => {
                     (server.id == unique) &&
                     (server.isConnected = false)
                 });
@@ -157,30 +92,68 @@ class Internet extends React.Component<InternetProps, InternetState> {
         return this.setState({error: undefined});
     }
 
+    onCloseForm() {
+        const enabled = network?.publicServers.filter((server) => {
+            return server.isConnected;
+        })
+
+        return this.setState({
+            isEnabledForm: false
+        });
+    }
+
+    onOpenForm(iface?: ConfigTCP | undefined) {
+        return this.setState({isEnabledForm: true, iface: iface});
+    }
+
     render() {
 
         const {network} = this.props;
-        const {servers, error} = this.state;
+        const {error} = this.state;
 
         return <>
-            <div className="bottom-sheet-header">
-                <div className="bottom-sheet-title bottom-sheet-title-with-icon" data-sheet-icon="tcp">
-                    <GoGlobe size={20}/>
-                    <span className="bottom-sheet-title-label">
+
+            {(this?.state?.isEnabledForm) && <>
+                <ServerForm onCancel={this.onCloseForm.bind(this)} iface={this.state.iface}/>
+            </>}
+
+            {(!this?.state?.isEnabledForm) && <>
+                <div className="bottom-sheet-header">
+                    <div className="bottom-sheet-title bottom-sheet-title-with-icon" data-sheet-icon="tcp">
+                        <IoGitNetworkOutline size={20}/>
+                        <span className="bottom-sheet-title-label">
+                        Connected Networks
+                    </span>
+                    </div>
+                    <div className="activity-controls">
+                        <button className="nr-btn nr-btn-xs" id="activity-clear-btn"
+                                onClick={() => {
+                                    this.onOpenForm()
+                                }}>
+                            Add custom Network
+                        </button>
+                    </div>
+                </div>
+                <ServerList onEditServer={this.onOpenForm.bind(this)} onCancel={this.onCloseForm.bind(this)}/>
+
+                <div className="bottom-sheet-header">
+                    <div className="bottom-sheet-title bottom-sheet-title-with-icon" data-sheet-icon="tcp">
+                        <GoGlobe size={20}/>
+                        <span className="bottom-sheet-title-label">
                         Public Network
                     </span>
-                </div>
-            </div>
-            <div className="bottom-sheet-body">
-                {(error?.message != undefined) && <>
-                    <div className="rs-dialog-field-error" id="rnode-public-map-error">
-                        {error?.message}
                     </div>
-                </>}
-                <div className="connect-tab-panel active" id="connect-public-panel" role="tabpanel" aria-labelledby="connect-tab-public">
-                    <div className="public-server-list" id="public-server-list">
-                        {servers?.map?.((server) => (
-                            <span className={`public-server-card public-server-card--${server.tone}`}>
+                </div>
+                <div className="bottom-sheet-body">
+                    {(error?.message != undefined) && <>
+                        <div className="rs-dialog-field-error" id="rnode-public-map-error">
+                            {error?.message}
+                        </div>
+                    </>}
+                    <div className="connect-tab-panel active" id="connect-public-panel" role="tabpanel" aria-labelledby="connect-tab-public">
+                        <div className="public-server-list" id="public-server-list">
+                            {network?.publicServers?.map?.((server) => (
+                                <span className={`public-server-card public-server-card--${server.tone}`}>
                                 <span className="public-server-mark">
                                     {(server?.isConnected === true) && <PiPlugsConnectedLight size={20}/>}
                                     {(server?.isConnected === false) && <VscDebugDisconnect size={20}/>}
@@ -205,17 +178,15 @@ class Internet extends React.Component<InternetProps, InternetState> {
                                     </label>
                                 </span>
                             </span>
-                        ))}
+                            ))}
+                        </div>
                     </div>
                 </div>
-            </div>
 
-            <ServerList/>
-            <div className="bottom-sheet-footer">
-                <button className="rs-dialog-confirm">Add new Network</button>
-            </div>
+                {/*<div className="bottom-sheet-footer">*/}
+                {/*</div>*/}
+            </>}
 
-            {/*<ServerAdd/>*/}
         </>
     }
 }

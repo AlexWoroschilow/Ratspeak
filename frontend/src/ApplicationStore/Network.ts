@@ -167,6 +167,8 @@ export interface Interfaces {
     };
 }
 
+export type InterfaceTCP = Interfaces['tcp_client'][number];
+
 
 export interface Blackholes {
     entries: Array<{
@@ -181,14 +183,25 @@ export interface Blackholes {
 export type BlackholeReason = Blackholes['entries'][number]['reason'];
 export type Blackhole = Blackholes['entries'][number];
 
-
 export interface ConfigTCP {
+    name?: string;
     host: string;
     port: number;
-    name?: string;
     ifac_enabled?: boolean
     ifac_network_name?: string;
     ifac_passphrase?: string;
+}
+
+export interface PublicServer {
+    id: string;
+    name: string;
+    host: string;
+    port: number
+    tone: string;
+    mark_icon?: string;
+    mark?: string;
+    isConnected: boolean
+    tags: Array<string>;
 }
 
 // RS.invoke('enable_auto_interface', { name: result.name, options: result.options }).catch(function(err) {
@@ -204,6 +217,58 @@ export class Network {
     public interfaces: Interfaces = {} as Interfaces;
     public blackholes: Blackholes = {} as Blackholes;
     public statistic: Statistic = {} as Statistic;
+    public publicServers: Array<PublicServer> = [
+        {
+            id: 'ratspeak-ruby',
+            name: 'Ruby',
+            host: '1.ratspeak.org',
+            port: 4141,
+            tone: 'ruby',
+            mark_icon: 'gem',
+            isConnected: false,
+            tags: ['OFFICIAL'],
+        },
+        {
+            id: 'ratspeak-emerald',
+            name: 'Emerald',
+            host: '2.ratspeak.org',
+            port: 4242,
+            tone: 'emerald',
+            mark_icon: 'gem',
+            isConnected: false,
+            tags: ['OFFICIAL'],
+        },
+        {
+            id: 'ratspeak-diamond',
+            name: 'Diamond',
+            host: '3.ratspeak.org',
+            port: 4343,
+            tone: 'diamond',
+            mark_icon: 'gem',
+            isConnected: false,
+            tags: ['OFFICIAL']
+        },
+        {
+            id: 'beleth',
+            name: 'Beleth',
+            host: 'rns.beleth.net',
+            port: 4242,
+            tone: 'beleth',
+            mark: 'B',
+            isConnected: false,
+            tags: ['UNOFFICIAL']
+        },
+        {
+            id: 'rmap',
+            name: 'RMAP',
+            host: 'rmap.world',
+            port: 4242,
+            tone: 'rmap',
+            mark: 'R',
+            isConnected: false,
+            tags: ['UNOFFICIAL']
+        }
+    ];
 
     public status: NetworkLogStatus = {
         enabled: false,
@@ -220,6 +285,7 @@ export class Network {
 
     constructor(store: ApplicationStore) {
         makeAutoObservable(this, {
+            updatePublicServers: action,
             setBlackholes: action,
             setInterfaces: action,
             setStatistic: action,
@@ -268,6 +334,10 @@ export class Network {
 
     setInterfaces(interfaces: Interfaces): Interfaces {
         this.interfaces = interfaces;
+        this.interfaces.tcp_client.forEach((iface: InterfaceTCP) => {
+            iface.enabled = !/^(false|no|0|off)$/i.test(String(iface.enabled).trim());
+        });
+        this.updatePublicServers();
         return this.interfaces;
     }
 
@@ -308,6 +378,30 @@ export class Network {
                 .then(() => {
                     return resolve(true);
                 }).catch((error: any) => {
+                return reject(error)
+            });
+        });
+    }
+
+    async pauseConnectionTCP(config: Partial<ConfigTCP>) {
+        return new Promise((resolve: (value: boolean) => void, reject) => {
+            invoke('pause_interface', {
+                args: {...config, ...{iface_type: "tcp_client"}}
+            }).then(() => {
+                return resolve(true);
+            }).catch((error: any) => {
+                return reject(error)
+            });
+        });
+    }
+
+    async resumeConnectionTCP(config: Partial<ConfigTCP>) {
+        return new Promise((resolve: (value: boolean) => void, reject) => {
+            invoke('resume_interface', {
+                args: {...config, ...{iface_type: "tcp_client"}}
+            }).then(() => {
+                return resolve(true);
+            }).catch((error: any) => {
                 return reject(error)
             });
         });
@@ -442,5 +536,20 @@ export class Network {
             });
         return this;
     }
+
+    updatePublicServers() {
+
+        const {tcp_client} = this?.interfaces as Interfaces;
+        const enabled = tcp_client?.map?.((server) => {
+            return server.name;
+        })
+
+        this.publicServers.forEach((server) => {
+            server.isConnected = enabled?.includes?.(server.name);
+        });
+
+        return this.publicServers;
+    }
+
 
 }
