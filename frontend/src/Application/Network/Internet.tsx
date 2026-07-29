@@ -100,7 +100,7 @@ class Internet extends React.Component<InternetProps, InternetState> {
                 <ServerForm onCancel={this.onCloseForm.bind(this)} iface={this.state.iface}/>
             </>}
 
-            {(!this?.state?.isEnabledForm) && <>
+            {(!this?.state?.isEnabledForm) && <div className="internet-container">
                 <div className="bottom-sheet-header">
                     <div className="bottom-sheet-title bottom-sheet-title-with-icon" data-sheet-icon="tcp">
                         <IoGitNetworkOutline size={20}/>
@@ -168,7 +168,7 @@ class Internet extends React.Component<InternetProps, InternetState> {
 
                 {/*<div className="bottom-sheet-footer">*/}
                 {/*</div>*/}
-            </>}
+            </div>}
 
         </>
     }
