@@ -12,7 +12,11 @@ import {IoRadioOutline, IoWifi} from "react-icons/io5";
 import {RxServer} from "react-icons/rx";
 import {IoIosBluetooth} from "react-icons/io";
 import {GoGlobe} from "react-icons/go";
-import Internet from "./Network/Internet";
+import TCP from "./Network/TCP";
+import Local from "./Network/Local";
+import Bluetooth from "./Network/Bluetooth";
+import Radio from "./Network/Radio";
+import Host from "./Network/Host";
 
 interface NetworkProps {
     network?: NetworkStore;
@@ -20,8 +24,10 @@ interface NetworkProps {
 
 interface NetworkState {
     status?: NetworkLogStatus | undefined;
+    screen: "tcp" | "bluetooth" | "local" | "radio" | "host";
 }
 
+type Screen = NetworkState['screen']
 
 @inject("network")
 @observer
@@ -29,7 +35,15 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
     constructor(props: NetworkProps) {
         super(props);
 
-        this.state = {}
+        this.state = {
+            screen: "tcp"
+        }
+    }
+
+    route(screen: Screen) {
+        this.setState({
+            screen: screen
+        })
     }
 
     render() {
@@ -51,29 +65,40 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
                     <Status/>
                     <div className="network-main">
                         <nav className="sidebar">
-                            <a className={`nav-item active`} title="Internet / TCP">
+                            <a className={`nav-item ${this.state.screen == "tcp" && "active"}`} title="Internet / TCP"
+                               onClick={() => this.route("tcp")}>
                                 <GoGlobe size={20}/>
                                 <span className="nav-label">Internet / TCP ({tcp?.length || 0})</span>
                             </a>
-                            <a className={`nav-item`} title="Bluetooth Peer">
+                            <a className={`nav-item ${this.state.screen == "bluetooth" && "active"}`} title="Bluetooth Peer"
+                               onClick={() => this.route("bluetooth")}>
                                 <IoIosBluetooth size={20}/>
                                 <span className="nav-label">Bluetooth Peer</span>
                             </a>
-                            <a className={`nav-item`} title="Local Network">
+                            <a className={`nav-item ${this.state.screen == "tcp" && "local"}`} title="Local Network"
+                               onClick={() => this.route("local")}>
                                 <IoWifi size={20}/>
                                 <span className="nav-label">Local Network</span>
                             </a>
-                            <a className={`nav-item`} title="Radio">
+                            <a className={`nav-item ${this.state.screen == "tcp" && "radio"}`} title="Radio"
+                               onClick={() => this.route("radio")}>
                                 <IoRadioOutline size={20}/>
                                 <span className="nav-label">Radio</span>
                             </a>
-                            <a className={`nav-item`} title="Host">
+                            <a className={`nav-item ${this.state.screen == "tcp" && "host"}`} title="Host"
+                               onClick={() => this.route("host")}>
                                 <RxServer size={20}/>
                                 <span className="nav-label">Host ({hosts?.length || 0})</span>
                             </a>
                         </nav>
                         <div className={"main-content"}>
-                            <Internet/>
+                            {this?.state?.screen == "tcp" && <TCP/>}
+                            {this?.state?.screen == "local" && <Local/>}
+                            {this?.state?.screen == "bluetooth" && <Bluetooth/>}
+                            {this?.state?.screen == "radio" && <Radio/>}
+                            {this?.state?.screen == "host" && <Host/>}
+
+
                         </div>
                     </div>
                 </div>

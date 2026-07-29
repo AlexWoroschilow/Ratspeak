@@ -1,13 +1,8 @@
 "use strict";
 import React from "react";
-import {GoGlobe} from "react-icons/go";
 import {IoGitNetworkOutline} from "react-icons/io5";
-import {VscDebugDisconnect} from "react-icons/vsc";
-import "./Internet.scss";
 import {inject, observer} from "mobx-react";
-import {ConfigTCP, Interfaces, Network as NetworkStore, Statistic, StatisticInterface, StatisticInterfaces} from "../../ApplicationStore/Network";
-import {PiPlugsConnectedLight} from "react-icons/pi";
-import {error, info} from "@tauri-apps/plugin-log";
+import {ConfigTCP, Network as NetworkStore} from "../../../ApplicationStore/Network";
 
 interface ServerAddProps {
     network?: NetworkStore;

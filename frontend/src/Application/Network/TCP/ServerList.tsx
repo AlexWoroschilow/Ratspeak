@@ -1,12 +1,10 @@
 "use strict";
 import React, {MouseEvent} from "react";
-import {IoGitNetworkOutline} from "react-icons/io5";
 import {VscDebugDisconnect} from "react-icons/vsc";
 import {inject, observer} from "mobx-react";
-import {ConfigTCP, Interfaces, InterfaceTCP, Network as NetworkStore} from "../../ApplicationStore/Network";
+import {ConfigTCP, Interfaces, InterfaceTCP, Network as NetworkStore} from "../../../ApplicationStore/Network";
 import {PiPlugsConnectedLight} from "react-icons/pi";
 import "./ServerList.scss";
-import {ActivityStateType} from "../NetworkActivity/Activity";
 import {info} from "@tauri-apps/plugin-log";
 
 interface ServerListProps {

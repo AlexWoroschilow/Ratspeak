@@ -3,20 +3,18 @@ import React from "react";
 import {GoGlobe} from "react-icons/go";
 import {IoGitNetworkOutline} from "react-icons/io5";
 import {VscDebugDisconnect} from "react-icons/vsc";
-import "./Internet.scss";
+import "./TCP.scss";
 import {inject, observer} from "mobx-react";
-import {ConfigTCP, Interfaces, Network as NetworkStore, PublicServer, Statistic, StatisticInterface, StatisticInterfaces} from "../../ApplicationStore/Network";
+import {ConfigTCP, Network as NetworkStore} from "../../ApplicationStore/Network";
 import {PiPlugsConnectedLight} from "react-icons/pi";
-import {info} from "@tauri-apps/plugin-log";
-import {ServerForm} from "./ServerForm";
-import {ServerList} from "./ServerList";
-import {network} from "../../ApplicationStore";
+import {ServerForm} from "./TCP/ServerForm";
+import {ServerList} from "./TCP/ServerList";
 
-interface InternetProps {
+interface TCPProps {
     network?: NetworkStore;
 }
 
-interface InternetState {
+interface TCPState {
     error?: {
         code: string;
         message: string
@@ -42,8 +40,8 @@ interface InternetState {
 
 @inject("network")
 @observer
-class Internet extends React.Component<InternetProps, InternetState> {
-    constructor(props: InternetProps) {
+class TCP extends React.Component<TCPProps, TCPState> {
+    constructor(props: TCPProps) {
         super(props);
 
         this.state = {
@@ -174,4 +172,4 @@ class Internet extends React.Component<InternetProps, InternetState> {
     }
 }
 
-export default Internet
+export default TCP
