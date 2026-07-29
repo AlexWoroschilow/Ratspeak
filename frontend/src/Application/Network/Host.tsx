@@ -1,7 +1,7 @@
 "use strict";
 import React from "react";
 import {IoGitNetworkOutline} from "react-icons/io5";
-import "./Local.scss";
+import "./Host.scss";
 import {inject, observer} from "mobx-react";
 import {Network as NetworkStore} from "../../ApplicationStore/Network";
 
