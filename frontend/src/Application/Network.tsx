@@ -75,17 +75,17 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
                                 <IoIosBluetooth size={20}/>
                                 <span className="nav-label">Bluetooth Peer</span>
                             </a>
-                            <a className={`nav-item ${this.state.screen == "tcp" && "local"}`} title="Local Network"
+                            <a className={`nav-item ${this.state.screen == "local" && "active"}`} title="Local Network"
                                onClick={() => this.route("local")}>
                                 <IoWifi size={20}/>
                                 <span className="nav-label">Local Network</span>
                             </a>
-                            <a className={`nav-item ${this.state.screen == "tcp" && "radio"}`} title="Radio"
+                            <a className={`nav-item ${this.state.screen == "radio" && "active"}`} title="Radio"
                                onClick={() => this.route("radio")}>
                                 <IoRadioOutline size={20}/>
                                 <span className="nav-label">Radio</span>
                             </a>
-                            <a className={`nav-item ${this.state.screen == "tcp" && "host"}`} title="Host"
+                            <a className={`nav-item ${this.state.screen == "host" && "active"}`} title="Host"
                                onClick={() => this.route("host")}>
                                 <RxServer size={20}/>
                                 <span className="nav-label">Host ({hosts?.length || 0})</span>

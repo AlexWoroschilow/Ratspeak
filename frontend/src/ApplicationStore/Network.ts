@@ -141,6 +141,9 @@ export interface Interfaces {
         target_port: string;
         name: string;
         enabled: boolean;
+        network_name?: string;
+        passphrase?: string;
+        ifac_size?: number;
 
         [key: string]: string | number | boolean | undefined;
     }>;
@@ -284,8 +287,34 @@ export class Network {
     protected unlistenStatisticUpdate: Promise<UnlistenFn> | undefined = undefined;
     protected unlistenInterfacesUpdate: Promise<UnlistenFn> | undefined = undefined;
 
+    get interfacesAll() {
+        const interfaces: Array<{ name: string, enabled: boolean }> = [];
+        const ifaces = this.interfaces as any;
+
+        Object.keys(ifaces).forEach((key) => {
+            if (Array.isArray(ifaces[key])) {
+                ifaces[key].forEach((iface: any) => {
+                    if (iface.name) {
+                        interfaces.push({
+                            name: iface.name,
+                            enabled: iface.enabled !== false && iface.enabled !== 'false'
+                        });
+                    }
+                });
+            }
+        });
+
+        return interfaces;
+    }
+
+    get interfacesEnabled() {
+        return this.interfacesAll.filter(iface => iface.enabled);
+    }
+
     constructor(store: ApplicationStore) {
         makeAutoObservable(this, {
+            interfacesAll: false,
+            interfacesEnabled: false,
             updatePublicServers: action,
             setBlackholes: action,
             setInterfaces: action,
@@ -335,8 +364,15 @@ export class Network {
 
     setInterfaces(interfaces: Interfaces): Interfaces {
         this.interfaces = interfaces;
-        this.interfaces.tcp_client.forEach((iface: InterfaceTCP) => {
-            iface.enabled = !/^(false|no|0|off)$/i.test(String(iface.enabled).trim());
+        Object.keys(this.interfaces).forEach((key) => {
+            const ifaces = (this.interfaces as any)[key];
+            if (Array.isArray(ifaces)) {
+                ifaces.forEach((iface: any) => {
+                    if (iface.enabled !== undefined) {
+                        iface.enabled = !/^(false|no|0|off)$/i.test(String(iface.enabled).trim());
+                    }
+                });
+            }
         });
         this.updatePublicServers();
         return this.interfaces;
@@ -385,11 +421,12 @@ export class Network {
         });
     }
 
-    async pauseConnectionTCP(config: Partial<ConfigTCP>) {
+    async pauseInterface(name: string, type: string = "auto") {
         return new Promise((resolve: (value: boolean) => void, reject) => {
             invoke('pause_interface', {
-                args: {...config, ...{iface_type: "tcp_client"}}
+                args: {name: name, iface_type: type}
             }).then(() => {
+                this.getInterfaces().then(ifaces => this.setInterfaces(ifaces));
                 return resolve(true);
             }).catch((error: any) => {
                 return reject(error)
@@ -397,11 +434,26 @@ export class Network {
         });
     }
 
-    async resumeConnectionTCP(config: Partial<ConfigTCP>) {
+    async resumeInterface(name: string, type: string = "auto") {
         return new Promise((resolve: (value: boolean) => void, reject) => {
             invoke('resume_interface', {
-                args: {...config, ...{iface_type: "tcp_client"}}
+                args: {name: name, iface_type: type}
             }).then(() => {
+                this.getInterfaces().then(ifaces => this.setInterfaces(ifaces));
+                return resolve(true);
+            }).catch((error: any) => {
+                return reject(error)
+            });
+        });
+    }
+
+    async removeInterface(name: string, type: string = "auto") {
+        return new Promise((resolve: (value: boolean) => void, reject) => {
+            const command = type === 'auto' ? 'disable_auto_interface' : 'remove_interface';
+            const payload = type === 'auto' ? {name: name} : {name: name, iface_type: type};
+
+            invoke(command, payload).then(() => {
+                this.getInterfaces().then(ifaces => this.setInterfaces(ifaces));
                 return resolve(true);
             }).catch((error: any) => {
                 return reject(error)

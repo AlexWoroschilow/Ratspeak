@@ -50,9 +50,9 @@ export class List extends React.Component<ListProps, ListState> {
             name: iface.name,
             host: iface.target_host,
             port: Number(iface.target_port),
-            // ifac_enabled?: boolean
-            // ifac_network_name?: string;
-            // ifac_passphrase?: string;
+            ifac_enabled: ((iface?.network_name?.length || 0) > 0) || ((iface?.passphrase?.length || 0) > 0),
+            ifac_network_name: iface.network_name,
+            ifac_passphrase: iface.passphrase,
         } as ConfigTCP);
     }
 
@@ -63,17 +63,13 @@ export class List extends React.Component<ListProps, ListState> {
 
         const {network} = this.props;
 
-        const config = {
-            name: iface.name,
-        } as ConfigTCP
-
         (iface?.enabled == true) &&
-        network?.pauseConnectionTCP?.(config).catch((error: any) => {
+        network?.pauseInterface?.(iface.name, iface.type).catch((error: any) => {
             this.setState({error: error});
         });
 
         (iface?.enabled == false) &&
-        network?.resumeConnectionTCP?.(config).catch((error: any) => {
+        network?.resumeInterface?.(iface.name, iface.type).catch((error: any) => {
             this.setState({error: error});
         });
 

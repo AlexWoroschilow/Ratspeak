@@ -53,8 +53,8 @@ export class Status extends React.Component<StatusProps, StatusState> {
         return <>
             <div className="network-pulse" id="network-pulse">
                 <div className="pulse-identity" id="pulse-identity">
-                    {network?.statistic?.interface_stats?.interfaces?.map?.(
-                        (iface: StatisticInterface) => (<>
+                    {network?.interfacesEnabled?.map?.(
+                        (iface: { name: string }) => (<>
                                 <span className={`activity-level-btn`}>
                                     {iface.name}
                                 </span>
