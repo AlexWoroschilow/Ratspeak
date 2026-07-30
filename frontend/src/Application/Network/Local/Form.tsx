@@ -23,6 +23,10 @@ interface FormState {
         multicast_address_type: string;
         devices: string[];
     };
+    options: {
+        discovery_scopes: Array<{ value: string, label: string }>;
+        multicast_address_types: Array<{ value: string, label: string }>;
+    };
 }
 
 @inject("network")
@@ -41,6 +45,19 @@ export class Form extends React.Component<FormProps, FormState> {
                 multicast_address_type: "temporary",
                 devices: [],
             },
+            options: {
+                discovery_scopes: [
+                    {value: "link", label: "Link (Same Wi-Fi/LAN)"},
+                    {value: "admin", label: "Admin Boundary"},
+                    {value: "site", label: "Site (Cross-router)"},
+                    {value: "organisation", label: "Organisation"},
+                    {value: "global", label: "Global (IPv6 Multicast)"},
+                ],
+                multicast_address_types: [
+                    {value: "temporary", label: "Temporary (Default)"},
+                    {value: "permanent", label: "Permanent"},
+                ]
+            }
         };
     }
 
@@ -74,7 +91,7 @@ export class Form extends React.Component<FormProps, FormState> {
     }
 
     render() {
-        const {error, config, interfaces} = this.state;
+        const {error, config, interfaces, options} = this.state;
 
         return (
             <>
@@ -118,11 +135,9 @@ export class Form extends React.Component<FormProps, FormState> {
                                 value={config.discovery_scope}
                                 onChange={(e) => this.setState({config: {...config, discovery_scope: e.target.value}})}
                             >
-                                <option value="link">Link (Same Wi-Fi/LAN)</option>
-                                <option value="admin">Admin Boundary</option>
-                                <option value="site">Site (Cross-router)</option>
-                                <option value="organisation">Organisation</option>
-                                <option value="global">Global (IPv6 Multicast)</option>
+                                {options.discovery_scopes.map((opt) => (
+                                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                ))}
                             </select>
 
                             <label className="rs-dialog-field-label mt-2">Multicast Address Type</label>
@@ -131,8 +146,9 @@ export class Form extends React.Component<FormProps, FormState> {
                                 value={config.multicast_address_type}
                                 onChange={(e) => this.setState({config: {...config, multicast_address_type: e.target.value}})}
                             >
-                                <option value="temporary">Temporary (Default)</option>
-                                <option value="permanent">Permanent</option>
+                                {options.multicast_address_types.map((opt) => (
+                                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                ))}
                             </select>
 
                             <div className="flex gap-2">
