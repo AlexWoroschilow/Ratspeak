@@ -1,6 +1,6 @@
 "use strict";
 import React from "react";
-import {IoGitNetworkOutline} from "react-icons/io5";
+import {IoGitNetworkOutline, IoWifi} from "react-icons/io5";
 import "./Local.scss";
 import {inject, observer} from "mobx-react";
 import {Network as NetworkStore} from "../../ApplicationStore/Network";
@@ -60,9 +60,9 @@ class Local extends React.Component<LocalProps, LocalState> {
                 <div className="internet-container" style={{display: 'flex', flexDirection: 'column', height: '100%'}}>
                     <div className="bottom-sheet-header">
                         <div className="bottom-sheet-title bottom-sheet-title-with-icon" data-sheet-icon="tcp">
-                            <IoGitNetworkOutline size={20}/>
+                            <IoWifi size={20}/>
                             <span className="bottom-sheet-title-label">
-                        Connected Networks
+                        Local Networks
                     </span>
                         </div>
                         <div className="activity-controls">
