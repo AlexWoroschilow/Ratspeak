@@ -3,18 +3,18 @@ import React from "react";
 import {GoGlobe} from "react-icons/go";
 import {IoGitNetworkOutline} from "react-icons/io5";
 import {VscDebugDisconnect} from "react-icons/vsc";
-import "./TCP.scss";
+import "./Tcp.scss";
 import {inject, observer} from "mobx-react";
 import {ConfigTCP, Network as NetworkStore} from "../../ApplicationStore/Network";
 import {PiPlugsConnectedLight} from "react-icons/pi";
-import {ServerForm} from "./TCP/ServerForm";
-import {ServerList} from "./TCP/ServerList";
+import {Form} from "./Tcp/Form";
+import {List} from "./Tcp/List";
 
-interface TCPProps {
+interface TcpProps {
     network?: NetworkStore;
 }
 
-interface TCPState {
+interface TcpState {
     error?: {
         code: string;
         message: string
@@ -40,8 +40,8 @@ interface TCPState {
 
 @inject("network")
 @observer
-class TCP extends React.Component<TCPProps, TCPState> {
-    constructor(props: TCPProps) {
+class Tcp extends React.Component<TcpProps, TcpState> {
+    constructor(props: TcpProps) {
         super(props);
 
         this.state = {
@@ -95,7 +95,7 @@ class TCP extends React.Component<TCPProps, TCPState> {
         return <>
 
             {(this?.state?.isEnabledForm) && <>
-                <ServerForm onCancel={this.onCloseForm.bind(this)} iface={this.state.iface}/>
+                <Form onCancel={this.onCloseForm.bind(this)} iface={this.state.iface}/>
             </>}
 
             {(!this?.state?.isEnabledForm) && <div className="internet-container">
@@ -115,7 +115,7 @@ class TCP extends React.Component<TCPProps, TCPState> {
                         </button>
                     </div>
                 </div>
-                <ServerList onEditServer={this.onOpenForm.bind(this)} onCancel={this.onCloseForm.bind(this)}/>
+                <List onEditServer={this.onOpenForm.bind(this)} onCancel={this.onCloseForm.bind(this)}/>
 
                 <div className="bottom-sheet-header">
                     <div className="bottom-sheet-title bottom-sheet-title-with-icon" data-sheet-icon="tcp">
@@ -172,4 +172,4 @@ class TCP extends React.Component<TCPProps, TCPState> {
     }
 }
 
-export default TCP
+export default Tcp

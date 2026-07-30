@@ -12,7 +12,7 @@ import {IoRadioOutline, IoWifi} from "react-icons/io5";
 import {RxServer} from "react-icons/rx";
 import {IoIosBluetooth} from "react-icons/io";
 import {GoGlobe} from "react-icons/go";
-import TCP from "./Network/TCP";
+import Tcp from "./Network/Tcp";
 import Local from "./Network/Local";
 import Bluetooth from "./Network/Bluetooth";
 import Radio from "./Network/Radio";
@@ -92,7 +92,7 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
                             </a>
                         </nav>
                         <div className={"main-content"}>
-                            {this?.state?.screen == "tcp" && <TCP/>}
+                            {this?.state?.screen == "tcp" && <Tcp/>}
                             {this?.state?.screen == "local" && <Local/>}
                             {this?.state?.screen == "bluetooth" && <Bluetooth/>}
                             {this?.state?.screen == "radio" && <Radio/>}

@@ -4,16 +4,16 @@ import {VscDebugDisconnect} from "react-icons/vsc";
 import {inject, observer} from "mobx-react";
 import {ConfigTCP, Interfaces, InterfaceTCP, Network as NetworkStore} from "../../../ApplicationStore/Network";
 import {PiPlugsConnectedLight} from "react-icons/pi";
-import "./ServerList.scss";
+import "./List.scss";
 import {info} from "@tauri-apps/plugin-log";
 
-interface ServerListProps {
+interface ListProps {
     network?: NetworkStore;
     onEditServer: (iface: ConfigTCP) => void;
     onCancel: () => void;
 }
 
-interface ServerListState {
+interface ListState {
     error?: {
         code: string;
         message: string
@@ -22,8 +22,8 @@ interface ServerListState {
 
 @inject("network")
 @observer
-export class ServerList extends React.Component<ServerListProps, ServerListState> {
-    constructor(props: ServerListProps) {
+export class List extends React.Component<ListProps, ListState> {
+    constructor(props: ListProps) {
         super(props);
 
         this.state = {}

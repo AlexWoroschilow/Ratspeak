@@ -4,13 +4,13 @@ import {IoGitNetworkOutline} from "react-icons/io5";
 import {inject, observer} from "mobx-react";
 import {ConfigTCP, Network as NetworkStore} from "../../../ApplicationStore/Network";
 
-interface ServerAddProps {
+interface FormProps {
     network?: NetworkStore;
     onCancel?: () => void
     iface?: ConfigTCP;
 }
 
-interface ServerAddState {
+interface FormState {
     error?: {
         code: string;
         message: string
@@ -21,7 +21,7 @@ interface ServerAddState {
 
 @inject("network")
 @observer
-export class ServerForm extends React.Component<ServerAddProps, ServerAddState> {
+export class Form extends React.Component<FormProps, FormState> {
     declare protected hostRef: React.RefObject<HTMLInputElement | null>;
     declare protected portRef: React.RefObject<HTMLInputElement | null>;
     declare protected nameRef: React.RefObject<HTMLInputElement | null>;
@@ -31,7 +31,7 @@ export class ServerForm extends React.Component<ServerAddProps, ServerAddState> 
     declare protected backboneRef: React.RefObject<HTMLInputElement | null>;
 
 
-    constructor(props: ServerAddProps) {
+    constructor(props: FormProps) {
         super(props);
 
         this.hostRef = React.createRef();
