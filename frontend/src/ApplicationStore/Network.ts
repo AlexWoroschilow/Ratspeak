@@ -98,8 +98,17 @@ export interface Statistic {
     link_count: number;
 }
 
-export type StatisticInterfaces = Statistic['interface_stats']['interfaces'];
 export type StatisticInterface = Statistic['interface_stats']['interfaces'][number];
+
+export interface Localhost {
+    interfaces: Array<{
+        name: string;
+        addr_v4: string;
+        addr_v6_link_local: string | null;
+        is_loopback: boolean;
+        is_up: boolean;
+    }>;
+}
 
 export interface Interfaces {
 
@@ -167,8 +176,6 @@ export interface Interfaces {
     };
 }
 
-export type InterfaceTCP = Interfaces['tcp_client'][number];
-
 
 export interface Blackholes {
     entries: Array<{
@@ -179,9 +186,6 @@ export interface Blackholes {
         verified?: boolean;
     }>;
 }
-
-export type BlackholeReason = Blackholes['entries'][number]['reason'];
-export type Blackhole = Blackholes['entries'][number];
 
 export interface ConfigTCP {
     name?: string;
@@ -204,12 +208,9 @@ export interface PublicServer {
     tags: Array<string>;
 }
 
-// RS.invoke('enable_auto_interface', { name: result.name, options: result.options }).catch(function(err) {
-//     if (window._activeProgressDialog && window._activeProgressDialog.error) {
-//         window._activeProgressDialog.error((err && err.message) || 'Failed to enable Local Network');
-//     }
-// });
-
+export type Blackhole = Blackholes['entries'][number];
+export type InterfaceTCP = Interfaces['tcp_client'][number];
+export type LocalhostInterface = Localhost['interfaces'][number];
 
 export class Network {
 
@@ -427,6 +428,18 @@ export class Network {
             invoke<Interfaces>('api_hub_interfaces')
                 .then((interfaces: Interfaces) => {
                     return resolve(interfaces)
+                })
+                .catch((error: any) => {
+                    return reject(new Error("Failed: api_get_peers_snapshot"))
+                });
+        });
+    }
+
+    async getInterfacesLocal(): Promise<Localhost> {
+        return new Promise((resolve: (value: Localhost) => void, reject) => {
+            invoke<Localhost>('api_list_network_interfaces')
+                .then((localhost: Localhost) => {
+                    return resolve(localhost)
                 })
                 .catch((error: any) => {
                     return reject(new Error("Failed: api_get_peers_snapshot"))

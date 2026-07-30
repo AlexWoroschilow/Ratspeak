@@ -4,6 +4,7 @@ import {IoGitNetworkOutline} from "react-icons/io5";
 import "./Local.scss";
 import {inject, observer} from "mobx-react";
 import {Network as NetworkStore} from "../../ApplicationStore/Network";
+import {List} from "./Bluetooth/List";
 
 interface BluetoothProps {
     network?: NetworkStore;
@@ -50,11 +51,12 @@ class Bluetooth extends React.Component<BluetoothProps, BluetoothState> {
                     </div>
                 </div>
 
+                <List onCancel={() => {
+                }}/>
 
                 {/*<div className="bottom-sheet-footer">*/}
                 {/*</div>*/}
             </div>
-
         </>
     }
 }

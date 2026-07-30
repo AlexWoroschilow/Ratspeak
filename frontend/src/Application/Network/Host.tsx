@@ -4,6 +4,7 @@ import {IoGitNetworkOutline} from "react-icons/io5";
 import "./Host.scss";
 import {inject, observer} from "mobx-react";
 import {Network as NetworkStore} from "../../ApplicationStore/Network";
+import {List} from "./Host/List";
 
 interface HostProps {
     network?: NetworkStore;
@@ -50,6 +51,8 @@ class Host extends React.Component<HostProps, HostState> {
                     </div>
                 </div>
 
+                <List onCancel={() => {
+                }}/>
 
                 {/*<div className="bottom-sheet-footer">*/}
                 {/*</div>*/}

@@ -4,6 +4,7 @@ import {IoGitNetworkOutline} from "react-icons/io5";
 import "./Radio.scss";
 import {inject, observer} from "mobx-react";
 import {Network as NetworkStore} from "../../ApplicationStore/Network";
+import {List} from "./Radio/List";
 
 interface RadioProps {
     network?: NetworkStore;
@@ -50,6 +51,8 @@ class Radio extends React.Component<RadioProps, RadioState> {
                     </div>
                 </div>
 
+                <List onCancel={() => {
+                }}/>
 
                 {/*<div className="bottom-sheet-footer">*/}
                 {/*</div>*/}

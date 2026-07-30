@@ -109,7 +109,7 @@ class Tcp extends React.Component<TcpProps, TcpState> {
                     <div className="activity-controls">
                         <button className="nr-btn nr-btn-xs" id="activity-clear-btn"
                                 onClick={() => {
-                                    this.onOpenForm()
+                                    this.onOpenForm();
                                 }}>
                             Add custom Network
                         </button>

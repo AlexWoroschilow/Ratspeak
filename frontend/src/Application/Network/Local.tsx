@@ -4,6 +4,8 @@ import {IoGitNetworkOutline} from "react-icons/io5";
 import "./Local.scss";
 import {inject, observer} from "mobx-react";
 import {Network as NetworkStore} from "../../ApplicationStore/Network";
+import {List} from "./Local/List";
+import {Form} from "./Local/Form";
 
 interface LocalProps {
     network?: NetworkStore;
@@ -14,6 +16,7 @@ interface LocalState {
         code: string;
         message: string
     } | undefined;
+    isEnabledForm: boolean,
 }
 
 @inject("network")
@@ -22,11 +25,23 @@ class Local extends React.Component<LocalProps, LocalState> {
     constructor(props: LocalProps) {
         super(props);
 
-        this.state = {}
+        this.state = {
+            isEnabledForm: false
+        }
     }
 
-    doToggleServer(event: any) {
+    onCloseForm() {
+        return this.setState({
+            isEnabledForm: false
+        });
     }
+
+    onOpenForm() {
+        return this.setState({
+            isEnabledForm: true
+        });
+    }
+
 
     render() {
 
@@ -35,26 +50,34 @@ class Local extends React.Component<LocalProps, LocalState> {
 
         return <>
 
-            <div className="internet-container">
-                <div className="bottom-sheet-header">
-                    <div className="bottom-sheet-title bottom-sheet-title-with-icon" data-sheet-icon="tcp">
-                        <IoGitNetworkOutline size={20}/>
-                        <span className="bottom-sheet-title-label">
+            {(this?.state?.isEnabledForm) && <>
+                <Form onCancel={this.onCloseForm.bind(this)}/>
+            </>}
+
+            {(!this?.state?.isEnabledForm) && <>
+                <div className="internet-container">
+                    <div className="bottom-sheet-header">
+                        <div className="bottom-sheet-title bottom-sheet-title-with-icon" data-sheet-icon="tcp">
+                            <IoGitNetworkOutline size={20}/>
+                            <span className="bottom-sheet-title-label">
                         Connected Networks
                     </span>
+                        </div>
+                        <div className="activity-controls">
+                            <button className="nr-btn nr-btn-xs" id="activity-clear-btn"
+                                    onClick={this.onOpenForm.bind(this)}>
+                                Add custom Network
+                            </button>
+                        </div>
                     </div>
-                    <div className="activity-controls">
-                        <button className="nr-btn nr-btn-xs" id="activity-clear-btn">
-                            Add custom Network
-                        </button>
-                    </div>
+
+                    <List onCancel={() => {
+                    }}/>
+
+                    {/*<div className="bottom-sheet-footer">*/}
+                    {/*</div>*/}
                 </div>
-
-
-                {/*<div className="bottom-sheet-footer">*/}
-                {/*</div>*/}
-            </div>
-
+            </>}
         </>
     }
 }

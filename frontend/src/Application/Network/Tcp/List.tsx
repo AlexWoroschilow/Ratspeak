@@ -68,20 +68,16 @@ export class List extends React.Component<ListProps, ListState> {
         } as ConfigTCP
 
         (iface?.enabled == true) &&
-        network?.pauseConnectionTCP?.(config)
-            .then((status: boolean) => {
-            })
-            .catch(() => {
-            });
+        network?.pauseConnectionTCP?.(config).catch((error: any) => {
+            this.setState({error: error});
+        });
 
         (iface?.enabled == false) &&
-        network?.resumeConnectionTCP?.(config)
-            .then((status: boolean) => {
-                info(`???${JSON.stringify(network?.interfaces.tcp_client)}`);
-            })
-            .catch(() => {
-            });
+        network?.resumeConnectionTCP?.(config).catch((error: any) => {
+            this.setState({error: error});
+        });
 
+        this.setState({error: undefined});
     }
 
     onRemoveServer(event: MouseEvent) {
@@ -91,14 +87,17 @@ export class List extends React.Component<ListProps, ListState> {
 
         const {network} = this.props;
 
-        network?.removeConnectionTCP?.({
+        const config = {
             name: iface.name,
-        } as ConfigTCP)
-            .then((status: boolean) => {
-                this?.props?.onCancel?.();
-            })
-            .catch(() => {
+        } as ConfigTCP;
+
+        network?.removeConnectionTCP?.(config)
+            .then(this?.props?.onCancel)
+            .catch((error: any) => {
+                this.setState({error: error});
             });
+
+        this.setState({error: undefined});
     }
 
     onShareServer(event: MouseEvent) {
@@ -107,6 +106,8 @@ export class List extends React.Component<ListProps, ListState> {
         )) as InterfaceTCP;
 
         info(`onRemoveServer: ${JSON.stringify(iface)}`)
+
+        this.setState({error: undefined});
     }
 
     render() {
