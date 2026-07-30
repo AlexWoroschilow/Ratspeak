@@ -51,11 +51,13 @@ class Local extends React.Component<LocalProps, LocalState> {
         return <>
 
             {(this?.state?.isEnabledForm) && <>
-                <Form onCancel={this.onCloseForm.bind(this)}/>
+                <div style={{display: 'flex', flexDirection: 'column', height: '100%'}}>
+                    <Form onCancel={this.onCloseForm.bind(this)}/>
+                </div>
             </>}
 
             {(!this?.state?.isEnabledForm) && <>
-                <div className="internet-container">
+                <div className="internet-container" style={{display: 'flex', flexDirection: 'column', height: '100%'}}>
                     <div className="bottom-sheet-header">
                         <div className="bottom-sheet-title bottom-sheet-title-with-icon" data-sheet-icon="tcp">
                             <IoGitNetworkOutline size={20}/>

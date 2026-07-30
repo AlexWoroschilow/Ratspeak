@@ -34,7 +34,7 @@ export class List extends React.Component<ListProps, ListState> {
         let interfaces: Array<InterfaceTCP> = [];
 
         return <>
-            <div className="bottom-sheet-body">
+            <div className="bottom-sheet-body" style={{flex: 1, overflowY: 'auto'}}>
                 <div className="connect-tab-panel active" id="connect-custom-panel" role="tabpanel" aria-labelledby="connect-tab-custom">
                     <div className="modal-field" id="connect-quick-field">
                         <div className="quick-connect-options" id="quick-connect-list">
