@@ -147,12 +147,13 @@ export class Form extends React.Component<FormProps, FormState> {
                         </div>
                     </>}
                 </div>
-                <div className="bottom-sheet-footer">
-                    <button className="rs-dialog-confirm" onClick={this?.props?.onCancel}>Cancel</button>
-                    <button className="rs-dialog-confirm" onClick={this.onConnectNetwork.bind(this)}>
-                        Connect
-                    </button>
-                </div>
+            </div>
+
+            <div className="bottom-sheet-footer">
+                <button className="rs-dialog-confirm" onClick={this?.props?.onCancel}>Cancel</button>
+                <button className="rs-dialog-confirm" onClick={this.onConnectNetwork.bind(this)}>
+                    Connect
+                </button>
             </div>
         </>
     }

@@ -20,6 +20,7 @@ interface FormState {
         discovery_scope: string;
         discovery_port: number;
         data_port: number;
+        multicast_address_type: string;
         devices: string[];
     };
 }
@@ -37,6 +38,7 @@ export class Form extends React.Component<FormProps, FormState> {
                 discovery_scope: "link",
                 discovery_port: 29716,
                 data_port: 42671,
+                multicast_address_type: "temporary",
                 devices: [],
             },
         };
@@ -83,7 +85,7 @@ export class Form extends React.Component<FormProps, FormState> {
                     </div>
                 </div>
 
-                <div className="bottom-sheet-body">
+                <div className="bottom-sheet-body" style={{flex: 1, overflowY: 'auto'}}>
                     {error && <div className="rs-dialog-field-error">{error}</div>}
 
                     <div className="modal-field">
@@ -109,7 +111,7 @@ export class Form extends React.Component<FormProps, FormState> {
 
                     <details className="mt-4">
                         <summary className="rs-dialog-advanced-summary">Advanced Settings</summary>
-                        <div className="pt-2">
+                        <div className="pt-2" style={{marginBottom: "20px"}}>
                             <label className="rs-dialog-field-label">Discovery Scope</label>
                             <select
                                 className="rs-dialog-input"
@@ -123,13 +125,44 @@ export class Form extends React.Component<FormProps, FormState> {
                                 <option value="global">Global (IPv6 Multicast)</option>
                             </select>
 
+                            <label className="rs-dialog-field-label mt-2">Multicast Address Type</label>
+                            <select
+                                className="rs-dialog-input"
+                                value={config.multicast_address_type}
+                                onChange={(e) => this.setState({config: {...config, multicast_address_type: e.target.value}})}
+                            >
+                                <option value="temporary">Temporary (Default)</option>
+                                <option value="permanent">Permanent</option>
+                            </select>
+
+                            <div className="flex gap-2">
+                                <div className="flex-1">
+                                    <label className="rs-dialog-field-label mt-2">Discovery Port</label>
+                                    <input
+                                        type="number"
+                                        className="rs-dialog-input"
+                                        value={config.discovery_port}
+                                        onChange={(e) => this.setState({config: {...config, discovery_port: parseInt(e.target.value) || 0}})}
+                                    />
+                                </div>
+                                <div className="flex-1">
+                                    <label className="rs-dialog-field-label mt-2">Data Port</label>
+                                    <input
+                                        type="number"
+                                        className="rs-dialog-input"
+                                        value={config.data_port}
+                                        onChange={(e) => this.setState({config: {...config, data_port: parseInt(e.target.value) || 0}})}
+                                    />
+                                </div>
+                            </div>
+
                             <label className="rs-dialog-field-label mt-2">Network Interfaces</label>
                             <div className="nic-list">
                                 {(interfaces?.length == 0) && <>
                                     <div className="inline-hint">Loading...</div>
                                 </>}
 
-                                {(interfaces?.length == 0) && <>
+                                {(interfaces?.length > 0) && <>
                                     {interfaces?.map?.((iface) => (
                                         <label key={iface.name} className="rs-dialog-checkbox-wrap">
                                             <input
@@ -152,13 +185,13 @@ export class Form extends React.Component<FormProps, FormState> {
                             </div>
                         </div>
                     </details>
+                </div>
 
-                    <div className="bottom-sheet-footer">
-                        <button className="rs-dialog-confirm" onClick={this.props.onCancel}>Cancel</button>
-                        <button className="rs-dialog-confirm" onClick={() => this.onEnableNetwork()}>
-                            Enable
-                        </button>
-                    </div>
+                <div className="bottom-sheet-footer">
+                    <button className="rs-dialog-confirm" onClick={this.props.onCancel}>Cancel</button>
+                    <button className="rs-dialog-confirm" onClick={() => this.onEnableNetwork()}>
+                        Enable
+                    </button>
                 </div>
             </>
         );
