@@ -4,20 +4,29 @@ import {Network as NetworkStore, NetworkLog, Statistic, StatisticInterface} from
 import {PeerEnriched} from "../../ApplicationStore/Peers";
 import {inject, observer} from "mobx-react";
 import moment from "moment";
+import {BallTriangle} from "react-loader-spinner";
 
 interface StatusProps {
     network?: NetworkStore;
 }
 
 interface StatusState {
+    error?: string;
+    announcing: boolean | undefined;
 }
 
 
 @inject("network")
 @observer
 export class Status extends React.Component<StatusProps, StatusState> {
+    private announceTimeout: any = null;
+
     constructor(props: StatusProps) {
         super(props);
+        this.state = {
+            error: undefined,
+            announcing: undefined
+        };
     }
 
     getTxb(statistic: Statistic | undefined) {
@@ -45,6 +54,40 @@ export class Status extends React.Component<StatusProps, StatusState> {
             });
 
         return (rxb / 1000).toFixed(2);
+    }
+
+    onClickedAnnounce() {
+        const {network} = this.props;
+        this.setState({error: undefined, announcing: true});
+
+        if (this.announceTimeout) {
+            clearTimeout(this.announceTimeout);
+            this.announceTimeout = null;
+        }
+
+        network?.announce().then(() => {
+            this.setState({announcing: false});
+            this.announceTimeout = setTimeout(() => {
+                this.setState({announcing: undefined});
+                this.announceTimeout = null;
+            }, 5000);
+        }).catch((error: any) => {
+            this.onReceievedError(error);
+        });
+    }
+
+    onReceievedError(error: any) {
+        this.setState({
+            error: error?.message || error || "Announce failed",
+            announcing: undefined
+        });
+    }
+
+    componentWillUnmount() {
+        if (this.announceTimeout) {
+            clearTimeout(this.announceTimeout);
+            this.announceTimeout = null;
+        }
     }
 
     render() {
@@ -75,13 +118,32 @@ export class Status extends React.Component<StatusProps, StatusState> {
                         </span>
                 </div>
                 <div className="pulse-actions">
-                    <button className="pulse-announce-btn" id="network-announce-btn">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"
-                             strokeLinejoin="round" aria-hidden="true">
-                            <path d="M3 11l18-8-8 18-2-8-8-2z"/>
-                        </svg>
-                        <span>Announce</span>
-                    </button>
+                    {this.state.error && <div className="rs-dialog-field-error" style={{marginRight: 'auto'}}>
+                        {this.state.error}
+                    </div>}
+
+                    {this.state.announcing === true && <div style={{marginRight: '12px'}}>
+                        <BallTriangle
+                            color="#000000"
+                            height={24}
+                            width={24}
+                        />
+                    </div>}
+
+                    {this.state.announcing === false &&
+                        <div className="rs-dialog-field-success" style={{marginRight: '12px', color: 'var(--status-online)'}}>
+                            Announced!
+                        </div>}
+
+                    {this.state.announcing === undefined &&
+                        <button className="pulse-announce-btn" id="network-announce-btn" onClick={() => this.onClickedAnnounce()}>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"
+                                 strokeLinejoin="round" aria-hidden="true">
+                                <path d="M3 11l18-8-8 18-2-8-8-2z"/>
+                            </svg>
+                            <span>Announce</span>
+                        </button>
+                    }
                 </div>
             </div>
 

@@ -617,5 +617,15 @@ export class Network {
         return this.publicServers;
     }
 
+    async announce() {
+        return new Promise((resolve, reject) => {
+            invoke('trigger_announce').then((result: any) => {
+                return resolve(result);
+            }).catch((error: any) => {
+                return reject(error);
+            });
+        });
+    }
+
 
 }

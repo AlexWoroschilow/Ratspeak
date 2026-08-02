@@ -1,8 +1,6 @@
 "use strict";
-import React, {Suspense} from "react";
+import React from "react";
 import {NetworkLog} from "../../ApplicationStore/Network";
-import {PeerEnriched} from "../../ApplicationStore/Peers";
-import {observer} from "mobx-react";
 import moment from "moment";
 
 interface ActivityRowProps {
