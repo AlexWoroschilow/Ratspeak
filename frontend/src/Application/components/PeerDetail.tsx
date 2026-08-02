@@ -30,11 +30,12 @@ export default class PeerDetail extends React.PureComponent<PeerDetailProps> {
 
         return (
             <div className="peers-detail-content">
-                {/* Header Section */}
                 <div className="peers-detail-header">
-                    <div className="peers-detail-avatar">
-                        <Blockie seed={peer.identity_hash} size={64}/>
-                    </div>
+                    {(peer?.identity_hash != undefined) &&
+                        <div className="peers-detail-avatar">
+                            <Blockie seed={peer.identity_hash} size={64}/>
+                        </div>}
+
                     <div className="peers-detail-name">
                         <PeerName peer={peer}/>
                     </div>
@@ -42,16 +43,14 @@ export default class PeerDetail extends React.PureComponent<PeerDetailProps> {
                         className="peers-detail-hash"
                         id="peers-detail-hash-copy"
                         title="Click to copy"
-                        onClick={() => navigator.clipboard.writeText(peer.hash)}
-                    >
+                        onClick={() => navigator.clipboard.writeText(peer.hash)}>
                         {peer.hash}
                     </div>
                     <div className="peers-detail-status">
                         <span className={`conn-status-dot status-${peer.status}`}></span> {statusLabel}
                     </div>
-                </div>contacts
+                </div>
 
-                {/* Actions Section */}
                 <div className="peers-detail-actions entity-action-grid">
                     <button className="nr-btn entity-action-btn" onClick={() => onCall?.(peer)}>
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -87,7 +86,6 @@ export default class PeerDetail extends React.PureComponent<PeerDetailProps> {
                 </div>
                 <br/>
 
-                {/* Activity Section */}
                 <div className="peers-detail-section">
                     <div className="peers-detail-section-title">Activity</div>
                     <div className="peers-detail-field">
@@ -100,7 +98,6 @@ export default class PeerDetail extends React.PureComponent<PeerDetailProps> {
                     </div>
                 </div>
 
-                {/* Routing Section */}
                 <div className="peers-detail-section">
                     <div className="peers-detail-section-title">Routing</div>
                     <div className="peers-detail-field">
@@ -128,7 +125,6 @@ export default class PeerDetail extends React.PureComponent<PeerDetailProps> {
                     </div>
                 </div>
 
-                {/* Contact Section */}
                 <div className="peers-detail-section">
                     <div className="peers-detail-section-title">Contact</div>
                     <div className="peers-detail-field">

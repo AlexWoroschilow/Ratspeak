@@ -14,7 +14,7 @@ interface ContactsProps {
 
 interface ContactsState {
     isVisibleMenu?: boolean;
-    selected?: Peer;
+    selected?: PeerEnriched;
     searchQuery: string;
 }
 
@@ -31,7 +31,7 @@ export class Contacts extends React.Component<ContactsProps, ContactsState> {
         }
     }
 
-    onSelectedPeer(peer: Peer | undefined) {
+    onSelectedPeer(peer: PeerEnriched | undefined) {
         this.setState({
             selected: peer
         });
@@ -56,16 +56,19 @@ export class Contacts extends React.Component<ContactsProps, ContactsState> {
 
     render() {
         const {contacts} = this.props;
-        const {searchQuery, selected} = this.state;
+        let {searchQuery, selected} = this.state;
         const collection = contacts?.collection || [];
 
         let filtered = collection;
         if (searchQuery?.length > 0) {
-            filtered = filtered.filter((peer: any) => {
+            filtered = filtered.filter((peer: PeerEnriched) => {
                 const name = `${peer?.display_name || peer?.hash}`;
                 return name.toLowerCase().includes(searchQuery.toLowerCase());
             });
         }
+
+        (selected == undefined && filtered?.length > 0) &&
+        (selected = filtered[0] as PeerEnriched);
 
         return <>
 
@@ -113,10 +116,10 @@ export class Contacts extends React.Component<ContactsProps, ContactsState> {
                                             <span className="empty-state-hint">Add a contact from Peers, or tap +</span>
                                         </div>
                                     ) : (
-                                        filtered.map((peer: any) => (
+                                        filtered.map((peer: PeerEnriched) => (
                                             <Suspense key={`${peer?.hash}`} fallback={<div className="peers-row">Loading...</div>}>
                                                 <PeerView onSelectedPeer={this.onSelectedPeer.bind(this)}
-                                                          selected={selected as PeerEnriched}
+                                                          selected={selected}
                                                           peer={peer}/>
                                             </Suspense>
                                         ))
@@ -139,7 +142,7 @@ export class Contacts extends React.Component<ContactsProps, ContactsState> {
                                 </div>
                             ) : (
                                 <div className="peers-detail-content" id="contacts-detail-content">
-                                    <PeerDetail peer={selected as PeerEnriched}/>
+                                    <PeerDetail peer={selected}/>
                                 </div>
                             )}
                         </div>
