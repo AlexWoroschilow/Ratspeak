@@ -3,7 +3,7 @@ import React, {lazy, Suspense} from "react";
 import {inject, observer} from "mobx-react";
 import {Menu} from "./Contacts/Menu";
 import {Contacts as ContactsStore} from "../ApplicationStore/Contacts";
-import {PeerEnriched} from "../ApplicationStore/Peers";
+import {Peer, PeerEnriched} from "../ApplicationStore/Peers";
 import PeerDetail from "./components/PeerDetail";
 
 const PeerView = lazy(() => import('./components/PeerRow'));
@@ -14,7 +14,7 @@ interface ContactsProps {
 
 interface ContactsState {
     isVisibleMenu?: boolean;
-    selected?: PeerEnriched;
+    selected?: Peer;
     searchQuery: string;
 }
 
@@ -31,7 +31,7 @@ export class Contacts extends React.Component<ContactsProps, ContactsState> {
         }
     }
 
-    onSelectedPeer(peer: PeerEnriched | undefined) {
+    onSelectedPeer(peer: Peer | undefined) {
         this.setState({
             selected: peer
         });
@@ -61,7 +61,7 @@ export class Contacts extends React.Component<ContactsProps, ContactsState> {
 
         let filtered = collection;
         if (searchQuery?.length > 0) {
-            filtered = filtered.filter((peer: PeerEnriched) => {
+            filtered = filtered.filter((peer: any) => {
                 const name = `${peer?.display_name || peer?.hash}`;
                 return name.toLowerCase().includes(searchQuery.toLowerCase());
             });
@@ -80,7 +80,10 @@ export class Contacts extends React.Component<ContactsProps, ContactsState> {
                                         <span id="contacts-count">{collection.length} contacts</span>
                                     </div>
                                     <button className="nr-btn nr-btn-sm contacts-add-btn" id="contacts-add-btn" title="Add contact" aria-label="Add contact"
-                                            onClick={(e) => { e.stopPropagation(); this.doToggleMenu(); }}>
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                this.doToggleMenu();
+                                            }}>
                                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"
                                              strokeLinejoin="round">
                                             <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
@@ -110,10 +113,10 @@ export class Contacts extends React.Component<ContactsProps, ContactsState> {
                                             <span className="empty-state-hint">Add a contact from Peers, or tap +</span>
                                         </div>
                                     ) : (
-                                        filtered.map((peer: PeerEnriched) => (
+                                        filtered.map((peer: any) => (
                                             <Suspense key={`${peer?.hash}`} fallback={<div className="peers-row">Loading...</div>}>
                                                 <PeerView onSelectedPeer={this.onSelectedPeer.bind(this)}
-                                                          selected={selected}
+                                                          selected={selected as PeerEnriched}
                                                           peer={peer}/>
                                             </Suspense>
                                         ))
@@ -136,7 +139,7 @@ export class Contacts extends React.Component<ContactsProps, ContactsState> {
                                 </div>
                             ) : (
                                 <div className="peers-detail-content" id="contacts-detail-content">
-                                    <PeerDetail peer={selected}/>
+                                    <PeerDetail peer={selected as PeerEnriched}/>
                                 </div>
                             )}
                         </div>
@@ -144,7 +147,10 @@ export class Contacts extends React.Component<ContactsProps, ContactsState> {
                 </div>
 
                 <button className="view-fab" id="contacts-add-fab" title="Add contact" aria-label="Add contact"
-                        onClick={(e) => { e.stopPropagation(); this.doToggleMenu(); }}>
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            this.doToggleMenu();
+                        }}>
                     <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                         <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
                         <circle cx="8.5" cy="7" r="4"/>

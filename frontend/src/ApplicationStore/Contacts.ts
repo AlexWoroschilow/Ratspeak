@@ -40,9 +40,7 @@
 import {action, makeAutoObservable} from "mobx";
 import {invoke} from "@tauri-apps/api/core";
 import {listen} from "@tauri-apps/api/event";
-import {Peers, PeerEnriched} from "./Peers";
-import {Network} from "./Network";
-import {info} from "@tauri-apps/plugin-log";
+import {Peers} from "./Peers";
 
 export class Contacts {
     public collection: Array<Peers> = [];
