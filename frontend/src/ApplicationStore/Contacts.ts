@@ -37,7 +37,48 @@
 // *   `identity_reset` / `identity_error`: Triggered during identity management lifecycle events.
 // *   `hardware_locked`: Triggered when a hardware security key (e.g., YubiKey) requires a PIN or is locked.
 //
+import {action, makeAutoObservable} from "mobx";
+import {invoke} from "@tauri-apps/api/core";
+import {listen} from "@tauri-apps/api/event";
+import {Peers, PeerEnriched} from "./Peers";
+import {Network} from "./Network";
+import {info} from "@tauri-apps/plugin-log";
+
 export class Contacts {
-    constructor() {
+    public collection: Array<Peers> = [];
+
+    constructor(private peersStore: Peers) {
+        makeAutoObservable(this, {
+            setCollection: action,
+        });
+
+        this.listeners();
+
+        this.fetchContacts()
+            .then((contacts: Array<Peers>) => {
+                this.setCollection(contacts);
+            });
+    }
+
+    setCollection(collection: Array<Peers>) {
+        this.collection = collection;
+    }
+
+    async fetchContacts() {
+        return new Promise((resolve: (value: Array<Peers>) => void, reject) => {
+            invoke<Array<Peers>>('api_contacts')
+                .then(resolve)
+                .catch(reject);
+        });
+
+    }
+
+    listeners() {
+        listen("contacts_update", () => {
+            this.fetchContacts();
+        });
+        listen("contact_added", () => {
+            this.fetchContacts();
+        });
     }
 }

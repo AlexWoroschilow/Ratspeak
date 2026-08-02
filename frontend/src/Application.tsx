@@ -1,17 +1,12 @@
 "use strict";
 import React from "react";
-import {inject, Provider} from "mobx-react";
-import {info,} from '@tauri-apps/plugin-log';
+import {Provider} from "mobx-react";
 
 import {Layout} from "./Application/Layout";
 import {HashRouter, Route, Routes} from "react-router-dom";
-import {Dashboard} from "./Application/Dashboard";
 import {Messages} from "./Application/Messages";
 import {Contacts} from "./Application/Contacts";
 import {Identity} from "./Application/Identity";
-
-const Peers = React.lazy(() => import("./Application/Peers"));
-
 import {Network} from "./Application/Network";
 import {Settings} from "./Application/Settings";
 import {IdentityImport} from "./Application/IdentityImport";
@@ -23,10 +18,12 @@ import {NetworkLocal} from "./Application/NetworkLocal";
 import {NetworkRadio} from "./Application/NetworkRadio";
 import {NetworkHost} from "./Application/NetworkHost";
 import {Setup} from "./Application/Setup";
-import {ApplicationStore, store, network, peers} from "./ApplicationStore";
+import {network, peers, store, contacts} from "./ApplicationStore";
 
 import "./Application.scss";
 import {NetworkActivity} from "./Application/NetworkActivity";
+
+const Peers = React.lazy(() => import("./Application/Peers"));
 
 interface ApplicationProps {
 }
@@ -70,7 +67,7 @@ export class Application extends React.Component<ApplicationProps, ApplicationSt
     render() {
 
         return <>
-            <Provider store={store} network={network} peers={peers}>
+            <Provider store={store} network={network} peers={peers} contacts={contacts}>
                 <HashRouter>
                     <Routes>
                         <Route element={<Layout/>}>

@@ -49,7 +49,7 @@ export default class PeerDetail extends React.PureComponent<PeerDetailProps> {
                     <div className="peers-detail-status">
                         <span className={`conn-status-dot status-${peer.status}`}></span> {statusLabel}
                     </div>
-                </div>
+                </div>contacts
 
                 {/* Actions Section */}
                 <div className="peers-detail-actions entity-action-grid">
