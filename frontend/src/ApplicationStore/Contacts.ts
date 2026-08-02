@@ -40,10 +40,10 @@
 import {action, makeAutoObservable} from "mobx";
 import {invoke} from "@tauri-apps/api/core";
 import {listen} from "@tauri-apps/api/event";
-import {Peers} from "./Peers";
+import {Peer, PeerEnriched, Peers} from "./Peers";
 
 export class Contacts {
-    public collection: Array<Peers> = [];
+    public collection: Array<PeerEnriched> = [];
 
     constructor(private peersStore: Peers) {
         makeAutoObservable(this, {
@@ -53,20 +53,40 @@ export class Contacts {
         this.listeners();
 
         this.fetchContacts()
-            .then((contacts: Array<Peers>) => {
+            .then((contacts: Array<PeerEnriched>) => {
                 this.setCollection(contacts);
             });
     }
 
-    setCollection(collection: Array<Peers>) {
+    setCollection(collection: Array<PeerEnriched>) {
         this.collection = collection;
     }
 
     async fetchContacts() {
-        return new Promise((resolve: (value: Array<Peers>) => void, reject) => {
-            invoke<Array<Peers>>('api_contacts')
-                .then(resolve)
-                .catch(reject);
+        return new Promise((resolve: (value: Array<PeerEnriched>) => void, reject) => {
+            invoke<Array<PeerEnriched>>('api_contacts')
+                .then((collection: Array<Peer>) => {
+                    return resolve(collection?.map?.((peer: Peer) => {
+                        const peerEnriched: PeerEnriched | undefined = this.peersStore.collection?.[`${peer?.hash}`];
+                        if (peerEnriched != undefined) {
+                            return peerEnriched;
+                        }
+
+                        return {
+                            ...peer, ...{
+                                status: 'unreachable',
+                                activity_tier: 'older',
+                                activity_label: "string",
+                                hops: null,
+                                iface_is_live: false,
+                                route_label: "string",
+                                path_age: 0,
+                                via: "",
+                            }
+                        } as PeerEnriched;
+
+                    }));
+                }).catch(reject);
         });
 
     }
