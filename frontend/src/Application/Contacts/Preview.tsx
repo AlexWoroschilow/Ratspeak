@@ -13,6 +13,9 @@ interface PreviewProps {
     onCall?: (peer: PeerEnriched) => void;
     onRemoveContact?: (peer: PeerEnriched) => void;
     onBlock?: (peer: PeerEnriched) => void;
+
+    onContactRemoved?: (peer: PeerEnriched) => void;
+    onContactBlocked?: (peer: PeerEnriched) => void;
 }
 
 @inject("contacts")
@@ -22,6 +25,7 @@ export default class Preview extends React.PureComponent<PreviewProps> {
     constructor(props: PreviewProps) {
         super(props);
 
+        info(`Preview: ${JSON.stringify(props.peer)}`)
     }
 
     onCall(peer: PeerEnriched) {
@@ -33,11 +37,32 @@ export default class Preview extends React.PureComponent<PreviewProps> {
     }
 
     onRemove(peer: PeerEnriched) {
-        info(`onRemove: ${peer}`)
+        const {contacts} = this.props;
+
+        contacts?.removeContact?.(peer)
+            .then(this?.props?.onContactRemoved)
+            .catch((error) => {
+                this.setState({error: error});
+            });
     }
 
     onBlock(peer: PeerEnriched) {
-        info(`onBlock: ${peer}`)
+        const {contacts} = this.props;
+
+        contacts?.blockContact?.(peer)
+            .then(this?.props?.onContactBlocked)
+            .catch((error) => {
+                this.setState({error: error});
+            });
+
+
+        if (contacts) {
+            contacts.blockContact(peer).then(() => {
+                info(`Contact blocked: ${peer.hash}`);
+            }).catch((err) => {
+                info(`Failed to block contact: ${err}`);
+            });
+        }
     }
 
     getStatusLabel() {

@@ -7,6 +7,7 @@ import {PeerEnriched} from "../ApplicationStore/Peers";
 import "./Contacts.scss";
 import Status from "./Contacts/Status";
 import Preview from "./Contacts/Preview";
+import {info} from "@tauri-apps/plugin-log";
 
 
 const ContactRow = lazy(() => import('./Contacts/./Row'));
@@ -57,6 +58,16 @@ export class Contacts extends React.Component<ContactsProps, ContactsState> {
         this.setState({isVisibleMenu: false});
     }
 
+    onContactRemoved(peer: PeerEnriched) {
+        (this?.state?.selected == peer) &&
+        (this.setState({selected: undefined}));
+    }
+
+    onContactBlocked(peer: PeerEnriched) {
+        (this?.state?.selected == peer) &&
+        (this.setState({selected: undefined}));
+    }
+
 
     render() {
         const {contacts} = this.props;
@@ -104,8 +115,8 @@ export class Contacts extends React.Component<ContactsProps, ContactsState> {
                                     {filtered?.map?.((peer: PeerEnriched) => (
                                         <Suspense key={`${peer?.hash}`} fallback={<div className="peers-row">Loading...</div>}>
                                             <ContactRow onSelectedPeer={this.onSelectedPeer.bind(this)}
-                                                      selected={selected}
-                                                      peer={peer}/>
+                                                        selected={selected}
+                                                        peer={peer}/>
                                         </Suspense>
                                     ))}
                                 </>}
@@ -113,7 +124,10 @@ export class Contacts extends React.Component<ContactsProps, ContactsState> {
 
                             {(selected !== undefined) && <>
                                 <div className="peers-detail">
-                                    <Preview peer={selected}/>
+                                    <Preview peer={selected}
+                                             onContactRemoved={this.onContactRemoved.bind(this)}
+                                             onContactBlocked={this.onContactBlocked.bind(this)}
+                                    />
                                 </div>
                             </>}
                         </div>

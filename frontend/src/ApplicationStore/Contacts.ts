@@ -41,6 +41,7 @@ import {action, makeAutoObservable} from "mobx";
 import {invoke} from "@tauri-apps/api/core";
 import {listen} from "@tauri-apps/api/event";
 import {Peer, PeerEnriched, Peers} from "./Peers";
+import {info} from "@tauri-apps/plugin-log";
 
 export class Contacts {
     public collection: Array<PeerEnriched> = [];
@@ -91,12 +92,47 @@ export class Contacts {
 
     }
 
-    listeners() {
-        listen("contacts_update", () => {
-            this.fetchContacts();
+    async addContact(peer: PeerEnriched, name?: string) {
+        return new Promise((resolve: (value: PeerEnriched) => void, reject) => {
+            invoke<PeerEnriched>('add_contact', {args: {hash: peer.hash, display_name: name}})
+                .then((peer: any) => {
+                    resolve(peer);
+                }).catch(reject);
         });
-        listen("contact_added", () => {
-            this.fetchContacts();
+    }
+
+    async removeContact(peer: PeerEnriched) {
+        return new Promise((resolve: (value: PeerEnriched) => void, reject) => {
+            invoke<PeerEnriched>('remove_contact', {hash: peer.hash})
+                .then((result: any) => {
+                    return resolve(peer);
+                }).catch(reject);
+        });
+    }
+
+    async blockContact(peer: PeerEnriched) {
+        return new Promise((resolve: (value: PeerEnriched) => void, reject) => {
+            invoke('block_contact', {args: {hash: peer.hash}})
+                .then((result: any) => {
+                    info(`\n\nblockContact: ${JSON.stringify(result)}\n`)
+                    return resolve(peer);
+                }).catch(reject);
+        });
+    }
+
+    listeners() {
+        listen("contacts_update", (data) => {
+            this.fetchContacts()
+                .then((contacts: Array<PeerEnriched>) => {
+                    this.setCollection(contacts);
+                });
+        });
+
+        listen("contact_added", (data) => {
+            this.fetchContacts()
+                .then((contacts: Array<PeerEnriched>) => {
+                    this.setCollection(contacts);
+                });
         });
     }
 }

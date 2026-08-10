@@ -2,8 +2,12 @@ import React from 'react';
 import {PeerEnriched} from '../../ApplicationStore/Peers';
 import Blockie from './Blockie';
 import {PeerName} from "./PeerName";
+import {inject, observer} from "mobx-react";
+import {Contacts as ContactsStore} from "../../ApplicationStore/Contacts";
+import {error, info} from "@tauri-apps/plugin-log";
 
 interface PeerDetailProps {
+    contacts?: ContactsStore | undefined;
     peer: PeerEnriched;
     onMessage?: (peer: PeerEnriched) => void;
     onCall?: (peer: PeerEnriched) => void;
@@ -11,7 +15,27 @@ interface PeerDetailProps {
     onBlock?: (peer: PeerEnriched) => void;
 }
 
-export default class PeerDetail extends React.PureComponent<PeerDetailProps> {
+interface ContactsState {
+    message?: string | undefined;
+    error?: {
+        message?: string | undefined;
+    } | undefined;
+}
+
+
+@inject("contacts")
+@observer
+export default class PeerDetail extends React.PureComponent<PeerDetailProps, ContactsState> {
+    constructor(props: PeerDetailProps) {
+        super(props);
+
+        this.state = {
+            message: undefined,
+            error: undefined,
+        };
+    }
+
+
     getStatusLabel() {
         const {peer} = this.props;
         if (peer.status === 'reachable' || peer?.status === 'direct') return 'Recent';
@@ -24,12 +48,47 @@ export default class PeerDetail extends React.PureComponent<PeerDetailProps> {
         return new Date(seconds * 1000).toLocaleString();
     }
 
+
+    onContact(peer: PeerEnriched) {
+        const {contacts} = this.props;
+        contacts?.addContact(peer, peer.display_name)
+            .then((contact: PeerEnriched) => {
+                this.setState({message: `Contact added ${contact.display_name}`});
+                let interval = setInterval(() => {
+                    this.setState({message: undefined});
+                    clearInterval(interval);
+                }, 5000)
+            })
+            .catch((error) => {
+                this.setState({error: error});
+                let interval = setInterval(() => {
+                    this.setState({error: undefined});
+                    clearInterval(interval);
+                }, 5000)
+
+            });
+
+    }
+
+
     render() {
         const {peer, onMessage, onCall, onAddContact, onBlock} = this.props;
+        const {error, message} = this.state;
         const statusLabel = this.getStatusLabel();
 
         return (
             <div className="peers-detail-content">
+                {(message != undefined) && <>
+                    <div className="rs-dialog-field-info">
+                        {message}
+                    </div>
+                </>}
+
+                {(error?.message != undefined) && <>
+                    <div className="rs-dialog-field-error" id="rnode-public-map-error">
+                        {error?.message}
+                    </div>
+                </>}
                 <div className="peers-detail-header">
                     {(peer?.identity_hash != undefined) &&
                         <div className="peers-detail-avatar">
@@ -66,7 +125,7 @@ export default class PeerDetail extends React.PureComponent<PeerDetailProps> {
                         <span>Message</span>
                     </button>
                     {!peer.is_contact && (
-                        <button className="nr-btn entity-action-btn" onClick={() => onAddContact?.(peer)}>
+                        <button className="nr-btn entity-action-btn" onClick={this.onContact.bind(this, peer)}>
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                                 <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
                                 <circle cx="8.5" cy="7" r="4"/>
