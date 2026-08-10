@@ -21,7 +21,70 @@
 // *   `dashboard/static/js/health.js` and `dashboard/static/js/settings.js`: Use `api_hub_interfaces` to monitor the status of local host interfaces.
 //
 //
+import {invoke} from "@tauri-apps/api/core";
+import {makeAutoObservable} from "mobx";
+
+import {Interfaces} from "../Network";
+
+export interface IfacArgs {
+    ifac_enabled?: boolean;
+    ifac_network_name?: string;
+    ifac_passphrase?: string;
+    ifac_size?: number;
+}
+
+export interface TcpServerArgs extends IfacArgs {
+    name?: string;
+    listen_port?: number;
+    listen_ip?: string;
+}
+
+export interface UpdateTcpServerArgs extends TcpServerArgs {
+    old_name: string;
+}
+
+export interface BackboneServerArgs extends IfacArgs {
+    name?: string;
+    listen_port?: number;
+    listen_ip?: string;
+    prefer_ipv6?: boolean;
+    device?: string;
+}
+
+export interface UpdateBackboneServerArgs extends BackboneServerArgs {
+    old_name: string;
+}
+
 export class Host {
     constructor() {
+        makeAutoObservable(this);
+    }
+
+    async addTcpServer(args: TcpServerArgs): Promise<any> {
+        return await invoke('add_tcp_server', { args });
+    }
+
+    async updateTcpServer(args: UpdateTcpServerArgs): Promise<any> {
+        return await invoke('update_tcp_server', { args });
+    }
+
+    async removeTcpServer(name: string): Promise<any> {
+        return await invoke('remove_tcp_server', { name });
+    }
+
+    async addBackboneServer(args: BackboneServerArgs): Promise<any> {
+        return await invoke('add_backbone_server', { args });
+    }
+
+    async updateBackboneServer(args: UpdateBackboneServerArgs): Promise<any> {
+        return await invoke('update_backbone_server', { args });
+    }
+
+    async removeBackboneServer(name: string): Promise<any> {
+        return await invoke('remove_backbone_server', { name });
+    }
+
+    async getHubInterfaces(): Promise<Interfaces> {
+        return await invoke<Interfaces>('api_hub_interfaces');
     }
 }

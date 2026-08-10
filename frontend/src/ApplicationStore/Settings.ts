@@ -44,7 +44,98 @@
 // *   `system_status`: General health and status updates from the backend.
 // *   `alert` / `clone_warning`: Critical system warnings or notifications for the user.
 //
+import {invoke} from "@tauri-apps/api/core";
+import {makeAutoObservable} from "mobx";
+
+export interface AppSettings {
+    auto_announce_interval: number;
+    announce_ratspeak_usage: boolean;
+    peers_sort: 'name' | 'hops' | 'last_seen';
+    hardware_session_timeout: number;
+    developer_mode: boolean;
+    window_decorations: string;
+}
+
+export interface NotificationSettings {
+    enabled: boolean;
+    ios_stubbed: boolean;
+}
+
+export interface VersionInfo {
+    version: string;
+    name: string;
+}
+
 export class Settings {
     constructor() {
+        makeAutoObservable(this);
+    }
+
+    async getAppSettings(): Promise<AppSettings> {
+        return await invoke<AppSettings>('api_app_settings');
+    }
+
+    async getVersion(): Promise<VersionInfo> {
+        return await invoke<VersionInfo>('api_version');
+    }
+
+    async getNotificationSettings(): Promise<NotificationSettings> {
+        return await invoke<NotificationSettings>('api_notification_settings');
+    }
+
+    async setDesktopNotifications(enabled: boolean): Promise<{ enabled: boolean }> {
+        return await invoke('set_desktop_notifications', { enabled });
+    }
+
+    async setAnnounceRatspeakUsage(enabled: boolean): Promise<{ enabled: boolean }> {
+        return await invoke('set_announce_ratspeak_usage', { enabled });
+    }
+
+    async setAutoAnnounce(interval: number): Promise<{ interval: number }> {
+        return await invoke('set_auto_announce', { interval });
+    }
+
+    async setHardwareLockTimeout(seconds: number): Promise<{ hardware_session_timeout: number }> {
+        return await invoke('set_hardware_lock_timeout', { seconds });
+    }
+
+    async setDeveloperMode(enabled: boolean): Promise<{ developer_mode: boolean }> {
+        return await invoke('set_developer_mode', { enabled });
+    }
+
+    async setPeersSort(sort: 'name' | 'hops' | 'last_seen'): Promise<{ sort: string }> {
+        return await invoke('set_peers_sort', { sort });
+    }
+
+    async getHubInterfaces(): Promise<any> {
+        return await invoke('api_hub_interfaces');
+    }
+
+    async triggerAnnounce(): Promise<any> {
+        return await invoke('trigger_announce');
+    }
+
+    async clearPaths(): Promise<{ cleared: number }> {
+        return await invoke('api_clear_paths');
+    }
+
+    async clearAnnounces(): Promise<{ recent_cleared: number, peers_cleared: number }> {
+        return await invoke('api_clear_announces');
+    }
+
+    async clearMessages(): Promise<void> {
+        return await invoke('api_clear_messages');
+    }
+
+    async clearContacts(): Promise<void> {
+        return await invoke('api_clear_contacts');
+    }
+
+    async resetDatabase(): Promise<void> {
+        return await invoke('api_reset_database');
+    }
+
+    async factoryReset(): Promise<{ message: string }> {
+        return await invoke('api_factory_reset');
     }
 }

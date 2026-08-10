@@ -39,7 +39,73 @@
 // *   `dashboard/static/js/tauri_events.js`: Handles event-driven Bluetooth RNode actions like pairing and bridge readiness.
 // *   `dashboard/static/js/ui_shared.js`: Handles generic interface actions including disconnecting BLE RNodes.
 //
+import {invoke} from "@tauri-apps/api/core";
+import {makeAutoObservable} from "mobx";
+
+export interface AddLoraArgs {
+    name: string;
+    port: string;
+    region_key?: string;
+    preset_key?: string;
+    mode?: string;
+    custom_params: boolean;
+    frequency: number;
+    bandwidth: number;
+    spreading_factor: number;
+    coding_rate: number;
+    tx_power: number;
+    airtime_limit_short?: number;
+    airtime_limit_long?: number;
+}
+
+export interface BleRnodeBridgeArgs {
+    tcp_port: number;
+    name: string;
+    port: string;
+    frequency: number;
+    bandwidth: number;
+    spreading_factor: number;
+    coding_rate: number;
+    tx_power: number;
+    mode?: string;
+    airtime_limit_short?: number;
+    airtime_limit_long?: number;
+}
+
 export class Radio {
     constructor() {
+        makeAutoObservable(this);
+    }
+
+    async addLoraInterface(args: AddLoraArgs): Promise<any> {
+        return await invoke('add_lora_interface', { args });
+    }
+
+    async updateLoraInterface(args: AddLoraArgs): Promise<any> {
+        return await invoke('update_lora_interface', { args });
+    }
+
+    async getRnodePresets(): Promise<any> {
+        return await invoke('api_rnode_presets');
+    }
+
+    async getSerialPorts(): Promise<any> {
+        return await invoke('api_serial_ports');
+    }
+
+    async disconnectBleRnode(name: string): Promise<any> {
+        return await invoke('disconnect_ble_rnode', { name });
+    }
+
+    async submitBleRnodePasskey(passkey: number): Promise<any> {
+        return await invoke('submit_ble_rnode_passkey', { passkey });
+    }
+
+    async cancelBleRnodePairing(): Promise<any> {
+        return await invoke('cancel_ble_rnode_pairing');
+    }
+
+    async bleRnodeBridgeReady(args: BleRnodeBridgeArgs): Promise<any> {
+        return await invoke('ble_rnode_bridge_ready', { args });
     }
 }

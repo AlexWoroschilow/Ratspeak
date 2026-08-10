@@ -13,6 +13,7 @@ import {error, info} from "@tauri-apps/plugin-log";
 import {ApplicationStore} from "../ApplicationStore";
 import {invoke} from "@tauri-apps/api/core";
 import {action, makeAutoObservable} from "mobx";
+import {Host} from "./Network/Host";
 
 
 interface NetworkLogArgs {
@@ -221,6 +222,7 @@ export class Network {
     public interfaces: Interfaces = {} as Interfaces;
     public blackholes: Blackholes = {} as Blackholes;
     public statistic: Statistic = {} as Statistic;
+    public host: Host;
     public publicServers: Array<PublicServer> = [
         {
             id: 'ratspeak-ruby',
@@ -312,6 +314,7 @@ export class Network {
     }
 
     constructor(store: ApplicationStore) {
+        this.host = new Host();
         makeAutoObservable(this, {
             interfacesAll: false,
             interfacesEnabled: false,

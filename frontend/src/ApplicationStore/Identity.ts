@@ -42,7 +42,144 @@
 // *   `dashboard/static/js/identity.js`: The central location for software and hardware identity logic.
 // *   `dashboard/static/js/settings.js`: Used for status updates and identity switching.
 // *   `dashboard/static/js/setup.js`: Handling hardware key activation during the initial application setup.
+import {action, makeAutoObservable} from "mobx";
+import {invoke} from "@tauri-apps/api/core";
+import {listen} from "@tauri-apps/api/event";
+
+export interface IdentityInfo {
+    hash: string;
+    nickname: string;
+    is_active: boolean;
+    has_passcode: boolean;
+    is_hardware: boolean;
+}
+
+export interface ContactCard {
+    hash: string;
+    nickname: string;
+    keys: string[];
+    metadata: Record<string, any>;
+}
+
 export class Identity {
+    public collection: IdentityInfo[] = [];
+    public active: IdentityInfo | null = null;
+
     constructor() {
+        makeAutoObservable(this, {
+            setCollection: action,
+            setActive: action,
+        });
+
+        this.listeners();
+
+        this.fetchIdentities();
+        this.fetchActiveIdentity();
+    }
+
+    setCollection(collection: IdentityInfo[]) {
+        this.collection = collection;
+    }
+
+    setActive(identity: IdentityInfo | null) {
+        this.active = identity;
+    }
+
+    async fetchIdentities(): Promise<IdentityInfo[]> {
+        try {
+            const identities = await invoke<IdentityInfo[]>('api_list_identities');
+            this.setCollection(identities);
+            return identities;
+        } catch (error) {
+            console.error("Failed to fetch identities:", error);
+            throw error;
+        }
+    }
+
+    async fetchActiveIdentity(): Promise<IdentityInfo | null> {
+        try {
+            const identity = await invoke<IdentityInfo | null>('api_identity');
+            this.setActive(identity);
+            return identity;
+        } catch (error) {
+            console.error("Failed to fetch active identity:", error);
+            throw error;
+        }
+    }
+
+    async createIdentity(nickname: string): Promise<IdentityInfo> {
+        try {
+            const identity = await invoke<IdentityInfo>('api_create_identity', {nickname});
+            await this.fetchIdentities();
+            return identity;
+        } catch (error) {
+            console.error("Failed to create identity:", error);
+            throw error;
+        }
+    }
+
+    async activateIdentity(hash: string): Promise<void> {
+        try {
+            await invoke('api_activate_identity', {hash});
+            await this.fetchActiveIdentity();
+            await this.fetchIdentities();
+        } catch (error) {
+            console.error("Failed to activate identity:", error);
+            throw error;
+        }
+    }
+
+    async deleteIdentity(hash: string): Promise<void> {
+        try {
+            await invoke('api_delete_identity', {hash});
+            await this.fetchIdentities();
+            if (this.active?.hash === hash) {
+                this.setActive(null);
+            }
+        } catch (error) {
+            console.error("Failed to delete identity:", error);
+            throw error;
+        }
+    }
+
+    async setDisplayName(nickname: string): Promise<void> {
+        try {
+            await invoke('api_set_display_name', {nickname});
+            await this.fetchActiveIdentity();
+            await this.fetchIdentities();
+        } catch (error) {
+            console.error("Failed to set display name:", error);
+            throw error;
+        }
+    }
+
+    async getContactCard(hash: string): Promise<ContactCard> {
+        try {
+            return await invoke<ContactCard>('api_contact_card', {hash});
+        } catch (error) {
+            console.error("Failed to get contact card:", error);
+            throw error;
+        }
+    }
+
+    async setIdentityStatus(status: string): Promise<void> {
+        try {
+            await invoke('set_identity_status', {status});
+        } catch (error) {
+            console.error("Failed to set identity status:", error);
+            throw error;
+        }
+    }
+
+    listeners() {
+        listen("identity_switched", () => {
+            this.fetchActiveIdentity();
+            this.fetchIdentities();
+        });
+
+        listen("identity_updated", () => {
+            this.fetchActiveIdentity();
+            this.fetchIdentities();
+        });
     }
 }
