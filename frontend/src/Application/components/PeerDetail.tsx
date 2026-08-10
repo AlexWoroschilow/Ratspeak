@@ -4,7 +4,6 @@ import Blockie from './Blockie';
 import {PeerName} from "./PeerName";
 import {inject, observer} from "mobx-react";
 import {Contacts as ContactsStore} from "../../ApplicationStore/Contacts";
-import {error, info} from "@tauri-apps/plugin-log";
 
 interface PeerDetailProps {
     contacts?: ContactsStore | undefined;
@@ -12,7 +11,7 @@ interface PeerDetailProps {
     onMessage?: (peer: PeerEnriched) => void;
     onCall?: (peer: PeerEnriched) => void;
     onAddContact?: (peer: PeerEnriched) => void;
-    onBlock?: (peer: PeerEnriched) => void;
+    onContactBlocked?: (peer: PeerEnriched) => void;
 }
 
 interface ContactsState {
@@ -28,6 +27,7 @@ interface ContactsState {
 export default class PeerDetail extends React.PureComponent<PeerDetailProps, ContactsState> {
     constructor(props: PeerDetailProps) {
         super(props);
+
 
         this.state = {
             message: undefined,
@@ -54,6 +54,8 @@ export default class PeerDetail extends React.PureComponent<PeerDetailProps, Con
         contacts?.addContact(peer, peer.display_name)
             .then((contact: PeerEnriched) => {
                 this.setState({message: `Contact added ${contact.display_name}`});
+                this.props.peer.is_contact = true;
+
                 let interval = setInterval(() => {
                     this.setState({message: undefined});
                     clearInterval(interval);
@@ -65,14 +67,26 @@ export default class PeerDetail extends React.PureComponent<PeerDetailProps, Con
                     this.setState({error: undefined});
                     clearInterval(interval);
                 }, 5000)
-
             });
-
     }
 
 
+    onBlock(peer: PeerEnriched) {
+        const {contacts} = this.props;
+
+        contacts?.blockContact?.(peer)
+            .then(this?.props?.onContactBlocked)
+            .catch((error) => {
+                this.setState({error: error});
+                let interval = setInterval(() => {
+                    this.setState({error: undefined});
+                    clearInterval(interval);
+                }, 5000)
+            });
+    }
+
     render() {
-        const {peer, onMessage, onCall, onAddContact, onBlock} = this.props;
+        const {peer, onMessage, onCall} = this.props;
         const {error, message} = this.state;
         const statusLabel = this.getStatusLabel();
 
@@ -135,7 +149,7 @@ export default class PeerDetail extends React.PureComponent<PeerDetailProps, Con
                             <span>Add</span>
                         </button>
                     )}
-                    <button className="danger-btn entity-action-btn" onClick={() => onBlock?.(peer)}>
+                    <button className="danger-btn entity-action-btn" onClick={this.onBlock.bind(this, peer)}>
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                             <circle cx="12" cy="12" r="10"/>
                             <line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>

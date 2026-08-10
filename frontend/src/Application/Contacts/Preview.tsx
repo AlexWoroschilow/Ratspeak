@@ -24,8 +24,6 @@ export default class Preview extends React.PureComponent<PreviewProps> {
 
     constructor(props: PreviewProps) {
         super(props);
-
-        info(`Preview: ${JSON.stringify(props.peer)}`)
     }
 
     onCall(peer: PeerEnriched) {
@@ -54,15 +52,6 @@ export default class Preview extends React.PureComponent<PreviewProps> {
             .catch((error) => {
                 this.setState({error: error});
             });
-
-
-        if (contacts) {
-            contacts.blockContact(peer).then(() => {
-                info(`Contact blocked: ${peer.hash}`);
-            }).catch((err) => {
-                info(`Failed to block contact: ${err}`);
-            });
-        }
     }
 
     getStatusLabel() {

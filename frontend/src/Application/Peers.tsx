@@ -1,5 +1,5 @@
 "use strict";
-import React, {lazy, Suspense, MouseEvent} from "react";
+import React, {lazy, Suspense} from "react";
 import {inject, observer} from "mobx-react"; // or 'mobx-react-lite' for functional components
 import {PeerCache, PeerEnriched, PeerEnrichedStatus, Peers as PeersStore} from "../ApplicationStore/Peers";
 import PeerDetail from "./components/PeerDetail";
@@ -14,7 +14,7 @@ interface PeersProps {
 }
 
 interface PeersState {
-    selected?: PeerEnriched;
+    selected?: PeerEnriched | undefined;
     searchQuery: string;
     sortKey: string;
 
@@ -55,21 +55,7 @@ export default class Peers extends React.PureComponent<PeersProps, PeersState> {
     }
 
     onSelectedPeer(peer: PeerEnriched | undefined) {
-        this.setState({
-            selected: peer
-        });
-    }
-
-    onSearchChange(event: React.ChangeEvent<HTMLInputElement>) {
-        this.setState({
-            searchQuery: event.target.value
-        });
-    }
-
-    onSortChange(key: string) {
-        this.setState({
-            sortKey: key
-        });
+        this.setState({selected: peer});
     }
 
     onChangedFilter(filter: any) {
@@ -84,10 +70,14 @@ export default class Peers extends React.PureComponent<PeersProps, PeersState> {
         });
     }
 
+    onContactBlocked(peer: PeerEnriched) {
+        (this?.state?.selected == peer) &&
+        (this.setState({selected: undefined}));
+    }
 
     render() {
         const {peers} = this.props;
-        const {searchQuery, sortKey, statuses, filter} = this.state;
+        let {searchQuery, filter, selected} = this.state;
         const collection: PeerCache = peers?.collection || {};
 
         const interfaces = Array.from(
@@ -119,7 +109,13 @@ export default class Peers extends React.PureComponent<PeersProps, PeersState> {
 
         filtered.sort(([aKey, a]: [string, PeerEnriched | undefined], [bKey, b]: [string, PeerEnriched | undefined]) => {
             return (b?.last_seen || 0) - (a?.last_seen || 0);
-        })
+        });
+
+
+        let key: string | undefined = undefined;
+        (selected == undefined && filtered?.length > 0) &&
+        ([key, selected] = filtered[0] as [string, PeerEnriched | undefined]);
+
 
         const filteredCollection: PeerCache = Object.fromEntries(filtered);
 
@@ -142,14 +138,14 @@ export default class Peers extends React.PureComponent<PeersProps, PeersState> {
                                 {Object.entries(filteredCollection).map(([key, peer]: [string, PeerEnriched | undefined]) => (
                                     <Suspense key={`${peer?.hash}`} fallback={<div className="peers-row">Loading...</div>}>
                                         <PeerView onSelectedPeer={this.onSelectedPeer.bind(this)}
-                                                  selected={this?.state?.selected}
+                                                  selected={selected}
                                                   peer={peer}/>
                                     </Suspense>
                                 ))}
                             </nav>
 
 
-                            {(this?.state?.selected === undefined) && <>
+                            {(selected === undefined) && <>
                                 <div className="peers-detail-empty" id="peers-detail-empty">
                                     <svg className="empty-state-svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"
                                          strokeLinecap="round" strokeLinejoin="round">
@@ -163,9 +159,11 @@ export default class Peers extends React.PureComponent<PeersProps, PeersState> {
                             </>}
 
 
-                            {(this?.state?.selected !== undefined) && <>
+                            {(selected !== undefined) && <>
                                 <div className="peers-detail">
-                                    <PeerDetail peer={this.state.selected}/>
+                                    <PeerDetail peer={selected}
+                                                onContactBlocked={this.onContactBlocked.bind(this)}
+                                    />
                                 </div>
                             </>}
 

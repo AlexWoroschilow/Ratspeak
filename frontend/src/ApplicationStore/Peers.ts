@@ -33,7 +33,6 @@
 // *   `dashboard/static/js/tauri_events.js`: Listens for real-time network events (like new peers or hop updates) and updates the peer snapshot.
 //
 //
-import {ApplicationStore} from "../ApplicationStore";
 import {invoke} from "@tauri-apps/api/core";
 import {listen} from "@tauri-apps/api/event";
 import {info} from "@tauri-apps/plugin-log";
@@ -94,11 +93,6 @@ export class Peers {
 
     setStatistic(statistic: Statistic): Statistic {
         this.statistic = statistic;
-        Object.entries(this.collection)
-            .forEach(([key, peer]: [string, PeerEnriched | undefined]) => {
-                (peer !== undefined) &&
-                this.setCollectionItem(this.enrich(peer));
-            });
         return this.statistic;
     }
 
@@ -121,18 +115,35 @@ export class Peers {
         listen<any>("peers_updated", (event: { payload: { peers: Array<Peer> } }) => {
             const {peers} = event.payload;
             peers.forEach((peer: Peer) => {
-                return this.setCollectionItem(
-                    this.enrich(peer)
-                );
+                const enriched = this.enrich(peer);
+                return this.setCollectionItem(enriched);
             });
         });
 
-        listen<any>("peer_updated", (payload: any) => {
-            info(`\n\npeer_updated: ${JSON.stringify(payload)}\n`)
+        listen("contacts_update", (data: { payload: Array<Peer> }) => {
+            data?.payload?.forEach?.((peer: Peer) => {
+                const enriched = this.enrich(peer);
+                this.setCollectionItem(enriched);
+            })
         });
 
-        listen<any>("peer_removed", (payload: any) => {
-            info(`\n\npeer_removed: ${JSON.stringify(payload)}\n`)
+        listen("contact_added", (data: { payload: { display_name: string, hash: string } }) => {
+            let contact: PeerEnriched | undefined = this.collection?.[data.payload.hash];
+            if (contact == undefined) {
+                return;
+            }
+
+            contact.is_contact = true;
+            this.setCollectionItem(contact);
+        });
+
+
+        listen<any>("peer_updated", (payload: any) => {
+            info(`\n\npeer_updated: ${JSON.stringify(payload)}\n`);
+        });
+
+        listen<any>("peer_removed", (data: { payload: { hash: string } }) => {
+            delete this?.collection?.[data.payload.hash];
         });
     }
 
