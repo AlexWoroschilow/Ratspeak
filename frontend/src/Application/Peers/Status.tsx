@@ -1,10 +1,11 @@
 "use strict";
 import React, {MouseEvent} from "react";
-import {inject, observer} from "mobx-react"; // or 'mobx-react-lite' for functional components
-import {PeerCache, PeerEnriched, PeerEnrichedStatus, Peers as PeersStore} from "../../ApplicationStore/Peers";
+import {PeerCache, PeerEnriched, PeerEnrichedStatus} from "../../ApplicationStore/Peers";
+
+
+import "./Status.scss";
 
 interface StatusProps {
-    peers?: PeersStore;
 
     filteredCollection: PeerCache;
     interfaces: Array<string | undefined>;
@@ -33,8 +34,6 @@ interface StatusState {
     }
 }
 
-@inject("peers")
-@observer
 export default class Status extends React.PureComponent<StatusProps, StatusState> {
     constructor(props: StatusProps) {
         super(props);
@@ -107,61 +106,62 @@ export default class Status extends React.PureComponent<StatusProps, StatusState
     }
 
     render() {
-        const {peers, filteredCollection, interfaces} = this.props;
+        const {filteredCollection, interfaces} = this.props;
         const {searchQuery, statuses, filter} = this.state;
 
         return <>
+            <div className={"Status"}>
 
-            <div className="network-pulse" id="network-pulse">
-                <div className="peers-toolbar">
-                    <input type="text" id="peers-search" className="conn-search-input" placeholder="Search..." autoCorrect="off" autoCapitalize="none"
-                           spellCheck="false" value={searchQuery} onChange={this.onChangedSearch.bind(this)}/>
-                </div>
-                <div className="peers-list-scroll" id="peers-list-scroll">
-                    <div className="activity-filters" id="activity-filters">
-                        <button className={`activity-level-btn ${(!filter?.interface && !filter?.status) && "active"}`}
-                                onClick={this.doApplyFilter.bind(this)}
-                                data-filter={"all"}
-                                data-type={'all'}>
-                            All
-                            {(!filter?.interface && !filter?.status) && <>
-                                &nbsp;({Object.entries(filteredCollection).length})
-                            </>}
-                        </button>
-                        {interfaces.map((iface: string | undefined) => (<>
-                            {iface !== undefined &&
-                                <button className={`activity-level-btn ${(filter?.interface == iface) && "active"}`}
+                <div className="network-pulse" id="network-pulse">
+                    <div className="peers-search">
+                        <input type="text" id="peers-search" className="conn-search-input" placeholder="Search..." autoCorrect="off" autoCapitalize="none"
+                               spellCheck="false" value={searchQuery} onChange={this.onChangedSearch.bind(this)}/>
+                    </div>
+
+                    <div className="peers-toolbar">
+                        <div className="activity-filters" id="activity-filters">
+                            <button className={`activity-level-btn ${(!filter?.interface && !filter?.status) && "active"}`}
+                                    onClick={this.doApplyFilter.bind(this)}
+                                    data-filter={"all"}
+                                    data-type={'all'}>
+                                All
+                                {(!filter?.interface && !filter?.status) && <>
+                                    &nbsp;({Object.entries(filteredCollection).length})
+                                </>}
+                            </button>
+                            {interfaces.map((iface: string | undefined) => (<>
+                                {iface !== undefined &&
+                                    <button className={`activity-level-btn ${(filter?.interface == iface) && "active"}`}
+                                            onClick={this.doApplyFilter.bind(this)}
+                                            data-filter={"interface"}
+                                            data-interface={iface}>
+                                        {iface}
+
+                                        {(filter?.interface == iface) && <>
+                                            &nbsp;({Object.entries(filteredCollection).length})
+                                        </>}
+
+                                    </button>}
+                            </>))}
+
+                            {Object.entries(statuses).map(([status, label]) => (
+                                <button className={`activity-level-btn ${(filter?.status == status) && "active"}`}
                                         onClick={this.doApplyFilter.bind(this)}
-                                        data-filter={"interface"}
-                                        data-interface={iface}>
-                                    {iface}
+                                        data-filter={"status"}
+                                        data-status={status}>
 
-                                    {(filter?.interface == iface) && <>
+                                    {label}
+
+                                    {(filter?.status == status) && <>
                                         &nbsp;({Object.entries(filteredCollection).length})
                                     </>}
 
-                                </button>}
-                        </>))}
-
-                        {Object.entries(statuses).map(([status, label]) => (
-                            <button className={`activity-level-btn ${(filter?.status == status) && "active"}`}
-                                    onClick={this.doApplyFilter.bind(this)}
-                                    data-filter={"status"}
-                                    data-status={status}>
-
-                                {label}
-
-                                {(filter?.status == status) && <>
-                                    &nbsp;({Object.entries(filteredCollection).length})
-                                </>}
-
-                            </button>
-                        ))}
-
+                                </button>
+                            ))}
+                        </div>
                     </div>
                 </div>
             </div>
-
         </>
     }
 }
