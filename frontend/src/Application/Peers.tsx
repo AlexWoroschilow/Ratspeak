@@ -2,12 +2,11 @@
 import React, {lazy, Suspense} from "react";
 import {inject, observer} from "mobx-react"; // or 'mobx-react-lite' for functional components
 import {PeerCache, PeerEnriched, PeerEnrichedStatus, Peers as PeersStore} from "../ApplicationStore/Peers";
-import PeerDetail from "./components/PeerDetail";
+import {Preview} from "./Peers/Preview";
 import Status from "./Peers/Status";
 import "./Peers.scss";
+import {Row} from "./Peers/Row";
 
-
-const PeerView = lazy(() => import('./components/PeerRow'));
 
 interface PeersProps {
     peers?: PeersStore;
@@ -136,11 +135,9 @@ export default class Peers extends React.PureComponent<PeersProps, PeersState> {
 
                             <nav className="scrollable">
                                 {Object.entries(filteredCollection).map(([key, peer]: [string, PeerEnriched | undefined]) => (
-                                    <Suspense key={`${peer?.hash}`} fallback={<div className="peers-row">Loading...</div>}>
-                                        <PeerView onSelectedPeer={this.onSelectedPeer.bind(this)}
-                                                  selected={selected}
-                                                  peer={peer}/>
-                                    </Suspense>
+                                    <Row onSelectedPeer={this.onSelectedPeer.bind(this)}
+                                         selected={selected}
+                                         peer={peer}/>
                                 ))}
                             </nav>
 
@@ -161,8 +158,8 @@ export default class Peers extends React.PureComponent<PeersProps, PeersState> {
 
                             {(selected !== undefined) && <>
                                 <div className="peers-detail">
-                                    <PeerDetail peer={selected}
-                                                onContactBlocked={this.onContactBlocked.bind(this)}
+                                    <Preview peer={selected}
+                                             onContactBlocked={this.onContactBlocked.bind(this)}
                                     />
                                 </div>
                             </>}

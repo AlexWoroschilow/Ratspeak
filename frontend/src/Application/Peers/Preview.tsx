@@ -1,11 +1,11 @@
 import React from 'react';
 import {PeerEnriched} from '../../ApplicationStore/Peers';
-import Blockie from './Blockie';
-import {PeerName} from "./PeerName";
+import Blockie from './../components/Blockie';
+import {PeerName} from "./../components/PeerName";
 import {inject, observer} from "mobx-react";
 import {Contacts as ContactsStore} from "../../ApplicationStore/Contacts";
 
-interface PeerDetailProps {
+interface PreviewProps {
     contacts?: ContactsStore | undefined;
     peer: PeerEnriched;
     onMessage?: (peer: PeerEnriched) => void;
@@ -14,7 +14,7 @@ interface PeerDetailProps {
     onContactBlocked?: (peer: PeerEnriched) => void;
 }
 
-interface ContactsState {
+interface PreviewState {
     message?: string | undefined;
     error?: {
         message?: string | undefined;
@@ -24,8 +24,8 @@ interface ContactsState {
 
 @inject("contacts")
 @observer
-export default class PeerDetail extends React.PureComponent<PeerDetailProps, ContactsState> {
-    constructor(props: PeerDetailProps) {
+export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
+    constructor(props: PreviewProps) {
         super(props);
 
 

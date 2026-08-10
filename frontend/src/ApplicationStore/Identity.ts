@@ -48,10 +48,13 @@ import {listen} from "@tauri-apps/api/event";
 
 export interface IdentityInfo {
     hash: string;
+    lxmf_destination: string;
     nickname: string;
     is_active: boolean;
     has_passcode: boolean;
     is_hardware: boolean;
+    passcode_protected?: boolean;
+    has_mnemonic?: boolean;
 }
 
 export interface ContactCard {

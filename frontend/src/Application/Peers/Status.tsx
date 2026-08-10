@@ -119,46 +119,44 @@ export default class Status extends React.PureComponent<StatusProps, StatusState
                     </div>
 
                     <div className="peers-toolbar">
-                        <div className="activity-filters" id="activity-filters">
-                            <button className={`activity-level-btn ${(!filter?.interface && !filter?.status) && "active"}`}
-                                    onClick={this.doApplyFilter.bind(this)}
-                                    data-filter={"all"}
-                                    data-type={'all'}>
-                                All
-                                {(!filter?.interface && !filter?.status) && <>
-                                    &nbsp;({Object.entries(filteredCollection).length})
-                                </>}
-                            </button>
-                            {interfaces.map((iface: string | undefined) => (<>
-                                {iface !== undefined &&
-                                    <button className={`activity-level-btn ${(filter?.interface == iface) && "active"}`}
-                                            onClick={this.doApplyFilter.bind(this)}
-                                            data-filter={"interface"}
-                                            data-interface={iface}>
-                                        {iface}
-
-                                        {(filter?.interface == iface) && <>
-                                            &nbsp;({Object.entries(filteredCollection).length})
-                                        </>}
-
-                                    </button>}
-                            </>))}
-
-                            {Object.entries(statuses).map(([status, label]) => (
-                                <button className={`activity-level-btn ${(filter?.status == status) && "active"}`}
+                        <button className={`activity-level-btn ${(!filter?.interface && !filter?.status) && "active"}`}
+                                onClick={this.doApplyFilter.bind(this)}
+                                data-filter={"all"}
+                                data-type={'all'}>
+                            All
+                            {(!filter?.interface && !filter?.status) && <>
+                                &nbsp;({Object.entries(filteredCollection).length})
+                            </>}
+                        </button>
+                        {interfaces.map((iface: string | undefined) => (<>
+                            {iface !== undefined &&
+                                <button className={`activity-level-btn ${(filter?.interface == iface) && "active"}`}
                                         onClick={this.doApplyFilter.bind(this)}
-                                        data-filter={"status"}
-                                        data-status={status}>
+                                        data-filter={"interface"}
+                                        data-interface={iface}>
+                                    {iface}
 
-                                    {label}
-
-                                    {(filter?.status == status) && <>
+                                    {(filter?.interface == iface) && <>
                                         &nbsp;({Object.entries(filteredCollection).length})
                                     </>}
 
-                                </button>
-                            ))}
-                        </div>
+                                </button>}
+                        </>))}
+
+                        {Object.entries(statuses).map(([status, label]) => (
+                            <button className={`activity-level-btn ${(filter?.status == status) && "active"}`}
+                                    onClick={this.doApplyFilter.bind(this)}
+                                    data-filter={"status"}
+                                    data-status={status}>
+
+                                {label}
+
+                                {(filter?.status == status) && <>
+                                    &nbsp;({Object.entries(filteredCollection).length})
+                                </>}
+
+                            </button>
+                        ))}
                     </div>
                 </div>
             </div>

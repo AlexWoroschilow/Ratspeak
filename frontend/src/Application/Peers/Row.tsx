@@ -1,13 +1,13 @@
 "use strict";
 import React, {lazy, Suspense} from "react";
 import {PeerEnriched} from "../../ApplicationStore/Peers";
-import {PeerInterfaceBadge} from "./PeerInterface";
-import {PeerName} from "./PeerName";
-import {PeerHops} from "./PeerHops";
+import {PeerInterfaceBadge} from "./../components/PeerInterface";
+import {PeerName} from "./../components/PeerName";
+import {PeerHops} from "./../components/PeerHops";
 
-const Blockie = lazy(() => import('./Blockie'));
+const Blockie = lazy(() => import('./../components/Blockie'));
 
-interface PeersProps {
+interface RowProps {
     peer: PeerEnriched | undefined;
     selected?: PeerEnriched | undefined;
     onSelectedPeer?: (peer: PeerEnriched | undefined) => void
@@ -17,7 +17,7 @@ interface PeersState {
 
 }
 
-export default class PeerRow extends React.PureComponent<PeersProps, PeersState> {
+export class Row extends React.PureComponent<RowProps, PeersState> {
 
     onSelectedPeer() {
         this?.props?.onSelectedPeer?.(this.props.peer);

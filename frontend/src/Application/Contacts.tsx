@@ -1,16 +1,14 @@
 "use strict";
-import React, {lazy, Suspense} from "react";
+import React, {Suspense} from "react";
 import {inject, observer} from "mobx-react";
 import {Contacts as ContactsStore} from "../ApplicationStore/Contacts";
 import {PeerEnriched} from "../ApplicationStore/Peers";
 
 import "./Contacts.scss";
 import Status from "./Contacts/Status";
-import Preview from "./Contacts/Preview";
-import {info} from "@tauri-apps/plugin-log";
+import {Preview} from "./Contacts/Preview";
+import {Row} from "./Contacts/Row";
 
-
-const ContactRow = lazy(() => import('./Contacts/./Row'));
 
 interface ContactsProps {
     contacts?: ContactsStore;
@@ -111,15 +109,11 @@ export class Contacts extends React.Component<ContactsProps, ContactsState> {
                                     </div>
                                 </>}
 
-                                {filtered?.length > 0 && <>
-                                    {filtered?.map?.((peer: PeerEnriched) => (
-                                        <Suspense key={`${peer?.hash}`} fallback={<div className="peers-row">Loading...</div>}>
-                                            <ContactRow onSelectedPeer={this.onSelectedPeer.bind(this)}
-                                                        selected={selected}
-                                                        peer={peer}/>
-                                        </Suspense>
-                                    ))}
-                                </>}
+                                {filtered?.map?.((peer: PeerEnriched) => (
+                                    <Row onSelectedPeer={this.onSelectedPeer.bind(this)}
+                                         selected={selected}
+                                         peer={peer}/>
+                                ))}
                             </nav>
 
                             {(selected !== undefined) && <>

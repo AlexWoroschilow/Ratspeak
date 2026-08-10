@@ -20,7 +20,7 @@ interface PreviewProps {
 
 @inject("contacts")
 @observer
-export default class Preview extends React.PureComponent<PreviewProps> {
+export  class Preview extends React.PureComponent<PreviewProps> {
 
     constructor(props: PreviewProps) {
         super(props);

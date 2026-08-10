@@ -15,7 +15,7 @@ interface PeersState {
 
 }
 
-export default class Row extends React.PureComponent<PeersProps, PeersState> {
+export class Row extends React.PureComponent<PeersProps, PeersState> {
 
     onSelectedPeer() {
         this?.props?.onSelectedPeer?.(this.props.peer);
