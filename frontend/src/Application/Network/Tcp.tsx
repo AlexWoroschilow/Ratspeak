@@ -98,43 +98,44 @@ class Tcp extends React.Component<TcpProps, TcpState> {
                 <Form onCancel={this.onCloseForm.bind(this)} iface={this.state.iface}/>
             </>}
 
-            {(!this?.state?.isEnabledForm) && <div className="internet-container">
-                <div className="bottom-sheet-header">
-                    <div className="bottom-sheet-title bottom-sheet-title-with-icon" data-sheet-icon="tcp">
-                        <IoGitNetworkOutline size={20}/>
-                        <span className="bottom-sheet-title-label">
+            {(!this?.state?.isEnabledForm) &&
+                <div className="internet-container">
+                    <div className="bottom-sheet-header">
+                        <div className="bottom-sheet-title bottom-sheet-title-with-icon" data-sheet-icon="tcp">
+                            <IoGitNetworkOutline size={20}/>
+                            <span className="bottom-sheet-title-label">
                         Connected Networks
                     </span>
+                        </div>
+                        <div className="activity-controls">
+                            <button className="nr-btn nr-btn-xs" id="activity-clear-btn"
+                                    onClick={() => {
+                                        this.onOpenForm();
+                                    }}>
+                                Add custom Network
+                            </button>
+                        </div>
                     </div>
-                    <div className="activity-controls">
-                        <button className="nr-btn nr-btn-xs" id="activity-clear-btn"
-                                onClick={() => {
-                                    this.onOpenForm();
-                                }}>
-                            Add custom Network
-                        </button>
-                    </div>
-                </div>
-                <List onEditServer={this.onOpenForm.bind(this)} onCancel={this.onCloseForm.bind(this)}/>
+                    <List onEditServer={this.onOpenForm.bind(this)} onCancel={this.onCloseForm.bind(this)}/>
 
-                <div className="bottom-sheet-header">
-                    <div className="bottom-sheet-title bottom-sheet-title-with-icon" data-sheet-icon="tcp">
-                        <GoGlobe size={20}/>
-                        <span className="bottom-sheet-title-label">
+                    <div className="bottom-sheet-header">
+                        <div className="bottom-sheet-title bottom-sheet-title-with-icon" data-sheet-icon="tcp">
+                            <GoGlobe size={20}/>
+                            <span className="bottom-sheet-title-label">
                         Public Network
                     </span>
-                    </div>
-                </div>
-                <div className="bottom-sheet-body">
-                    {(error?.message != undefined) && <>
-                        <div className="rs-dialog-field-error" id="rnode-public-map-error">
-                            {error?.message}
                         </div>
-                    </>}
-                    <div className="connect-tab-panel active" id="connect-public-panel" role="tabpanel" aria-labelledby="connect-tab-public">
-                        <div className="public-server-list" id="public-server-list">
-                            {network?.publicServers?.map?.((server) => (
-                                <span className={`public-server-card public-server-card--${server.tone}`}>
+                    </div>
+                    <div className="bottom-sheet-body">
+                        {(error?.message != undefined) && <>
+                            <div className="rs-dialog-field-error" id="rnode-public-map-error">
+                                {error?.message}
+                            </div>
+                        </>}
+                        <div className="connect-tab-panel active" id="connect-public-panel" role="tabpanel" aria-labelledby="connect-tab-public">
+                            <div className="public-server-list" id="public-server-list">
+                                {network?.publicServers?.map?.((server) => (
+                                    <span className={`public-server-card public-server-card--${server.tone}`}>
                                 <span className="public-server-mark">
                                     {(server?.isConnected === true) && <PiPlugsConnectedLight size={20}/>}
                                     {(server?.isConnected === false) && <VscDebugDisconnect size={20}/>}
@@ -159,14 +160,14 @@ class Tcp extends React.Component<TcpProps, TcpState> {
                                     </label>
                                 </span>
                             </span>
-                            ))}
+                                ))}
+                            </div>
                         </div>
                     </div>
-                </div>
 
-                {/*<div className="bottom-sheet-footer">*/}
-                {/*</div>*/}
-            </div>}
+                    {/*<div className="bottom-sheet-footer">*/}
+                    {/*</div>*/}
+                </div>}
 
         </>
     }
