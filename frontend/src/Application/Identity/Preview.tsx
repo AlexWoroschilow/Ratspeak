@@ -18,10 +18,12 @@ interface PreviewProps {
 interface PreviewState {
     entity: IdentityInfo;
     error: string | undefined;
+    message: string | undefined;
     passcode: string;
     passcodeConfirm: string;
     passcodeOld: string;
-    isPassword: boolean;
+    isPasswordUpdate: boolean;
+    isPasswordRemove: boolean;
     isPending: boolean;
 }
 
@@ -35,10 +37,12 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
         this.state = {
             entity: props.entity,
             error: undefined,
+            message: undefined,
             passcodeOld: "",
             passcode: "",
             passcodeConfirm: "",
-            isPassword: false,
+            isPasswordUpdate: false,
+            isPasswordRemove: false,
             isPending: false,
         };
     }
@@ -62,18 +66,21 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
 
                 (idn != undefined) &&
                 (this.setState({
+                    message: "Successfully switched identity",
                     isPending: false,
                     entity: idn
                 }));
             })
             .catch((error) => {
                 this.setState({
+                    message: undefined,
                     isPending: false,
                     error: error
                 });
             });
 
         this.setState({
+            message: undefined,
             error: undefined,
             isPending: true,
         });
@@ -84,17 +91,56 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
         identity?.deleteIdentity?.(entity)
             .then(() => {
                 this?.props?.onIdentityDelete?.();
-                this.setState({isPending: false});
+                this.setState({
+                    message: "Successfully removed identity",
+                    isPending: false
+                });
             })
             .catch((error) => {
-                this.setState({error: error, isPending: false})
+                this.setState({
+                    message: undefined,
+                    error: error,
+                    isPending: false
+                })
             });
 
         this.setState({
+            message: undefined,
             error: undefined,
             isPending: true,
         });
     }
+
+    onIdentityPasswordRemove(entity: IdentityInfo) {
+        const {identity} = this.props;
+        const {passcodeOld} = this.state;
+
+        identity?.removePasscode?.(entity, passcodeOld)
+            .then((idn: IdentityInfo) => {
+
+                this.setState({
+                    entity: idn,
+                    message: "The PIN was successfully removed",
+                    isPending: false,
+                    isPasswordRemove: false
+                });
+            })
+            .catch((err: any) => {
+                this.setState({
+                    message: undefined,
+                    error: err.message || "Failed to set the Password",
+                    isPending: false,
+                });
+            });
+
+        this.setState({
+            message: undefined,
+            error: undefined,
+            isPending: true,
+        });
+
+    }
+
 
     onIdentityPassword(entity: IdentityInfo) {
         const {identity} = this.props;
@@ -106,39 +152,41 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
         }
 
         (!entity?.passcode_protected) &&
-        identity?.setPasscode(entity, passcode)
+        identity?.setPasscode?.(entity, passcode)
             .then((idn: IdentityInfo) => {
 
                 this.setState({
                     entity: idn,
+                    message: "The PIN was successfully set",
                     isPending: false,
-                    isPassword: false
+                    isPasswordUpdate: false
                 });
             })
             .catch((err: any) => {
-                info(`???${JSON.stringify(err)}`);
                 this.setState({error: err.message || "Failed to set the Password"});
             });
 
         (entity?.passcode_protected) &&
-        identity?.changePasscode(entity, passcodeOld, passcode)
+        identity?.changePasscode?.(entity, passcodeOld, passcode)
             .then((idn: IdentityInfo) => {
-                info(`???${JSON.stringify(idn)}`);
 
                 this.setState({
                     entity: idn,
+                    message: "The PIN was successfully updated",
                     isPending: false,
-                    isPassword: false
+                    isPasswordUpdate: false
                 });
             })
             .catch((err: any) => {
                 this.setState({
+                    message: undefined,
                     error: err.message || "Failed to set the Password",
                     isPending: false,
                 });
             });
 
         this.setState({
+            message: undefined,
             error: undefined,
             isPending: true,
         });
@@ -168,7 +216,17 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
 
 
     render() {
-        const {entity, error, isPending, isPassword, passcode, passcodeConfirm, passcodeOld} = this.state;
+        const {
+            entity,
+            message,
+            error,
+            isPending,
+            isPasswordUpdate,
+            isPasswordRemove,
+            passcode,
+            passcodeConfirm,
+            passcodeOld
+        } = this.state;
 
         const lxmfHash = entity.lxmf_hash || "";
         const identityHash = entity.hash || "";
@@ -203,8 +261,15 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
                     </div>
                 </div>
 
+                {(message && message?.length > 0) && <>
+                    <div className="modal-message">
+                        {message}
+                    </div>
+                </>}
+
+
                 {(error && error?.length > 0) && <>
-                    <div className="modal-error" id="identity-create-passcode-error">
+                    <div className="modal-error">
                         {error}
                     </div>
                 </>}
@@ -231,7 +296,7 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
                     </button>
                 </div>
 
-                {(isPassword == false) && <>
+                {(isPasswordUpdate == false && isPasswordRemove == false) && <>
                     <div className="identity-detail-actions">
                         {(!entity?.is_active) && <>
                             <button className="identity-action-row"
@@ -243,11 +308,20 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
                         </>}
 
                         <button className="identity-action-row"
-                                onClick={() => this.setState({isPassword: true})}
-                                disabled={isPending || isPassword}>
+                                onClick={() => this.setState({isPasswordUpdate: true})}
+                                disabled={isPending || isPasswordUpdate}>
                             <IoKeyOutline size={20}/>
                             <span>{entity.passcode_protected ? 'Change PIN' : 'Set PIN'}</span>
                         </button>
+
+                        {entity?.passcode_protected &&
+                            <button className="identity-action-row"
+                                    onClick={() => this.setState({isPasswordRemove: true})}
+                                    disabled={isPending || isPasswordRemove}>
+                                <IoKeyOutline size={20}/>
+                                <span>{'Remove PIN'}</span>
+                            </button>}
+
                         <button className="identity-action-row"
                                 onClick={this.onIdentityShare.bind(this, entity)}
                                 disabled={isPending}>
@@ -266,7 +340,7 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
                     </div>
                 </>}
 
-                {(isPassword == true) && <>
+                {(isPasswordUpdate == true || isPasswordRemove == true) && <>
                     <div className="identity-passcode-fields" id="identity-create-passcode-fields">
                         {entity.passcode_protected && <>
                             <div className="modal-field"><label>Your current PIN</label>
@@ -276,30 +350,31 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
                             </div>
                         </>}
 
-                        <div className="modal-field"><label>{entity?.passcode_protected ? "New PIN" : "PIN"}</label>
-                            <input type="password" id="identity-create-passcode-new" className="modal-input" maxLength={128}
-                                   autoComplete="off" placeholder="At least 6 characters"
-                                   value={passcode} onChange={this.handlePasscodeChange}/>
-                        </div>
-                        <div className="modal-field"><label>Confirm PIN</label>
-                            <input type="password" id="identity-create-passcode-confirm" className="modal-input"
-                                   maxLength={128} autoComplete="off"
-                                   value={passcodeConfirm} onChange={this.handlePasscodeConfirmChange}/>
-                        </div>
+                        {isPasswordRemove == false && <>
+                            <div className="modal-field"><label>{entity?.passcode_protected ? "New PIN" : "PIN"}</label>
+                                <input type="password" id="identity-create-passcode-new" className="modal-input" maxLength={128}
+                                       autoComplete="off" placeholder="At least 6 characters"
+                                       value={passcode} onChange={this.handlePasscodeChange}/>
+                            </div>
+                            <div className="modal-field"><label>Confirm PIN</label>
+                                <input type="password" id="identity-create-passcode-confirm" className="modal-input"
+                                       maxLength={128} autoComplete="off"
+                                       value={passcodeConfirm} onChange={this.handlePasscodeConfirmChange}/>
+                            </div>
+                        </>}
                     </div>
 
                     <div className="bottom-sheet-footer">
                         <button className="rs-dialog-confirm" id="identity-modal-confirm" data-base-label="Create"
-                                onClick={() => this.setState({isPassword: false})}
+                                onClick={() => this.setState({isPasswordUpdate: false, isPasswordRemove: false})}
                                 disabled={isPending}>
                             {"Cancel"}
                         </button>
 
-
                         <button className="rs-dialog-confirm" id="identity-modal-confirm" data-base-label="Create"
-                                onClick={this.onIdentityPassword.bind(this, entity)}
+                                onClick={isPasswordRemove ? this.onIdentityPasswordRemove.bind(this, entity) : this.onIdentityPassword.bind(this, entity)}
                                 disabled={isPending}>
-                            {"Save"}
+                            {isPasswordRemove ? "Remove" : "Save"}
                         </button>
                     </div>
 

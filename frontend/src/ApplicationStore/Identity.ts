@@ -222,6 +222,16 @@ export class Identity {
         });
     }
 
+    async removePasscode(identity: IdentityInfo, passcode: string): Promise<any> {
+        return new Promise((resolve: (value: IdentityInfo) => void, reject) => {
+            invoke('remove_identity_passcode', {args: {hash: identity.hash, passcode: passcode}})
+                .then((result: any) => {
+                    identity.passcode_protected = false;
+                    return resolve(identity)
+                }).catch(reject);
+        });
+    }
+
 
     listeners() {
         listen("identity_switched", () => {
