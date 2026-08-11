@@ -144,7 +144,9 @@ export class IdentityCreate extends React.Component<IdentityCreateProps, Identit
                                                                                           maxLength={128} autoComplete="off"
                                                                                           value={confirmPasscode} onChange={this.handleConfirmPasscodeChange}/></div>
                         </div>
-                        <div className="modal-error" id="identity-create-passcode-error" style={{display: error ? "block" : "none"}}>{error}</div>
+                        <div className="modal-error" id="identity-create-passcode-error"
+                             style={{display: error ? "block" : "none"}}>{error}
+                        </div>
                     </div>
                 </div>
                 <div className="bottom-sheet-footer">

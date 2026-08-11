@@ -48,14 +48,27 @@ import {listen} from "@tauri-apps/api/event";
 import {info} from "@tauri-apps/plugin-log";
 
 export interface IdentityInfo {
-    hash: string;
-    lxmf_destination: string;
+    created_at: number;
+    last_used: number;
+
+    display_name?: string;
     nickname: string;
+
+    hash: string;
+    lxmf_hash: string;
+
     is_active: boolean;
-    has_passcode: boolean;
     is_hardware: boolean;
-    passcode_protected?: boolean;
     has_mnemonic?: boolean;
+
+    passcode_protected?: boolean;
+
+    propagation_auto_favor_static: number;
+    propagation_enabled: number;
+    propagation_mode: string;
+    propagation_node: string;
+
+    status: string;
 }
 
 export interface ContactCard {
@@ -90,33 +103,33 @@ export class Identity {
     }
 
     async fetchIdentities(): Promise<IdentityInfo[]> {
-        try {
-            const identities = await invoke<IdentityInfo[]>('api_list_identities');
-            this.setCollection(identities);
-            return identities;
-        } catch (error) {
-            console.error("Failed to fetch identities:", error);
-            throw error;
-        }
+        return new Promise((resolve: (value: IdentityInfo[]) => void, reject) => {
+            invoke<IdentityInfo[]>('api_list_identities')
+                .then((collection: Array<IdentityInfo>) => {
+                    this.setCollection(collection)
+                    return resolve(collection)
+                }).catch(reject);
+        });
     }
 
-    async fetchActiveIdentity(): Promise<IdentityInfo | null> {
-        try {
-            const identity = await invoke<IdentityInfo | null>('api_identity');
-            this.setActive(identity);
-            return identity;
-        } catch (error) {
-            console.error("Failed to fetch active identity:", error);
-            throw error;
-        }
+    async fetchActiveIdentity(): Promise<IdentityInfo> {
+        return new Promise((resolve: (value: IdentityInfo) => void, reject) => {
+            invoke<IdentityInfo>('api_identity')
+                .then((identity: IdentityInfo) => {
+                    this.setActive(identity);
+                    return resolve(identity)
+                }).catch(reject);
+        });
     }
 
     async createIdentity(nickname: string): Promise<IdentityInfo> {
         return new Promise((resolve: (value: IdentityInfo) => void, reject) => {
             invoke<IdentityInfo>('api_create_identity', {args: {nickname}})
                 .then((identity: IdentityInfo) => {
-                    this.fetchIdentities();
-                    return resolve(identity)
+                    this.fetchIdentities()
+                        .then((identities: IdentityInfo[]) => {
+                            return resolve(identity)
+                        });
                 }).catch(reject);
         });
     }
@@ -132,28 +145,31 @@ export class Identity {
         }
     }
 
-    async deleteIdentity(hash: string): Promise<void> {
-        try {
-            await invoke('api_delete_identity', {hash});
-            await this.fetchIdentities();
-            if (this.active?.hash === hash) {
-                this.setActive(null);
-            }
-        } catch (error) {
-            console.error("Failed to delete identity:", error);
-            throw error;
-        }
+    async deleteIdentity(identity: IdentityInfo): Promise<void> {
+        return new Promise((resolve: (value: void) => void, reject) => {
+            invoke<void>('api_delete_identity', {hashHex: identity.hash})
+                .then((data: any) => {
+                    this.fetchIdentities()
+                        .then((identities: IdentityInfo[]) => {
+                            return resolve();
+                        });
+                })
+                .catch(reject);
+        });
     }
 
-    async setDisplayName(nickname: string): Promise<void> {
-        try {
-            await invoke('api_set_display_name', {nickname});
-            await this.fetchActiveIdentity();
-            await this.fetchIdentities();
-        } catch (error) {
-            console.error("Failed to set display name:", error);
-            throw error;
-        }
+    async setDisplayName(nickname: string): Promise<IdentityInfo> {
+        return new Promise((resolve: (value: IdentityInfo) => void, reject) => {
+            invoke<IdentityInfo>('api_set_display_name', {args: {display_name: nickname}})
+                .then((data: any) => {
+                    this.fetchActiveIdentity()
+                        .then((identity: IdentityInfo) => {
+                            info(`fetchActiveIdentity: ${JSON.stringify(identity)}\n`);
+                            return resolve(identity)
+                        });
+                })
+                .catch(reject);
+        });
     }
 
     async getContactCard(hash: string): Promise<ContactCard> {
@@ -175,15 +191,11 @@ export class Identity {
     }
 
     async setPasscode(hash: string, passcode: string): Promise<any> {
-
         return new Promise((resolve: (value: IdentityInfo) => void, reject) => {
             invoke('set_identity_passcode', {args: {hash, passcode}})
                 .then((identity: any) => {
-                    info(`${JSON.stringify(identity)}\n`);
                     return resolve(identity)
-                }).catch((error: any) => {
-                info(`${JSON.stringify(error)}\n`);
-            });
+                }).catch(reject);
         });
     }
 

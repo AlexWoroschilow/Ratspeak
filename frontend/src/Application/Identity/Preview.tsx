@@ -1,12 +1,18 @@
 "use strict";
 import React from 'react';
-import {IdentityInfo} from "../../ApplicationStore/Identity";
-import {observer} from "mobx-react";
+import {Identity as IdentityStore, IdentityInfo} from "../../ApplicationStore/Identity";
+import {inject, observer} from "mobx-react";
 import Blockie from './../components/Blockie';
+import {info} from "@tauri-apps/plugin-log";
+import {RiDeleteBin7Line} from "react-icons/ri";
+import {MdOutlineQrCode} from "react-icons/md";
+import {IoKeyOutline} from "react-icons/io5";
+import {TbSwitch} from "react-icons/tb";
 
 interface PreviewProps {
-    identity: IdentityInfo;
-    onUpdateNickname: (nickname: string) => Promise<void>;
+    entity: IdentityInfo;
+    identity?: IdentityStore;
+    onIdentityDelete?: () => void;
 }
 
 interface PreviewState {
@@ -16,81 +22,83 @@ interface PreviewState {
     error: string | null;
 }
 
+@inject("identity")
 @observer
 export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
     constructor(props: PreviewProps) {
         super(props);
+
+
         this.state = {
             isEditing: false,
-            nickname: props.identity.nickname,
+            nickname: props.entity.display_name || props.entity.nickname || '',
             isSaving: false,
             error: null,
         };
     }
 
     componentDidUpdate(prevProps: PreviewProps) {
-        if (prevProps.identity.hash !== this.props.identity.hash) {
+        if (prevProps.entity.hash !== this.props.entity.hash) {
             this.setState({
-                nickname: this.props.identity.nickname,
+                nickname: this.props.entity.nickname,
                 isEditing: false,
                 error: null
             });
         }
     }
 
-    handleEdit = () => {
-        this.setState({isEditing: true, nickname: this.props.identity.nickname});
-    };
+    onIdentitySwitch(identity: IdentityInfo) {
+        info(`onIdentitySwitch: ${JSON.stringify(identity)}`)
+    }
 
-    handleCancel = () => {
-        this.setState({
-            isEditing: false,
-            nickname: this.props.identity.nickname,
-            error: null
-        });
-    };
+    onIdentityDelete(entity: IdentityInfo) {
 
-    handleSave = async () => {
-        this.setState({isSaving: true, error: null});
-        try {
-            await this.props.onUpdateNickname(this.state.nickname);
-            this.setState({isEditing: false, isSaving: false});
-        } catch (e: any) {
-            this.setState({error: e.message || "Failed to update nickname", isSaving: false});
-        }
-    };
+        const {identity} = this.props;
+        identity?.deleteIdentity?.(entity)
+            .then(this?.props?.onIdentityDelete)
+            .catch((error) => {
+                this.setState({error: error})
+            })
+
+    }
+
+    onIdentityPassword(identity: IdentityInfo) {
+        info(`onIdentityPassword: ${JSON.stringify(identity)}`)
+    }
+
+    onIdentityShare(identity: IdentityInfo) {
+        info(`onIdentityShare: ${JSON.stringify(identity)}`)
+    }
+
 
     handleCopy = (value: string, label: string) => {
         navigator.clipboard.writeText(value);
-        // In the legacy dashboard this shows a toast. 
-        // For now we just perform the copy.
-    };
-
-    handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        this.setState({nickname: e.target.value});
     };
 
     render() {
-        const {identity} = this.props;
+        const {entity} = this.props;
         const {isEditing, nickname, isSaving, error} = this.state;
 
-        const lxmfHash = identity.lxmf_destination || "";
-        const identityHash = identity.hash || "";
-        const isActive = identity.is_active;
-        const isHardware = identity.is_hardware;
-        // Logic from identity.js: isOriginalIdentity check is missing here, but we'll stick to what we have in props.
-        const activeLabel = isActive ? 'Active' : 'Stored';
+        const lxmfHash = entity.lxmf_hash || "";
+        const identityHash = entity.hash || "";
+        const isActive = entity.is_active;
+        const isHardware = entity.is_hardware;
 
         return (
             <div className="peers-detail-content">
                 <div className="identity-detail-hero">
                     <div className="identity-avatar identity-detail-avatar">
-                        <Blockie seed={identity.hash} size={72}/>
+                        <Blockie seed={entity.hash} size={72}/>
                     </div>
                     <div className="identity-detail-heading">
-                        <div className="identity-card-nickname">{identity.nickname || "Unnamed"}</div>
+                        <div className="identity-card-nickname">
+                            {entity.nickname || "Unnamed"}
+
+                        </div>
                         <div className="identity-status-row">
-                            <span className="identity-active-badge">{activeLabel}</span>
+                            <span className="identity-active-badge">
+                                {isActive ? 'Active' : 'Stored'}
+                            </span>
                             {isHardware ? (
                                 <span className="identity-hardware-badge">
                                     <svg viewBox="0 0 24 24" className="identity-badge-icon"><path
@@ -104,7 +112,14 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
                     </div>
                 </div>
 
+                {(error?.length) && <>
+                    <div className="modal-error" id="identity-create-passcode-error">
+                        {error}
+                    </div>
+                </>}
+
                 <div className="identity-address-stack">
+
                     <button type="button" className="identity-address-row" onClick={() => this.handleCopy(lxmfHash, 'Address')}>
                         <span className="identity-address-meta">
                             <span className="identity-label">LXMF Address</span>
@@ -125,53 +140,33 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
                     </button>
                 </div>
 
-                {isActive && (
-                    <div className="identity-detail-editor">
-                        <div className="modal-field">
-                            <label>Display Name</label>
-                            <div className="settings-display-name-row">
-                                <input
-                                    type="text"
-                                    className="modal-input"
-                                    placeholder="Optional"
-                                    maxLength={32}
-                                    value={nickname}
-                                    onChange={this.handleChange}
-                                    disabled={isSaving}
-                                />
-                                {nickname !== identity.nickname && (
-                                    <button className="nr-btn" onClick={this.handleSave} disabled={isSaving}>
-                                        {isSaving ? "Saving..." : "Save"}
-                                    </button>
-                                )}
-                            </div>
-                            {error && <div className="rs-dialog-field-error">{error}</div>}
-                        </div>
-                    </div>
-                )}
-
                 <div className="identity-detail-actions">
-                    <button className="identity-action-row">
-                        <span className="identity-action-icon">
-                            <svg viewBox="0 0 24 24" className="identity-badge-icon"><path
-                                d="M7 2h10a2 2 0 012 2v16a2 2 0 01-2 2H7a2 2 0 01-2-2V4a2 2 0 012-2zm0 2v4h10V4H7zm0 6v10h10V10H7z"/></svg>
-                        </span>
-                        <span>{identity.has_passcode ? 'Change PIN' : 'Set PIN'}</span>
+                    {(!entity?.is_active) && <>
+                        <button className="identity-action-row"
+                                onClick={this.onIdentitySwitch.bind(this, entity)}>
+                            <TbSwitch size={20}/>
+                            <span>{"Switch"}</span>
+                        </button>
+                    </>}
+
+                    <button className="identity-action-row"
+                            onClick={this.onIdentityPassword.bind(this, entity)}>
+                        <IoKeyOutline size={20}/>
+                        <span>{entity.passcode_protected ? 'Change PIN' : 'Set PIN'}</span>
                     </button>
-                    <a className="identity-action-row"
-                       href={`#identity-share/${identity.hash}}`}>
-                        <span className="identity-action-icon">
-                            <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><path
-                                d="M14 14h3v3h-3z"/><path d="M19 14h2"/><path d="M14 21h7v-2"/><path d="M19 17h2"/></svg>
-                        </span>
+                    <button className="identity-action-row"
+                            onClick={this.onIdentityShare.bind(this, entity)}>
+                        <MdOutlineQrCode size={20}/>
                         <span>Share</span>
-                    </a>
-                    <button className="identity-action-row identity-action-row--danger">
-                        <span className="identity-action-icon">
-                            <svg viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg>
-                        </span>
-                        <span>{isHardware ? 'Remove Identity' : 'Delete Identity'}</span>
                     </button>
+                    {(!entity?.is_active) && <>
+                        <button className="identity-action-row identity-action-row--danger"
+                                onClick={this.onIdentityDelete.bind(this, entity)}>
+                            <RiDeleteBin7Line size={20}/>
+
+                            <span>{'Remove'}</span>
+                        </button>
+                    </>}
                 </div>
             </div>
         );

@@ -35,20 +35,12 @@ export class Identity extends React.Component<IdentityProps, IdentityState> {
         });
     }
 
+    onIdentityDelete(entity: IdentityInfo) {
+        this.setState({selected: undefined});
+    }
+
     onIdentitySelected(identity: IdentityInfo) {
         this.setState({selected: identity});
-    }
-
-    onIdentityActivate(identity: IdentityInfo) {
-        info(`onIdentityActivate: ${JSON.stringify(identity)}`)
-    }
-
-    onIdentityDelete(identity: IdentityInfo) {
-        info(`onIdentityDelete: ${JSON.stringify(identity)}`)
-    }
-
-    onIdentityNickname(identity: IdentityInfo, nickname: string) {
-
     }
 
     render() {
@@ -83,8 +75,6 @@ export class Identity extends React.Component<IdentityProps, IdentityState> {
                                         identity={item}
                                         isActive={selected?.hash === item.hash}
                                         onSelected={this.onIdentitySelected.bind(this, item)}
-                                        onActivate={this.onIdentityActivate.bind(this, item)}
-                                        onDelete={this.onIdentityDelete.bind(this, item)}
                                     />
                                 ))}
                             </nav>
@@ -92,10 +82,7 @@ export class Identity extends React.Component<IdentityProps, IdentityState> {
 
                             <div className="peers-detail">
                                 {selected && (
-                                    <Preview
-                                        identity={selected}
-                                        onUpdateNickname={(nickname) => this?.props?.identity?.setDisplayName?.(nickname)}
-                                    />
+                                    <Preview onIdentityDelete={this.onIdentityDelete.bind(this, selected)} entity={selected}/>
                                 )}
                             </div>
 

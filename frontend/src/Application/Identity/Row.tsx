@@ -5,15 +5,13 @@ import {IdentityInfo} from "../../ApplicationStore/Identity";
 interface RowProps {
     identity: IdentityInfo;
     isActive: boolean;
-    onActivate: (hash: string) => void;
     onSelected: (identity: IdentityInfo) => void;
-    onDelete: (hash: string) => void;
 }
 
 export class Row extends React.PureComponent<RowProps> {
 
     render() {
-        const {identity, isActive, onActivate, onDelete} = this.props;
+        const {identity, isActive} = this.props;
 
         return (
             <div className={`peers-row ${isActive ? "selected" : ""}`} onClick={this.props.onSelected.bind(this, identity)}>
@@ -37,16 +35,6 @@ export class Row extends React.PureComponent<RowProps> {
                     {identity.has_passcode && (
                         <div className="peer-meta" title="Passcode Protected">
                             🔒
-                        </div>
-                    )}
-                    {!isActive && (
-                        <div className="peer-meta action-delete" onClick={(e) => {
-                            e.stopPropagation();
-                            if (confirm("Are you sure you want to delete this identity?")) {
-                                onDelete(identity.hash);
-                            }
-                        }}>
-                            🗑️
                         </div>
                     )}
                 </span>
