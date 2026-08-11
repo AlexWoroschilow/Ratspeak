@@ -79,7 +79,6 @@ export class Identity extends React.Component<IdentityProps, IdentityState> {
                                 ))}
                             </nav>
 
-
                             <div className="peers-detail">
                                 {selected && (
                                     <Preview onIdentityDelete={this.onIdentityDelete.bind(this, selected)} entity={selected}/>

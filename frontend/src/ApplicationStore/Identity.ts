@@ -47,6 +47,7 @@ import {invoke} from "@tauri-apps/api/core";
 import {listen} from "@tauri-apps/api/event";
 import {info} from "@tauri-apps/plugin-log";
 
+
 export interface IdentityInfo {
     created_at: number;
     last_used: number;
@@ -56,10 +57,12 @@ export interface IdentityInfo {
 
     hash: string;
     lxmf_hash: string;
+    lxmf_destination?: string;
 
     is_active: boolean;
     is_hardware: boolean;
     has_mnemonic?: boolean;
+    exists?: boolean;
 
     passcode_protected?: boolean;
 
@@ -134,15 +137,19 @@ export class Identity {
         });
     }
 
-    async activateIdentity(hash: string): Promise<void> {
-        try {
-            await invoke('api_activate_identity', {hash});
-            await this.fetchActiveIdentity();
-            await this.fetchIdentities();
-        } catch (error) {
-            console.error("Failed to activate identity:", error);
-            throw error;
-        }
+    async activateIdentity(identity: IdentityInfo): Promise<IdentityInfo | undefined> {
+        return new Promise((resolve: (value: IdentityInfo | undefined) => void, reject) => {
+            invoke<IdentityInfo | undefined>('api_activate_identity', {hashHex: identity.hash})
+                .then((data: any) => {
+                    this.fetchIdentities()
+                        .then((collection: Array<IdentityInfo>) => {
+                            return resolve(collection?.find?.((item: IdentityInfo) => {
+                                return item.hash === identity.hash
+                            }));
+                        });
+                })
+                .catch(reject);
+        });
     }
 
     async deleteIdentity(identity: IdentityInfo): Promise<void> {

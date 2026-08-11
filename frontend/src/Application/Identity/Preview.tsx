@@ -16,10 +16,9 @@ interface PreviewProps {
 }
 
 interface PreviewState {
-    isEditing: boolean;
-    nickname: string;
-    isSaving: boolean;
-    error: string | null;
+    entity: IdentityInfo;
+    error: string | undefined;
+    isPending: boolean;
 }
 
 @inject("identity")
@@ -30,36 +29,63 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
 
 
         this.state = {
-            isEditing: false,
-            nickname: props.entity.display_name || props.entity.nickname || '',
-            isSaving: false,
-            error: null,
+            entity: props.entity,
+            error: undefined,
+            isPending: false,
         };
     }
 
     componentDidUpdate(prevProps: PreviewProps) {
         if (prevProps.entity.hash !== this.props.entity.hash) {
             this.setState({
-                nickname: this.props.entity.nickname,
-                isEditing: false,
-                error: null
+                entity: this.props.entity,
+                error: undefined
             });
         }
     }
 
-    onIdentitySwitch(identity: IdentityInfo) {
-        info(`onIdentitySwitch: ${JSON.stringify(identity)}`)
+    onIdentitySwitch(entity: IdentityInfo) {
+        const {identity} = this.props;
+        identity?.activateIdentity?.(entity)
+            .then((idn: IdentityInfo | undefined) => {
+
+                (idn != undefined) &&
+                info(`onIdentitySwitch: ${JSON.stringify(idn)}`);
+
+                (idn != undefined) &&
+                (this.setState({
+                    isPending: false,
+                    entity: idn
+                }));
+            })
+            .catch((error) => {
+                this.setState({
+                    isPending: false,
+                    error: error
+                });
+            });
+
+        this.setState({
+            error: undefined,
+            isPending: true,
+        });
     }
 
     onIdentityDelete(entity: IdentityInfo) {
-
         const {identity} = this.props;
         identity?.deleteIdentity?.(entity)
-            .then(this?.props?.onIdentityDelete)
-            .catch((error) => {
-                this.setState({error: error})
+            .then(() => {
+                this?.props?.onIdentityDelete?.();
+                this.setState({isPending: false});
             })
+            .catch((error) => {
+                this.setState({error: error, isPending: false})
+            });
 
+        this.setState({
+            error: undefined,
+            isPending: true,
+        });
     }
 
     onIdentityPassword(identity: IdentityInfo) {
@@ -76,8 +102,7 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
     };
 
     render() {
-        const {entity} = this.props;
-        const {isEditing, nickname, isSaving, error} = this.state;
+        const {entity, error, isPending} = this.state;
 
         const lxmfHash = entity.lxmf_hash || "";
         const identityHash = entity.hash || "";
@@ -112,7 +137,7 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
                     </div>
                 </div>
 
-                {(error?.length) && <>
+                {(error && error?.length > 0) && <>
                     <div className="modal-error" id="identity-create-passcode-error">
                         {error}
                     </div>
@@ -143,25 +168,29 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
                 <div className="identity-detail-actions">
                     {(!entity?.is_active) && <>
                         <button className="identity-action-row"
-                                onClick={this.onIdentitySwitch.bind(this, entity)}>
+                                onClick={this.onIdentitySwitch.bind(this, entity)}
+                                disabled={isPending}>
                             <TbSwitch size={20}/>
                             <span>{"Switch"}</span>
                         </button>
                     </>}
 
                     <button className="identity-action-row"
-                            onClick={this.onIdentityPassword.bind(this, entity)}>
+                            onClick={this.onIdentityPassword.bind(this, entity)}
+                            disabled={isPending}>
                         <IoKeyOutline size={20}/>
                         <span>{entity.passcode_protected ? 'Change PIN' : 'Set PIN'}</span>
                     </button>
                     <button className="identity-action-row"
-                            onClick={this.onIdentityShare.bind(this, entity)}>
+                            onClick={this.onIdentityShare.bind(this, entity)}
+                            disabled={isPending}>
                         <MdOutlineQrCode size={20}/>
                         <span>Share</span>
                     </button>
                     {(!entity?.is_active) && <>
                         <button className="identity-action-row identity-action-row--danger"
-                                onClick={this.onIdentityDelete.bind(this, entity)}>
+                                onClick={this.onIdentityDelete.bind(this, entity)}
+                                disabled={isPending}>
                             <RiDeleteBin7Line size={20}/>
 
                             <span>{'Remove'}</span>
