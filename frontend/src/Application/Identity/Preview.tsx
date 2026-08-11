@@ -18,6 +18,10 @@ interface PreviewProps {
 interface PreviewState {
     entity: IdentityInfo;
     error: string | undefined;
+    passcode: string;
+    passcodeConfirm: string;
+    passcodeOld: string;
+    isPassword: boolean;
     isPending: boolean;
 }
 
@@ -31,6 +35,10 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
         this.state = {
             entity: props.entity,
             error: undefined,
+            passcodeOld: "",
+            passcode: "",
+            passcodeConfirm: "",
+            isPassword: false,
             isPending: false,
         };
     }
@@ -88,8 +96,52 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
         });
     }
 
-    onIdentityPassword(identity: IdentityInfo) {
-        info(`onIdentityPassword: ${JSON.stringify(identity)}`)
+    onIdentityPassword(entity: IdentityInfo) {
+        const {identity} = this.props;
+        const {passcode, passcodeConfirm, passcodeOld} = this.state;
+
+        if (passcode != passcodeConfirm) {
+            this.setState({error: "Passwords do not match"});
+            return;
+        }
+
+        (!entity?.passcode_protected) &&
+        identity?.setPasscode(entity, passcode)
+            .then((idn: IdentityInfo) => {
+
+                this.setState({
+                    entity: idn,
+                    isPending: false,
+                    isPassword: false
+                });
+            })
+            .catch((err: any) => {
+                info(`???${JSON.stringify(err)}`);
+                this.setState({error: err.message || "Failed to set the Password"});
+            });
+
+        (entity?.passcode_protected) &&
+        identity?.changePasscode(entity, passcodeOld, passcode)
+            .then((idn: IdentityInfo) => {
+                info(`???${JSON.stringify(idn)}`);
+
+                this.setState({
+                    entity: idn,
+                    isPending: false,
+                    isPassword: false
+                });
+            })
+            .catch((err: any) => {
+                this.setState({
+                    error: err.message || "Failed to set the Password",
+                    isPending: false,
+                });
+            });
+
+        this.setState({
+            error: undefined,
+            isPending: true,
+        });
     }
 
     onIdentityShare(identity: IdentityInfo) {
@@ -101,8 +153,22 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
         navigator.clipboard.writeText(value);
     };
 
+
+    handlePasscodeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        this.setState({passcode: e.target.value});
+    };
+
+    handlePasscodeConfirmChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        this.setState({passcodeConfirm: e.target.value});
+    };
+
+    handlePasscodeOldChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        this.setState({passcodeOld: e.target.value});
+    };
+
+
     render() {
-        const {entity, error, isPending} = this.state;
+        const {entity, error, isPending, isPassword, passcode, passcodeConfirm, passcodeOld} = this.state;
 
         const lxmfHash = entity.lxmf_hash || "";
         const identityHash = entity.hash || "";
@@ -165,38 +231,80 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
                     </button>
                 </div>
 
-                <div className="identity-detail-actions">
-                    {(!entity?.is_active) && <>
+                {(isPassword == false) && <>
+                    <div className="identity-detail-actions">
+                        {(!entity?.is_active) && <>
+                            <button className="identity-action-row"
+                                    onClick={this.onIdentitySwitch.bind(this, entity)}
+                                    disabled={isPending}>
+                                <TbSwitch size={20}/>
+                                <span>{"Switch"}</span>
+                            </button>
+                        </>}
+
                         <button className="identity-action-row"
-                                onClick={this.onIdentitySwitch.bind(this, entity)}
-                                disabled={isPending}>
-                            <TbSwitch size={20}/>
-                            <span>{"Switch"}</span>
+                                onClick={() => this.setState({isPassword: true})}
+                                disabled={isPending || isPassword}>
+                            <IoKeyOutline size={20}/>
+                            <span>{entity.passcode_protected ? 'Change PIN' : 'Set PIN'}</span>
                         </button>
-                    </>}
-
-                    <button className="identity-action-row"
-                            onClick={this.onIdentityPassword.bind(this, entity)}
-                            disabled={isPending}>
-                        <IoKeyOutline size={20}/>
-                        <span>{entity.passcode_protected ? 'Change PIN' : 'Set PIN'}</span>
-                    </button>
-                    <button className="identity-action-row"
-                            onClick={this.onIdentityShare.bind(this, entity)}
-                            disabled={isPending}>
-                        <MdOutlineQrCode size={20}/>
-                        <span>Share</span>
-                    </button>
-                    {(!entity?.is_active) && <>
-                        <button className="identity-action-row identity-action-row--danger"
-                                onClick={this.onIdentityDelete.bind(this, entity)}
+                        <button className="identity-action-row"
+                                onClick={this.onIdentityShare.bind(this, entity)}
                                 disabled={isPending}>
-                            <RiDeleteBin7Line size={20}/>
-
-                            <span>{'Remove'}</span>
+                            <MdOutlineQrCode size={20}/>
+                            <span>Share</span>
                         </button>
-                    </>}
-                </div>
+                        {(!entity?.is_active) && <>
+                            <button className="identity-action-row identity-action-row--danger"
+                                    onClick={this.onIdentityDelete.bind(this, entity)}
+                                    disabled={isPending}>
+                                <RiDeleteBin7Line size={20}/>
+
+                                <span>{'Remove'}</span>
+                            </button>
+                        </>}
+                    </div>
+                </>}
+
+                {(isPassword == true) && <>
+                    <div className="identity-passcode-fields" id="identity-create-passcode-fields">
+                        {entity.passcode_protected && <>
+                            <div className="modal-field"><label>Your current PIN</label>
+                                <input type="password" className="modal-input" maxLength={128}
+                                       autoComplete="off" placeholder="At least 6 characters"
+                                       value={passcodeOld} onChange={this.handlePasscodeOldChange}/>
+                            </div>
+                        </>}
+
+                        <div className="modal-field"><label>{entity?.passcode_protected ? "New PIN" : "PIN"}</label>
+                            <input type="password" id="identity-create-passcode-new" className="modal-input" maxLength={128}
+                                   autoComplete="off" placeholder="At least 6 characters"
+                                   value={passcode} onChange={this.handlePasscodeChange}/>
+                        </div>
+                        <div className="modal-field"><label>Confirm PIN</label>
+                            <input type="password" id="identity-create-passcode-confirm" className="modal-input"
+                                   maxLength={128} autoComplete="off"
+                                   value={passcodeConfirm} onChange={this.handlePasscodeConfirmChange}/>
+                        </div>
+                    </div>
+
+                    <div className="bottom-sheet-footer">
+                        <button className="rs-dialog-confirm" id="identity-modal-confirm" data-base-label="Create"
+                                onClick={() => this.setState({isPassword: false})}
+                                disabled={isPending}>
+                            {"Cancel"}
+                        </button>
+
+
+                        <button className="rs-dialog-confirm" id="identity-modal-confirm" data-base-label="Create"
+                                onClick={this.onIdentityPassword.bind(this, entity)}
+                                disabled={isPending}>
+                            {"Save"}
+                        </button>
+                    </div>
+
+                </>}
+
             </div>
         );
     }

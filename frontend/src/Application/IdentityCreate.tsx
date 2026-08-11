@@ -80,16 +80,14 @@ export class IdentityCreate extends React.Component<IdentityCreateProps, Identit
                     }
 
                     if (passcodeEnabled && idn?.hash) {
-                        return identity?.setPasscode(idn.hash, passcode)
+                        return identity?.setPasscode(idn, passcode)
                             .then((data) => {
-                                info(`???${JSON.stringify(data)}`);
                                 window.location.hash = "#identity";
                                 return;
                             })
                             .catch((err: any) => {
-                                info(`???${JSON.stringify(err)}`)
                                 this.setState({
-                                    error: err.message || "Failed to set the Password"
+                                    error: err || "Failed to set the Password"
                                 });
                             });
                     }
@@ -135,6 +133,7 @@ export class IdentityCreate extends React.Component<IdentityCreateProps, Identit
                                    className="rs-dialog-checkbox"
                                    checked={passcodeEnabled} onChange={this.handlePasscodeEnabledChange}/><span className="rs-dialog-checkbox-label">Encrypt this identity on this device</span><span
                             className="rs-dialog-checkbox-help">Require a PIN when Ratspeak opens. Keep your 12-word phrase; forgotten PINs cannot be recovered.</span></label>
+
                         <div className="identity-passcode-fields" id="identity-create-passcode-fields"
                              hidden={!passcodeEnabled}>
                             <div className="modal-field"><label>PIN</label><input type="password" id="identity-create-passcode-new" className="modal-input" maxLength={128}

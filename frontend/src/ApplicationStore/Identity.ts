@@ -197,14 +197,31 @@ export class Identity {
         }
     }
 
-    async setPasscode(hash: string, passcode: string): Promise<any> {
+    async setPasscode(identity: IdentityInfo, passcode: string): Promise<any> {
         return new Promise((resolve: (value: IdentityInfo) => void, reject) => {
-            invoke('set_identity_passcode', {args: {hash, passcode}})
-                .then((identity: any) => {
+            invoke('set_identity_passcode', {args: {hash: identity.hash, passcode: passcode}})
+                .then((result: any) => {
+                    identity.passcode_protected = true;
                     return resolve(identity)
                 }).catch(reject);
         });
     }
+
+    async changePasscode(identity: IdentityInfo, passcode: string, newpasscode: string): Promise<any> {
+        return new Promise((resolve: (value: IdentityInfo) => void, reject) => {
+            invoke('remove_identity_passcode', {args: {hash: identity.hash, passcode: passcode}})
+                .then((result: any) => {
+                    invoke('set_identity_passcode', {args: {hash: identity.hash, passcode: newpasscode}})
+                        .then((result: any) => {
+                            identity.passcode_protected = true;
+                            return resolve(identity)
+                        }).catch(reject);
+
+                }).catch(reject);
+
+        });
+    }
+
 
     listeners() {
         listen("identity_switched", () => {
