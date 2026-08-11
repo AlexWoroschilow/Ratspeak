@@ -6,6 +6,7 @@ interface RowProps {
     identity: IdentityInfo;
     isActive: boolean;
     onActivate: (hash: string) => void;
+    onSelected: (identity: IdentityInfo) => void;
     onDelete: (hash: string) => void;
 }
 
@@ -15,7 +16,7 @@ export class Row extends React.PureComponent<RowProps> {
         const {identity, isActive, onActivate, onDelete} = this.props;
 
         return (
-            <div className={`peers-row ${isActive ? "selected" : ""}`} onClick={() => !isActive && onActivate(identity.hash)}>
+            <div className={`peers-row ${isActive ? "selected" : ""}`} onClick={this.props.onSelected.bind(this, identity)}>
                 <span className={`conn-status-dot ${isActive ? "status-online" : ""}`}></span>
 
                 <span className="peers-row-main">
@@ -26,7 +27,7 @@ export class Row extends React.PureComponent<RowProps> {
                         {identity.hash}
                     </span>
                 </span>
-                
+
                 <span className="peers-row-meta">
                     {identity.is_hardware && (
                         <div className="peer-meta" title="Hardware Security Key">
@@ -39,14 +40,14 @@ export class Row extends React.PureComponent<RowProps> {
                         </div>
                     )}
                     {!isActive && (
-                         <div className="peer-meta action-delete" onClick={(e) => {
-                             e.stopPropagation();
-                             if (confirm("Are you sure you want to delete this identity?")) {
-                                 onDelete(identity.hash);
-                             }
-                         }}>
-                             🗑️
-                         </div>
+                        <div className="peer-meta action-delete" onClick={(e) => {
+                            e.stopPropagation();
+                            if (confirm("Are you sure you want to delete this identity?")) {
+                                onDelete(identity.hash);
+                            }
+                        }}>
+                            🗑️
+                        </div>
                     )}
                 </span>
             </div>

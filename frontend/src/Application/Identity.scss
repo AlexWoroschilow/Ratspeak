@@ -1,0 +1,32 @@
+.Identity {
+  height: 100%;
+
+  .view-peers, .network-layout {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .network-main {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+    overflow: hidden;
+
+    nav.scrollable {
+      min-width: 25rem !important;
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      overflow-y: auto;
+      border-right: 1px solid var(--border-surface);
+    }
+
+    .peers-detail {
+      flex: 1;
+      height: 100%;
+      overflow-y: auto;
+    }
+  }
+}

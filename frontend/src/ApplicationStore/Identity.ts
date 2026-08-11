@@ -45,6 +45,7 @@
 import {action, makeAutoObservable} from "mobx";
 import {invoke} from "@tauri-apps/api/core";
 import {listen} from "@tauri-apps/api/event";
+import {info} from "@tauri-apps/plugin-log";
 
 export interface IdentityInfo {
     hash: string;
@@ -111,14 +112,13 @@ export class Identity {
     }
 
     async createIdentity(nickname: string): Promise<IdentityInfo> {
-        try {
-            const identity = await invoke<IdentityInfo>('api_create_identity', {nickname});
-            await this.fetchIdentities();
-            return identity;
-        } catch (error) {
-            console.error("Failed to create identity:", error);
-            throw error;
-        }
+        return new Promise((resolve: (value: IdentityInfo) => void, reject) => {
+            invoke<IdentityInfo>('api_create_identity', {args: {nickname}})
+                .then((identity: IdentityInfo) => {
+                    this.fetchIdentities();
+                    return resolve(identity)
+                }).catch(reject);
+        });
     }
 
     async activateIdentity(hash: string): Promise<void> {
@@ -172,6 +172,19 @@ export class Identity {
             console.error("Failed to set identity status:", error);
             throw error;
         }
+    }
+
+    async setPasscode(hash: string, passcode: string): Promise<any> {
+
+        return new Promise((resolve: (value: IdentityInfo) => void, reject) => {
+            invoke('set_identity_passcode', {args: {hash, passcode}})
+                .then((identity: any) => {
+                    info(`${JSON.stringify(identity)}\n`);
+                    return resolve(identity)
+                }).catch((error: any) => {
+                info(`${JSON.stringify(error)}\n`);
+            });
+        });
     }
 
     listeners() {

@@ -18,10 +18,11 @@ import {NetworkLocal} from "./Application/NetworkLocal";
 import {NetworkRadio} from "./Application/NetworkRadio";
 import {NetworkHost} from "./Application/NetworkHost";
 import {Setup} from "./Application/Setup";
-import {network, peers, store, contacts, identity, messages} from "./ApplicationStore";
+import {contacts, identity, messages, network, peers, store} from "./ApplicationStore";
 
 import "./Application.scss";
 import {NetworkActivity} from "./Application/NetworkActivity";
+import {IdentityShare} from "./Application/IdentityShare";
 
 const Peers = React.lazy(() => import("./Application/Peers"));
 
@@ -67,7 +68,14 @@ export class Application extends React.Component<ApplicationProps, ApplicationSt
     render() {
 
         return <>
-            <Provider store={store} network={network} peers={peers} contacts={contacts} identity={identity} messages={messages}>
+            <Provider
+                store={store}
+                network={network}
+                peers={peers}
+                contacts={contacts}
+                identity={identity}
+                messages={messages}>
+
                 <HashRouter>
                     <Routes>
                         <Route element={<Layout/>}>
@@ -87,6 +95,7 @@ export class Application extends React.Component<ApplicationProps, ApplicationSt
                             <Route path="identity-import" element={<IdentityImport/>}/>
                             <Route path="identity-create" element={<IdentityCreate/>}/>
                             <Route path="identity-hardware" element={<IdentityHardware/>}/>
+                            <Route path="identity-share/:hash" element={<IdentityShare/>}/>
                             <Route path="peers" element={
                                 <React.Suspense fallback={<div className="peers-row-loading">Loading...</div>}>
                                     <Peers/>

@@ -12,7 +12,6 @@ interface StatusProps {
 
 interface StatusState {
     searchQuery: string;
-
 }
 
 export default class Status extends React.PureComponent<StatusProps, StatusState> {

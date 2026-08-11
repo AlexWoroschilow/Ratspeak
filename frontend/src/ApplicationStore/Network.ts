@@ -413,7 +413,7 @@ export class Network {
         });
     }
 
-    async removeConnectionTCP(config: Partial<ConfigTCP>) {
+    async removeConnectionTCP(config: Partial<ConfigTCP>): Promise<boolean> {
         return new Promise((resolve: (value: boolean) => void, reject) => {
             invoke('remove_tcp_connection', config)
                 .then(() => {
