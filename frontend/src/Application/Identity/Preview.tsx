@@ -8,6 +8,7 @@ import {RiDeleteBin7Line} from "react-icons/ri";
 import {MdOutlineQrCode} from "react-icons/md";
 import {IoKeyOutline} from "react-icons/io5";
 import {TbSwitch} from "react-icons/tb";
+import {Password} from "./Password";
 
 interface PreviewProps {
     entity: IdentityInfo;
@@ -19,9 +20,6 @@ interface PreviewState {
     entity: IdentityInfo;
     error: string | undefined;
     message: string | undefined;
-    passcode: string;
-    passcodeConfirm: string;
-    passcodeOld: string;
     isPasswordUpdate: boolean;
     isPasswordRemove: boolean;
     isPending: boolean;
@@ -38,9 +36,6 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
             entity: props.entity,
             error: undefined,
             message: undefined,
-            passcodeOld: "",
-            passcode: "",
-            passcodeConfirm: "",
             isPasswordUpdate: false,
             isPasswordRemove: false,
             isPending: false,
@@ -111,84 +106,21 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
         });
     }
 
-    onIdentityPasswordRemove(entity: IdentityInfo) {
-        const {identity} = this.props;
-        const {passcodeOld} = this.state;
-
-        identity?.removePasscode?.(entity, passcodeOld)
-            .then((idn: IdentityInfo) => {
-
-                this.setState({
-                    entity: idn,
-                    message: "The PIN was successfully removed",
-                    isPending: false,
-                    isPasswordRemove: false
-                });
-            })
-            .catch((err: any) => {
-                this.setState({
-                    message: undefined,
-                    error: err.message || "Failed to set the Password",
-                    isPending: false,
-                });
-            });
-
+    onIdentityPasswordRemove(idn: IdentityInfo, message: string) {
         this.setState({
-            message: undefined,
-            error: undefined,
-            isPending: true,
+            entity: idn,
+            message: message,
+            isPending: false,
+            isPasswordRemove: false
         });
-
     }
 
-
-    onIdentityPassword(entity: IdentityInfo) {
-        const {identity} = this.props;
-        const {passcode, passcodeConfirm, passcodeOld} = this.state;
-
-        if (passcode != passcodeConfirm) {
-            this.setState({error: "Passwords do not match"});
-            return;
-        }
-
-        (!entity?.passcode_protected) &&
-        identity?.setPasscode?.(entity, passcode)
-            .then((idn: IdentityInfo) => {
-
-                this.setState({
-                    entity: idn,
-                    message: "The PIN was successfully set",
-                    isPending: false,
-                    isPasswordUpdate: false
-                });
-            })
-            .catch((err: any) => {
-                this.setState({error: err.message || "Failed to set the Password"});
-            });
-
-        (entity?.passcode_protected) &&
-        identity?.changePasscode?.(entity, passcodeOld, passcode)
-            .then((idn: IdentityInfo) => {
-
-                this.setState({
-                    entity: idn,
-                    message: "The PIN was successfully updated",
-                    isPending: false,
-                    isPasswordUpdate: false
-                });
-            })
-            .catch((err: any) => {
-                this.setState({
-                    message: undefined,
-                    error: err.message || "Failed to set the Password",
-                    isPending: false,
-                });
-            });
-
+    onIdentityPassword(idn: IdentityInfo, message: string) {
         this.setState({
-            message: undefined,
-            error: undefined,
-            isPending: true,
+            entity: idn,
+            message: message,
+            isPending: false,
+            isPasswordUpdate: false
         });
     }
 
@@ -202,19 +134,6 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
     };
 
 
-    handlePasscodeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        this.setState({passcode: e.target.value});
-    };
-
-    handlePasscodeConfirmChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        this.setState({passcodeConfirm: e.target.value});
-    };
-
-    handlePasscodeOldChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        this.setState({passcodeOld: e.target.value});
-    };
-
-
     render() {
         const {
             entity,
@@ -223,9 +142,6 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
             isPending,
             isPasswordUpdate,
             isPasswordRemove,
-            passcode,
-            passcodeConfirm,
-            passcodeOld
         } = this.state;
 
         const lxmfHash = entity.lxmf_hash || "";
@@ -340,45 +256,17 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
                     </div>
                 </>}
 
-                {(isPasswordUpdate == true || isPasswordRemove == true) && <>
-                    <div className="identity-passcode-fields" id="identity-create-passcode-fields">
-                        {entity.passcode_protected && <>
-                            <div className="modal-field"><label>Your current PIN</label>
-                                <input type="password" className="modal-input" maxLength={128}
-                                       autoComplete="off" placeholder="At least 6 characters"
-                                       value={passcodeOld} onChange={this.handlePasscodeOldChange}/>
-                            </div>
-                        </>}
-
-                        {isPasswordRemove == false && <>
-                            <div className="modal-field"><label>{entity?.passcode_protected ? "New PIN" : "PIN"}</label>
-                                <input type="password" id="identity-create-passcode-new" className="modal-input" maxLength={128}
-                                       autoComplete="off" placeholder="At least 6 characters"
-                                       value={passcode} onChange={this.handlePasscodeChange}/>
-                            </div>
-                            <div className="modal-field"><label>Confirm PIN</label>
-                                <input type="password" id="identity-create-passcode-confirm" className="modal-input"
-                                       maxLength={128} autoComplete="off"
-                                       value={passcodeConfirm} onChange={this.handlePasscodeConfirmChange}/>
-                            </div>
-                        </>}
-                    </div>
-
-                    <div className="bottom-sheet-footer">
-                        <button className="rs-dialog-confirm" id="identity-modal-confirm" data-base-label="Create"
-                                onClick={() => this.setState({isPasswordUpdate: false, isPasswordRemove: false})}
-                                disabled={isPending}>
-                            {"Cancel"}
-                        </button>
-
-                        <button className="rs-dialog-confirm" id="identity-modal-confirm" data-base-label="Create"
-                                onClick={isPasswordRemove ? this.onIdentityPasswordRemove.bind(this, entity) : this.onIdentityPassword.bind(this, entity)}
-                                disabled={isPending}>
-                            {isPasswordRemove ? "Remove" : "Save"}
-                        </button>
-                    </div>
-
-                </>}
+                {(isPasswordUpdate == true || isPasswordRemove == true) && (
+                    <Password
+                        entity={entity}
+                        isPasswordRemove={isPasswordRemove}
+                        isPending={isPending}
+                        onCancel={() => this.setState({isPasswordUpdate: false, isPasswordRemove: false})}
+                        onSuccess={isPasswordRemove ? this.onIdentityPasswordRemove.bind(this) : this.onIdentityPassword.bind(this)}
+                        onError={(error) => this.setState({error})}
+                        onPending={(isPending) => this.setState({isPending, error: undefined, message: undefined})}
+                    />
+                )}
 
             </div>
         );
