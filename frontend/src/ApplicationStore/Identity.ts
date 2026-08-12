@@ -75,12 +75,16 @@ export interface IdentityInfo {
     status?: string;
 }
 
+
 export interface IdentityActivated {
     display_name?: string;
     hash: string;
     generation?: number;
     lxmf_hash?: string;
     locked?: boolean;
+    ok?: boolean;
+    error?: string;
+    kind?: string;
     status?: string;
 }
 
@@ -104,8 +108,8 @@ export class Identity {
 
         this.listeners();
 
-        this.fetchIdentities();
         this.fetchActiveIdentity();
+        this.fetchIdentities();
     }
 
     setCollection(collection: IdentityInfo[]) {
@@ -147,9 +151,6 @@ export class Identity {
         return new Promise((resolve: (value: IdentityInfo) => void, reject) => {
             invoke<IdentityInfo>('api_identity')
                 .then((identity: IdentityInfo) => {
-
-                    info(`\n\nfetchActiveIdentity: ${JSON.stringify(identity)}\n`)
-
                     this.setActive(identity);
                     return resolve(identity)
                 }).catch(reject);
@@ -172,7 +173,9 @@ export class Identity {
         return new Promise((resolve: (value: IdentityActivated) => void, reject) => {
             invoke<IdentityActivated>('api_activate_identity', {hashHex: identity.hash})
                 .then((activated: IdentityActivated) => {
-                    return resolve(activated);
+                    this.fetchActiveIdentity().then((active: IdentityInfo) => {
+                        return resolve(activated);
+                    });
                 })
                 .catch(reject);
         });
@@ -182,6 +185,13 @@ export class Identity {
         return new Promise((resolve: (value: IdentityActivated) => void, reject) => {
             invoke<IdentityActivated>('unlock_identity', {secret: passcode})
                 .then((unlocked: IdentityActivated) => {
+
+                    info(`unlock_identity: ${JSON.stringify(unlocked)}`);
+
+                    (!unlocked?.ok && unlocked?.error) &&
+                    (reject(unlocked.error));
+
+                    (unlocked?.ok) &&
                     this.fetchActiveIdentity().then((active: IdentityInfo) => {
                         return resolve(unlocked);
                     });

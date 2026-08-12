@@ -3,7 +3,7 @@ import React from "react";
 import {info} from "@tauri-apps/plugin-log";
 
 interface IdentityShareProps {
-    hash: string;
+    hash?: string;
 }
 
 

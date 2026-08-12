@@ -9,7 +9,7 @@ import {Identity as IdentityStore, IdentityInfo} from "../ApplicationStore/Ident
 import {info} from "@tauri-apps/plugin-log";
 
 interface IdentityProps {
-    identity: IdentityStore;
+    identity?: IdentityStore;
 }
 
 interface IdentityState {
@@ -44,12 +44,13 @@ export class Identity extends React.Component<IdentityProps, IdentityState> {
     }
 
     render() {
-        const {collection, active} = this?.props?.identity;
+        let {identity} = this?.props;
+        const {collection, active} = identity || {};
         let {searchQuery, selected} = this.state;
 
-        let filtered = collection;
+        let filtered = collection || [];
         if (searchQuery?.length > 0) {
-            filtered = filtered.filter((identity: IdentityInfo) => {
+            filtered = filtered?.filter?.((identity: IdentityInfo) => {
                 const name = `${identity?.nickname || identity?.hash}`;
                 return name.toLowerCase().includes(searchQuery.toLowerCase());
             });
