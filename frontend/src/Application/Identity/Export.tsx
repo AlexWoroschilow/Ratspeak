@@ -30,6 +30,17 @@ export class Export extends React.PureComponent<ExportProps, ExportState> {
 
         return <div className={"Export"}>
             <div className="identity-passcode-fields">
+                <div className="rs-dialog-choices">
+                    <button type="button" className="rs-dialog-choice"><span className="rs-dialog-choice-text"><span
+                        className="rs-dialog-choice-label">Ratspeak Identity Backup</span><span
+                        className="rs-dialog-choice-hint">Import a PIN-encrypted .rsi identity backup created by Ratspeak.</span></span></button>
+                    <button type="button" className="rs-dialog-choice"><span className="rs-dialog-choice-text"><span
+                        className="rs-dialog-choice-label">Reticulum Identity Key</span><span
+                        className="rs-dialog-choice-hint">Import a raw, base32, base64, or hex Reticulum private identity key.</span></span></button>
+                    <button type="button" className="rs-dialog-choice"><span className="rs-dialog-choice-text"><span
+                        className="rs-dialog-choice-label">Recovery Phrase</span><span className="rs-dialog-choice-hint">Restore from a 12-word recovery phrase (creates a software identity).</span></span>
+                    </button>
+                </div>
             </div>
 
 

@@ -90,14 +90,16 @@ export interface IdentityActivated {
 
 
 export interface ContactCard {
-    hash: string;
-    nickname: string;
-    keys: string[];
-    metadata: Record<string, any>;
+    display_name: string;
+    format: string;
+    identity_hash: string;
+    lxmf_hash: string;
+    payload: string;
+    public_key: string;
+    public_key_base64: string;
 }
 
 
-// {"hw_locked":"5aa0ee5dd87db9b1df8dbfea1a4d7636","hw_locked_kind":"passcode","stage":"hw_locked"}
 export interface Status {
     hw_locked: string;
     hw_locked_kind: "passcode" | "hardware";
@@ -265,13 +267,14 @@ export class Identity {
         });
     }
 
-    async getContactCard(hash: string): Promise<ContactCard> {
-        try {
-            return await invoke<ContactCard>('api_contact_card', {hash});
-        } catch (error) {
-            console.error("Failed to get contact card:", error);
-            throw error;
-        }
+    async getContactCard(identity: IdentityInfo): Promise<ContactCard> {
+        return new Promise((resolve: (value: ContactCard) => void, reject) => {
+            invoke('api_contact_card', {args: {hash: identity.hash}})
+                .then((value: unknown) => {
+                    info(`api_contact_card: ${JSON.stringify(value)}\n`);
+                    return resolve(value as ContactCard)
+                }).catch(reject);
+        });
     }
 
     async setIdentityStatus(status: string): Promise<void> {

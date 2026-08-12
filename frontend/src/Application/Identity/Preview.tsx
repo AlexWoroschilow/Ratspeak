@@ -196,28 +196,28 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
                     </div>
                 </>}
 
-                {(["default"]).includes(this.state.screen) && <>
-                    <div className="identity-address-stack">
-                        <button type="button" className="identity-address-row" onClick={() => this.handleCopy(lxmfHash, 'Address')}>
+                <div className="identity-address-stack">
+                    <button type="button" className="identity-address-row" onClick={() => this.handleCopy(lxmfHash, 'Address')}>
                         <span className="identity-address-meta">
                             <span className="identity-label">LXMF Address</span>
                             <span className="identity-value mono">{lxmfHash}</span>
                         </span>
-                            <span className="identity-address-action">
+                        <span className="identity-address-action">
                             <svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><rect x="2" y="2" width="13" height="13" rx="2"/></svg>
                         </span>
-                        </button>
-                        <button type="button" className="identity-address-row" onClick={() => this.handleCopy(identityHash, 'Hash')}>
+                    </button>
+                    <button type="button" className="identity-address-row" onClick={() => this.handleCopy(identityHash, 'Hash')}>
                         <span className="identity-address-meta">
                             <span className="identity-label">Identity Hash</span>
                             <span className="identity-value mono">{identityHash}</span>
                         </span>
-                            <span className="identity-address-action">
+                        <span className="identity-address-action">
                             <svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><rect x="2" y="2" width="13" height="13" rx="2"/></svg>
                         </span>
-                        </button>
-                    </div>
+                    </button>
+                </div>
 
+                {(["default"]).includes(this.state.screen) && <>
                     <div className="identity-detail-actions">
                         {(!entity?.is_active) && <>
                             <button className="identity-action-row"
