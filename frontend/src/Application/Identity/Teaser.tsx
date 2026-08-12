@@ -2,13 +2,13 @@
 import React from 'react';
 import {Identity as IdentityStore, IdentityActivated, IdentityInfo} from "../../ApplicationStore/Identity";
 import {inject, observer} from "mobx-react";
-import "./Autounlock.scss";
+import "./Teaser.scss";
 import {BallTriangle} from "react-loader-spinner";
 import Blockie from "../components/Blockie";
+import {info} from "@tauri-apps/plugin-log";
 
 interface TeaserProps {
     identity?: IdentityStore;
-    children?: React.ReactNode;
 }
 
 interface TeaserState {
@@ -31,22 +31,18 @@ export class Teaser extends React.PureComponent<TeaserProps, TeaserState> {
         };
     }
 
-    componentDidUpdate(prevProps: Readonly<TeaserProps>, prevState: Readonly<TeaserState>, snapshot?: any) {
-        ((this?.state.entity != this?.props?.identity?.active)) &&
-        (this.setState({
-            isUnlocked: !this.props.identity?.active?.passcode_protected,
-            entity: this?.props.identity?.active || undefined
-        }));
-    }
-
     componentDidMount() {
         const {identity} = this.props;
 
         (identity?.active != undefined) &&
         identity?.activateIdentity?.(identity.active)
             .then((activated: IdentityActivated) => {
+
+
                 (activated?.locked) &&
                 this.setState({isUnlocked: false});
+
+                info(`activateIdentity??: ${JSON.stringify(activated)}`);
 
                 (!activated?.locked) &&
                 this.setState({isUnlocked: true});
@@ -95,8 +91,10 @@ export class Teaser extends React.PureComponent<TeaserProps, TeaserState> {
     };
 
     render() {
-        const {children, identity} = this.props;
+        const {identity} = this.props;
         const {active} = identity || {};
+
+        info(`active: ${JSON.stringify(active)}`);
 
         const {
             passcode,
@@ -104,9 +102,9 @@ export class Teaser extends React.PureComponent<TeaserProps, TeaserState> {
             error
         } = this.state;
 
-        return <>
+        return <div className={"Teaser"}>
 
-            {(isUnlocked == true) && <>
+            <div className="sidebar-brand">
                 {(active?.hash != undefined) && <>
                     <span className="sidebar-brand-logo">
                     <Blockie
@@ -117,50 +115,49 @@ export class Teaser extends React.PureComponent<TeaserProps, TeaserState> {
                 <span className="sidebar-brand-text">
                     {active?.display_name}
                 </span>
-            </>}
+            </div>
 
             {(isUnlocked === undefined) && <>
-                <BallTriangle
-                    color="#000000"
-                    height={20}
-                    width={20}
-                />
+                <span className={"nav-item"}>
+                    <BallTriangle
+                        color="#000000"
+                        height={20}
+                        width={20}
+                    />
+                </span>
             </>}
 
             {(isUnlocked == false) && <>
-                <div className={"Autounlock"}>
-
-                    {(error && error?.length > 0) && <>
+                {(error && error?.length > 0) && <>
+                    <span className={"nav-item"}>
                         <div className="modal-error">
                             {error}
                         </div>
-                    </>}
+                    </span>
+                </>}
+                <span className={"nav-item"}>
+                    <h5>Unlock: {active?.display_name}</h5>
+                </span>
 
-                    <div className="identity-passcode-fields">
-                        <div className="modal-field">
-                            <label>Unlock: {identity?.active?.display_name}</label>
-                            <input
-                                type="password"
-                                id="identity-create-passcode-new"
-                                className="modal-input"
-                                maxLength={128}
-                                autoComplete="off"
-                                placeholder="At least 6 characters"
-                                value={passcode}
-                                onChange={this.handlePasscodeChange}
-                            />
-                        </div>
-                    </div>
+                <span className={"nav-item"}>
+                    <input
+                        type="password"
+                        id="identity-create-passcode-new"
+                        className="modal-input"
+                        maxLength={128}
+                        autoComplete="off"
+                        placeholder="At least 6 characters"
+                        value={passcode}
+                        onChange={this.handlePasscodeChange}
+                    />
+                </span>
 
-                    <div className="bottom-sheet-footer">
-                        <button
-                            className="rs-dialog-confirm"
-                            onClick={this.onIdentityUnlock.bind(this)}>
-                            {"Unlock"}
-                        </button>
-                    </div>
-                </div>
+                <button
+                    className="rs-dialog-confirm"
+                    onClick={this.onIdentityUnlock.bind(this)}>
+                    {"Unlock"}
+                </button>
             </>}
-        </>
+        </div>
     }
 }

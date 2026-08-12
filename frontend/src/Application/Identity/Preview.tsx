@@ -190,7 +190,7 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
                     </div>
                     <div className="identity-detail-heading">
                         <div className="identity-card-nickname">
-                            {entity.nickname || "Unnamed"}
+                            {entity.display_name || "Unnamed"}
                         </div>
                         <div className="identity-status-row">
                             <span className="identity-active-badge">

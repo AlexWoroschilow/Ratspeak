@@ -59,10 +59,7 @@ export class Layout extends React.Component<LayoutProps, LayoutState> {
 
             <div className="app-layout">
                 <nav className="sidebar" id="sidebar">
-                    <button className="sidebar-close-btn" id="sidebar-close-btn" aria-label="Close menu">&times;</button>
-                    <div className="sidebar-brand">
-                        <Teaser/>
-                    </div>
+                    <Teaser/>
                     <div className="sidebar-divider"></div>
                     <a className={`nav-item ${this.isActive('#messages') && 'active'}`} href="#messages" title="Messages">
                         <LuMessageSquare size={20}/>

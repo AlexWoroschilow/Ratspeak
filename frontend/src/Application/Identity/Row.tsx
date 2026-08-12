@@ -1,9 +1,8 @@
 "use strict";
 import React from "react";
 import {IdentityInfo} from "../../ApplicationStore/Identity";
-import {IoCheckmarkCircleOutline, IoCloseCircleOutline, IoKeyOutline} from "react-icons/io5";
+import {IoKeyOutline} from "react-icons/io5";
 import {FiTool} from "react-icons/fi";
-import {FaChevronRight} from "react-icons/fa";
 import {RiBaseStationLine} from "react-icons/ri";
 
 interface RowProps {
@@ -24,7 +23,7 @@ export class Row extends React.PureComponent<RowProps> {
                         {(identity?.is_active == true) && <>
                             <RiBaseStationLine size={12} color={"#0000ff"}/> &nbsp;
                         </>}
-                        {identity.nickname || "Unnamed Identity"}
+                        {identity.display_name || "Unnamed Identity"}
                     </span>
                     <span className="peers-row-status" title={identity.hash}>
                         {identity.hash}
