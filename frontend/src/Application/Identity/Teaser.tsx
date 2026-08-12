@@ -1,9 +1,8 @@
 "use strict";
 import React from 'react';
-import {Identity as IdentityStore, IdentityActivated, IdentityInfo} from "../../ApplicationStore/Identity";
+import {Identity as IdentityStore, IdentityActivated, IdentityInfo, Status} from "../../ApplicationStore/Identity";
 import {inject, observer} from "mobx-react";
 import "./Teaser.scss";
-import {BallTriangle} from "react-loader-spinner";
 import Blockie from "../components/Blockie";
 import {info} from "@tauri-apps/plugin-log";
 
@@ -31,45 +30,17 @@ export class Teaser extends React.PureComponent<TeaserProps, TeaserState> {
         };
     }
 
-    componentDidMount() {
-        const {identity} = this.props;
-
-        (identity?.active != undefined) &&
-        identity?.activateIdentity?.(identity.active)
-            .then((activated: IdentityActivated) => {
-
-
-                (activated?.locked) &&
-                this.setState({isUnlocked: false});
-
-                info(`activateIdentity??: ${JSON.stringify(activated)}`);
-
-                (!activated?.locked) &&
-                this.setState({isUnlocked: true});
-            })
-            .catch((error) => {
-                this.setState({
-                    error: error
-                });
-            });
-
-    }
-
-
     onIdentityUnlock() {
         const {identity} = this.props;
         const {passcode} = this.state;
+        const {status} = identity || {};
 
-        (identity?.active != undefined) &&
-        identity?.unlockIdentity?.(identity.active, `${passcode}`)
+        const active = identity?.collection?.find?.((x: IdentityInfo) => x?.hash == status?.hw_locked);
+
+        (active != undefined) &&
+        identity?.unlockIdentity?.(active, `${passcode}`)
             .then((unlocked: IdentityActivated) => {
-
-                (unlocked?.locked) &&
-                (this.setState({isUnlocked: false}));
-
-                (!unlocked?.locked) &&
-                (this.setState({isUnlocked: true}));
-
+                identity?.fetchStatus();
             })
             .catch((error: any) => {
                 this.setState({
@@ -92,13 +63,10 @@ export class Teaser extends React.PureComponent<TeaserProps, TeaserState> {
 
     render() {
         const {identity} = this.props;
-        const {active} = identity || {};
-
-        info(`active: ${JSON.stringify(active)}`);
+        const {active, status} = identity || {};
 
         const {
             passcode,
-            isUnlocked,
             error
         } = this.state;
 
@@ -117,17 +85,7 @@ export class Teaser extends React.PureComponent<TeaserProps, TeaserState> {
                 </span>
             </div>
 
-            {(isUnlocked === undefined) && <>
-                <span className={"nav-item"}>
-                    <BallTriangle
-                        color="#000000"
-                        height={20}
-                        width={20}
-                    />
-                </span>
-            </>}
-
-            {(isUnlocked == false) && <>
+            {(status?.stage == "hw_locked") && <>
                 {(error && error?.length > 0) && <>
                     <span className={"nav-item"}>
                         <div className="modal-error">

@@ -5,6 +5,7 @@ import {Network} from "./ApplicationStore/Network";
 import {Contacts} from "./ApplicationStore/Contacts";
 import {Identity} from "./ApplicationStore/Identity";
 import {Messages} from "./ApplicationStore/Messages";
+import {info} from "@tauri-apps/plugin-log";
 
 //
 // Based on the investigation of the `@dashboard/static/js/setup.js` and `@dashboard/static/js/tauri_events.js` files, here are the `RS.invoke` methods related to the initial application setup:
@@ -85,6 +86,15 @@ export class ApplicationStore {
         this.messages = new Messages();
 
         makeAutoObservable(this);
+
+
+        // invoke?.('api_announces')
+        //     .then((data: any) => {
+        //         info(`api_announces (data): ${JSON.stringify(data)}\n`);
+        //     })
+        //     .catch((error: any) => {
+        //         info(`api_announces (error): ${JSON.stringify(error)}\n`);
+        //     });
     }
 
     /**

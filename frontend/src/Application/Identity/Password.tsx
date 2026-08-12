@@ -6,7 +6,6 @@ import {inject, observer} from "mobx-react";
 interface PasswordProps {
     entity: IdentityInfo;
     isPasswordRemove: boolean;
-    isPending: boolean;
     identity?: IdentityStore;
     onCancel: () => void;
     onSuccess: (idn: IdentityInfo, message: string) => void;
@@ -95,7 +94,6 @@ export class Password extends React.PureComponent<PasswordProps, PasswordState> 
         const {
             entity,
             isPasswordRemove,
-            isPending,
             onCancel,
         } = this.props;
 
@@ -108,6 +106,7 @@ export class Password extends React.PureComponent<PasswordProps, PasswordState> 
         return (
             <>
                 <div className="identity-passcode-fields" id="identity-create-passcode-fields">
+
                     {entity.passcode_protected && (
                         <div className="modal-field">
                             <label>Your current PIN</label>
@@ -154,22 +153,22 @@ export class Password extends React.PureComponent<PasswordProps, PasswordState> 
                     )}
                 </div>
 
+                {isPasswordRemove === true && <>
+                    <p className="recovery-warn">This decrypts the identity on this device; it will no longer require a PIN when you open Ratspeak.</p>
+                </>}
+
                 <div className="bottom-sheet-footer">
                     <button
                         className="rs-dialog-confirm"
                         id="identity-modal-confirm"
-                        onClick={onCancel}
-                        disabled={isPending}
-                    >
+                        onClick={onCancel}>
                         {"Cancel"}
                     </button>
 
                     <button
                         className="rs-dialog-confirm"
                         id="identity-modal-confirm"
-                        onClick={() => isPasswordRemove ? this.onIdentityPasswordRemove() : this.onIdentityPassword()}
-                        disabled={isPending}
-                    >
+                        onClick={() => isPasswordRemove ? this.onIdentityPasswordRemove() : this.onIdentityPassword()}>
                         {isPasswordRemove ? "Remove" : "Save"}
                     </button>
                 </div>

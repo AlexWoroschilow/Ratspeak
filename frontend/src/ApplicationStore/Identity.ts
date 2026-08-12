@@ -96,22 +96,40 @@ export interface ContactCard {
     metadata: Record<string, any>;
 }
 
+
+// {"hw_locked":"5aa0ee5dd87db9b1df8dbfea1a4d7636","hw_locked_kind":"passcode","stage":"hw_locked"}
+export interface Status {
+    hw_locked: string;
+    hw_locked_kind: "passcode" | "hardware";
+    stage: "hw_locked" | "ready";
+}
+
+
 export class Identity {
     public collection: IdentityInfo[] = [];
     public active: IdentityInfo | null = null;
+    public status: Status | null = null;
+
 
     constructor() {
         makeAutoObservable(this, {
             setCollection: action,
             setActive: action,
+            setStatus: action,
         });
 
         this.listeners();
 
 
-        this.fetchIdentities().then((identities: IdentityInfo[]) => {
-            this.fetchActiveIdentity();
-        });
+        this.fetchStatus().then((status: Status) => {
+            this.fetchIdentities().then((identities: IdentityInfo[]) => {
+                this.fetchActiveIdentity();
+            });
+        })
+    }
+
+    setStatus(status: Status) {
+        this.status = status;
     }
 
     setCollection(collection: IdentityInfo[]) {
@@ -138,6 +156,18 @@ export class Identity {
         // // Returns { backup_base64: string, file_name: string, ... }
         // return data;
     }
+
+
+    async fetchStatus(): Promise<Status> {
+        return new Promise((resolve: (value: Status) => void, reject) => {
+            invoke<Status>('api_startup_progress')
+                .then((status: Status) => {
+                    this.setStatus(status);
+                    return resolve(status)
+                }).catch(reject);
+        });
+    }
+
 
     async fetchIdentities(): Promise<IdentityInfo[]> {
         return new Promise((resolve: (value: IdentityInfo[]) => void, reject) => {
@@ -181,7 +211,10 @@ export class Identity {
     async activateIdentity(identity: IdentityInfo): Promise<IdentityActivated> {
         return new Promise((resolve: (value: IdentityActivated) => void, reject) => {
             invoke<IdentityActivated>('api_activate_identity', {hashHex: identity.hash})
-                .then(resolve)
+                .then((unlocked: IdentityActivated) => {
+                    this.fetchStatus();
+                    return resolve(unlocked);
+                })
                 .catch(reject);
         });
     }
@@ -190,6 +223,8 @@ export class Identity {
         return new Promise((resolve: (value: IdentityActivated) => void, reject) => {
             invoke<IdentityActivated>('unlock_identity', {secret: passcode})
                 .then((unlocked: IdentityActivated) => {
+
+                    this.fetchStatus();
 
                     (!unlocked?.ok && unlocked?.error) &&
                     (reject(unlocked.error));
@@ -285,6 +320,10 @@ export class Identity {
 
 
     listeners() {
+        listen("identity_switching", (data: any) => {
+            info(`identity_switching: ${JSON.stringify(data)}\n`);
+        });
+
         listen("identity_switched", () => {
             this.fetchActiveIdentity();
             this.fetchIdentities();

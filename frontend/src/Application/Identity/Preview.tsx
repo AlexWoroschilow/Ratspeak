@@ -3,7 +3,6 @@ import React from 'react';
 import {Identity as IdentityStore, IdentityActivated, IdentityInfo} from "../../ApplicationStore/Identity";
 import {inject, observer} from "mobx-react";
 import Blockie from './../components/Blockie';
-import {info} from "@tauri-apps/plugin-log";
 import {RiDeleteBin7Line} from "react-icons/ri";
 import {MdOutlineQrCode} from "react-icons/md";
 import {IoKeyOutline} from "react-icons/io5";
@@ -11,7 +10,8 @@ import {TbSwitch} from "react-icons/tb";
 import {Password} from "./Password";
 import {Circles} from "react-loader-spinner";
 import {PiExport} from "react-icons/pi";
-import {Unlock} from "./Unlock";
+import {Share} from "./Share";
+import {Export} from "./Export";
 
 interface PreviewProps {
     entity: IdentityInfo;
@@ -21,11 +21,10 @@ interface PreviewProps {
 
 interface PreviewState {
     entity: IdentityInfo;
+    screen: "default" | "password" | "passwordRemove" | "share" | "export";
+
     error: string | undefined;
     message: string | undefined;
-    isPasswordUpdate: boolean;
-    isPasswordRemove: boolean;
-    isUnlock: boolean;
     isPending: boolean;
 }
 
@@ -38,11 +37,9 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
 
         this.state = {
             entity: props.entity,
+            screen: "default",
             error: undefined,
             message: undefined,
-            isPasswordUpdate: false,
-            isPasswordRemove: false,
-            isUnlock: false,
             isPending: false,
         };
     }
@@ -61,12 +58,15 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
         identity?.activateIdentity?.(entity)
             .then((activated: IdentityActivated) => {
 
-                (activated?.locked) &&
-                this.setState({message: "Identity is locked", isUnlock: true});
+                this.setState({
+                    message: "Successfully activated identity",
+                    error: undefined,
+                    isPending: false,
+                });
 
-                (!activated?.locked) &&
-                this.onIdentityUnlock(entity, "Successfully activated identity");
-
+                identity?.fetchActiveIdentity?.().then((entity: IdentityInfo) => {
+                    this.setState({entity: entity})
+                });
             })
             .catch((error) => {
                 this.setState({
@@ -113,7 +113,7 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
             entity: idn,
             message: message,
             isPending: false,
-            isPasswordRemove: false
+            screen: "default"
         });
     }
 
@@ -122,46 +122,20 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
             entity: idn,
             message: message,
             isPending: false,
-            isPasswordUpdate: false
+            screen: "default"
         });
     }
-
-    onIdentityUnlock(entity: IdentityInfo, message: string) {
-        const {identity} = this.props;
-
-        (identity?.active) &&
-        this.setState({
-            entity: identity.active,
-            message: message,
-            isUnlock: false,
-            isPending: false
-        });
-
-    }
-
-    onIdentityShare(identity: IdentityInfo) {
-        info(`onIdentityShare: ${JSON.stringify(identity)}`)
-    }
-
-    onIdentityExport(identity: IdentityInfo) {
-        info(`onIdentityExport: ${JSON.stringify(identity)}`)
-    }
-
 
     handleCopy = (value: string, label: string) => {
         navigator.clipboard.writeText(value);
     };
-
 
     render() {
         const {
             entity,
             message,
             error,
-            isUnlock,
             isPending,
-            isPasswordUpdate,
-            isPasswordRemove,
         } = this.state;
 
         const lxmfHash = entity.lxmf_hash || "";
@@ -222,7 +196,7 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
                     </div>
                 </>}
 
-                {(isPasswordUpdate == false && isPasswordRemove == false && isUnlock == false) && <>
+                {(["default"]).includes(this.state.screen) && <>
                     <div className="identity-address-stack">
                         <button type="button" className="identity-address-row" onClick={() => this.handleCopy(lxmfHash, 'Address')}>
                         <span className="identity-address-meta">
@@ -255,27 +229,27 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
                         </>}
 
                         <button className="identity-action-row"
-                                onClick={() => this.setState({isPasswordUpdate: true})}
-                                disabled={isPending || isPasswordUpdate}>
+                                onClick={() => this.setState({screen: "password"})}
+                                disabled={isPending}>
                             <IoKeyOutline size={20}/>
                             <span>{entity.passcode_protected ? 'Change PIN' : 'Set PIN'}</span>
                         </button>
 
                         {entity?.passcode_protected &&
                             <button className="identity-action-row"
-                                    onClick={() => this.setState({isPasswordRemove: true})}
-                                    disabled={isPending || isPasswordRemove}>
+                                    onClick={() => this.setState({screen: "passwordRemove"})}
+                                    disabled={isPending}>
                                 <IoKeyOutline size={20}/>
                                 <span>{'Remove PIN'}</span>
                             </button>}
                         <button className="identity-action-row"
-                                onClick={this.onIdentityShare.bind(this, entity)}
+                                onClick={() => this.setState({screen: "share"})}
                                 disabled={isPending}>
                             <MdOutlineQrCode size={20}/>
                             <span>Share</span>
                         </button>
                         <button className="identity-action-row"
-                                onClick={this.onIdentityExport.bind(this, entity)}
+                                onClick={() => this.setState({screen: "export"})}
                                 disabled={isPending}>
                             <PiExport size={20}/>
                             <span>Export</span>
@@ -292,11 +266,29 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
                     </div>
                 </>}
 
-                {(isUnlock == true) && <>
-                    <Unlock
+                {(["share"]).includes(this.state.screen) && <>
+                    <Share
                         entity={entity}
-                        onCancel={() => this.setState({isUnlock: false})}
-                        onSuccess={this.onIdentityUnlock.bind(this)}
+                        onCancel={() => this.setState({screen: "default"})}
+                        onSuccess={() => this.setState({screen: "default"})}
+                    />
+                </>}
+
+                {(["export"]).includes(this.state.screen) && <>
+                    <Export
+                        entity={entity}
+                        onCancel={() => this.setState({screen: "default"})}
+                        onSuccess={() => this.setState({screen: "default"})}
+                    />
+                </>}
+
+                {(["password"]).includes(this.state.screen) && <>
+                    <Password
+                        entity={entity}
+                        isPasswordRemove={false}
+                        onCancel={() => this.setState({screen: "default"})}
+                        onSuccess={this.onIdentityPassword.bind(this)}
+                        onError={(error) => this.setState({error})}
                         onPending={(isPending) => this.setState({
                             isPending: isPending,
                             error: undefined,
@@ -305,18 +297,21 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
                     />
                 </>}
 
-
-                {(isPasswordUpdate == true || isPasswordRemove == true) && (
+                {(["passwordRemove"]).includes(this.state.screen) && <>
                     <Password
                         entity={entity}
-                        isPasswordRemove={isPasswordRemove}
-                        isPending={isPending}
-                        onCancel={() => this.setState({isPasswordUpdate: false, isPasswordRemove: false})}
-                        onSuccess={isPasswordRemove ? this.onIdentityPasswordRemove.bind(this) : this.onIdentityPassword.bind(this)}
+                        isPasswordRemove={true}
+                        onCancel={() => this.setState({screen: "default"})}
+                        onSuccess={this.onIdentityPasswordRemove.bind(this)}
                         onError={(error) => this.setState({error})}
-                        onPending={(isPending) => this.setState({isPending, error: undefined, message: undefined})}
+                        onPending={(isPending) => this.setState({
+                            isPending: isPending,
+                            error: undefined,
+                            message: undefined
+                        })}
                     />
-                )}
+                </>}
+
 
             </div>
         );
