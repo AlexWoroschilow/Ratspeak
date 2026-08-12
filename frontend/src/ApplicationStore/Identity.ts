@@ -76,6 +76,15 @@ export interface IdentityInfo {
 }
 
 
+export interface IdentityExport {
+    bytes: BlobPart;
+    base64: string;
+    fileName: string;
+    mimeType: string;
+    label: string;
+}
+
+
 export interface IdentityActivated {
     display_name?: string;
     hash: string;
@@ -157,6 +166,59 @@ export class Identity {
         // });
         // // Returns { backup_base64: string, file_name: string, ... }
         // return data;
+    }
+
+    base64ToBytes(b64: string) {
+        var raw = atob(b64);
+        var arr = new Uint8Array(raw.length);
+        for (var i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+        return arr;
+    }
+
+
+    async getPayloadReticulumBase64(identity: IdentityInfo): Promise<IdentityExport> {
+        return new Promise((resolve: (payload: IdentityExport) => void, reject) => {
+            invoke<IdentityExport>('api_export_identity_reticulum_base64', {hashHex: identity.hash})
+                .then((data: any) => {
+                    return resolve({
+                        bytes: this.base64ToBytes(data.data_base64),
+                        base64: data.data_base64,
+                        fileName: data.file_name || (identity.hash.substring(0, 16) + '-reticulum-identity.identity'),
+                        mimeType: 'application/octet-stream',
+                        label: 'Reticulum identity file'
+                    } as IdentityExport)
+                }).catch(reject)
+        });
+    }
+
+    async getPayloadReticulumBase32(identity: IdentityInfo): Promise<IdentityExport> {
+        return new Promise((resolve: (payload: IdentityExport) => void, reject) => {
+            invoke<IdentityExport>('api_export_identity_reticulum_base32', {hashHex: identity.hash})
+                .then((data: any) => {
+                    return resolve({
+                        bytes: this.base64ToBytes(data.data_base64),
+                        base64: data.data_base64,
+                        fileName: data.file_name || (identity.hash.substring(0, 16) + '-reticulum-identity-key-base32.txt'),
+                        mimeType: 'text/plain',
+                        label: 'Reticulum base32 key'
+                    } as IdentityExport)
+                }).catch(reject)
+        });
+    }
+
+    async getPayloadBackupBase64(identity: IdentityInfo): Promise<IdentityExport> {
+        return new Promise((resolve: (payload: IdentityExport) => void, reject) => {
+            invoke<IdentityExport>('api_export_identity_backup_base64', {hashHex: identity.hash})
+                .then((data: any) => {
+                    return resolve({
+                        bytes: this.base64ToBytes(data.backup_base64),
+                        base64: data.backup_base64,
+                        fileName: data.file_name || (identity.hash.substring(0, 16) + '-ratspeak-identity.rsi'),
+                        mimeType: 'application/octet-stream',
+                        label: 'Ratspeak identity backup'
+                    } as IdentityExport)
+                }).catch(reject)
+        });
     }
 
 
@@ -271,7 +333,6 @@ export class Identity {
         return new Promise((resolve: (value: ContactCard) => void, reject) => {
             invoke('api_contact_card', {args: {hash: identity.hash}})
                 .then((value: unknown) => {
-                    info(`api_contact_card: ${JSON.stringify(value)}\n`);
                     return resolve(value as ContactCard)
                 }).catch(reject);
         });
