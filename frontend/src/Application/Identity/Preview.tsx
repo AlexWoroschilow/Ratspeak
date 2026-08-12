@@ -1,6 +1,6 @@
 "use strict";
 import React from 'react';
-import {Identity as IdentityStore, IdentityInfo} from "../../ApplicationStore/Identity";
+import {Identity as IdentityStore, IdentityActivated, IdentityInfo} from "../../ApplicationStore/Identity";
 import {inject, observer} from "mobx-react";
 import Blockie from './../components/Blockie';
 import {info} from "@tauri-apps/plugin-log";
@@ -9,6 +9,9 @@ import {MdOutlineQrCode} from "react-icons/md";
 import {IoKeyOutline} from "react-icons/io5";
 import {TbSwitch} from "react-icons/tb";
 import {Password} from "./Password";
+import {Circles} from "react-loader-spinner";
+import {PiExport} from "react-icons/pi";
+import {Unlock} from "./Unlock";
 
 interface PreviewProps {
     entity: IdentityInfo;
@@ -22,6 +25,7 @@ interface PreviewState {
     message: string | undefined;
     isPasswordUpdate: boolean;
     isPasswordRemove: boolean;
+    isUnlock: boolean;
     isPending: boolean;
 }
 
@@ -38,6 +42,7 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
             message: undefined,
             isPasswordUpdate: false,
             isPasswordRemove: false,
+            isUnlock: false,
             isPending: false,
         };
     }
@@ -54,17 +59,14 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
     onIdentitySwitch(entity: IdentityInfo) {
         const {identity} = this.props;
         identity?.activateIdentity?.(entity)
-            .then((idn: IdentityInfo | undefined) => {
+            .then((activated: IdentityActivated) => {
 
-                (idn != undefined) &&
-                info(`onIdentitySwitch: ${JSON.stringify(idn)}`);
+                (activated?.locked) &&
+                this.setState({message: "Identity is locked", isUnlock: true});
 
-                (idn != undefined) &&
-                (this.setState({
-                    message: "Successfully switched identity",
-                    isPending: false,
-                    entity: idn
-                }));
+                (!activated?.locked) &&
+                this.onIdentityUnlock(entity, "Successfully activated identity");
+
             })
             .catch((error) => {
                 this.setState({
@@ -124,8 +126,25 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
         });
     }
 
+    onIdentityUnlock(entity: IdentityInfo, message: string) {
+        const {identity} = this.props;
+
+        (identity?.active) &&
+        this.setState({
+            entity: identity.active,
+            message: message,
+            isUnlock: false,
+            isPending: false
+        });
+
+    }
+
     onIdentityShare(identity: IdentityInfo) {
         info(`onIdentityShare: ${JSON.stringify(identity)}`)
+    }
+
+    onIdentityExport(identity: IdentityInfo) {
+        info(`onIdentityExport: ${JSON.stringify(identity)}`)
     }
 
 
@@ -139,6 +158,7 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
             entity,
             message,
             error,
+            isUnlock,
             isPending,
             isPasswordUpdate,
             isPasswordRemove,
@@ -153,12 +173,24 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
             <div className="peers-detail-content">
                 <div className="identity-detail-hero">
                     <div className="identity-avatar identity-detail-avatar">
-                        <Blockie seed={entity.hash} size={72}/>
+                        {(isPending == true) && <>
+                            <Circles
+                                color="#a4a4a4"
+                                height={40}
+                                width={40}
+                            />
+                        </>}
+                        {(isPending == false) && <>
+                            <Blockie
+                                seed={entity.hash}
+                                size={72}/>
+                        </>}
+
+
                     </div>
                     <div className="identity-detail-heading">
                         <div className="identity-card-nickname">
                             {entity.nickname || "Unnamed"}
-
                         </div>
                         <div className="identity-status-row">
                             <span className="identity-active-badge">
@@ -190,29 +222,28 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
                     </div>
                 </>}
 
-                <div className="identity-address-stack">
-
-                    <button type="button" className="identity-address-row" onClick={() => this.handleCopy(lxmfHash, 'Address')}>
+                {(isPasswordUpdate == false && isPasswordRemove == false && isUnlock == false) && <>
+                    <div className="identity-address-stack">
+                        <button type="button" className="identity-address-row" onClick={() => this.handleCopy(lxmfHash, 'Address')}>
                         <span className="identity-address-meta">
                             <span className="identity-label">LXMF Address</span>
                             <span className="identity-value mono">{lxmfHash}</span>
                         </span>
-                        <span className="identity-address-action">
+                            <span className="identity-address-action">
                             <svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><rect x="2" y="2" width="13" height="13" rx="2"/></svg>
                         </span>
-                    </button>
-                    <button type="button" className="identity-address-row" onClick={() => this.handleCopy(identityHash, 'Hash')}>
+                        </button>
+                        <button type="button" className="identity-address-row" onClick={() => this.handleCopy(identityHash, 'Hash')}>
                         <span className="identity-address-meta">
                             <span className="identity-label">Identity Hash</span>
                             <span className="identity-value mono">{identityHash}</span>
                         </span>
-                        <span className="identity-address-action">
+                            <span className="identity-address-action">
                             <svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><rect x="2" y="2" width="13" height="13" rx="2"/></svg>
                         </span>
-                    </button>
-                </div>
+                        </button>
+                    </div>
 
-                {(isPasswordUpdate == false && isPasswordRemove == false) && <>
                     <div className="identity-detail-actions">
                         {(!entity?.is_active) && <>
                             <button className="identity-action-row"
@@ -237,12 +268,17 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
                                 <IoKeyOutline size={20}/>
                                 <span>{'Remove PIN'}</span>
                             </button>}
-
                         <button className="identity-action-row"
                                 onClick={this.onIdentityShare.bind(this, entity)}
                                 disabled={isPending}>
                             <MdOutlineQrCode size={20}/>
                             <span>Share</span>
+                        </button>
+                        <button className="identity-action-row"
+                                onClick={this.onIdentityExport.bind(this, entity)}
+                                disabled={isPending}>
+                            <PiExport size={20}/>
+                            <span>Export</span>
                         </button>
                         {(!entity?.is_active) && <>
                             <button className="identity-action-row identity-action-row--danger"
@@ -255,6 +291,20 @@ export class Preview extends React.PureComponent<PreviewProps, PreviewState> {
                         </>}
                     </div>
                 </>}
+
+                {(isUnlock == true) && <>
+                    <Unlock
+                        entity={entity}
+                        onCancel={() => this.setState({isUnlock: false})}
+                        onSuccess={this.onIdentityUnlock.bind(this)}
+                        onPending={(isPending) => this.setState({
+                            isPending: isPending,
+                            error: undefined,
+                            message: undefined
+                        })}
+                    />
+                </>}
+
 
                 {(isPasswordUpdate == true || isPasswordRemove == true) && (
                     <Password

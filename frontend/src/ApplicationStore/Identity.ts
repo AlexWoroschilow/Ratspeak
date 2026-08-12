@@ -49,30 +49,41 @@ import {info} from "@tauri-apps/plugin-log";
 
 
 export interface IdentityInfo {
-    created_at: number;
-    last_used: number;
+    created_at?: number;
+    last_used?: number;
 
     display_name?: string;
-    nickname: string;
+    nickname?: string;
 
     hash: string;
-    lxmf_hash: string;
+    lxmf_hash?: string;
     lxmf_destination?: string;
 
-    is_active: boolean;
-    is_hardware: boolean;
+    is_active?: boolean;
+    is_hardware?: boolean;
     has_mnemonic?: boolean;
     exists?: boolean;
+    locked?: boolean;
 
     passcode_protected?: boolean;
 
-    propagation_auto_favor_static: number;
-    propagation_enabled: number;
-    propagation_mode: string;
-    propagation_node: string;
+    propagation_auto_favor_static?: number;
+    propagation_enabled?: number;
+    propagation_mode?: string;
+    propagation_node?: string;
 
-    status: string;
+    status?: string;
 }
+
+export interface IdentityActivated {
+    display_name?: string;
+    hash: string;
+    generation?: number;
+    lxmf_hash?: string;
+    locked?: boolean;
+    status?: string;
+}
+
 
 export interface ContactCard {
     hash: string;
@@ -105,6 +116,23 @@ export class Identity {
         this.active = identity;
     }
 
+    async exportReticulumKey(identity: IdentityInfo) {
+        // const data = await invoke('api_export_identity_reticulum_base64', {
+        //     hashHex: hash
+        // });
+        // Returns { data_base64: string, file_name: string, ... }
+        // return data;
+    }
+
+    async exportRatspeakBackup(identity: IdentityInfo, pin: string) {
+        // const data = await invoke('api_export_identity_backup_base64', {
+        //     hashHex: hash,
+        //     passcode: pin
+        // });
+        // // Returns { backup_base64: string, file_name: string, ... }
+        // return data;
+    }
+
     async fetchIdentities(): Promise<IdentityInfo[]> {
         return new Promise((resolve: (value: IdentityInfo[]) => void, reject) => {
             invoke<IdentityInfo[]>('api_list_identities')
@@ -119,6 +147,9 @@ export class Identity {
         return new Promise((resolve: (value: IdentityInfo) => void, reject) => {
             invoke<IdentityInfo>('api_identity')
                 .then((identity: IdentityInfo) => {
+
+                    info(`\n\nfetchActiveIdentity: ${JSON.stringify(identity)}\n`)
+
                     this.setActive(identity);
                     return resolve(identity)
                 }).catch(reject);
@@ -137,20 +168,28 @@ export class Identity {
         });
     }
 
-    async activateIdentity(identity: IdentityInfo): Promise<IdentityInfo | undefined> {
-        return new Promise((resolve: (value: IdentityInfo | undefined) => void, reject) => {
-            invoke<IdentityInfo | undefined>('api_activate_identity', {hashHex: identity.hash})
-                .then((data: any) => {
-                    this.fetchIdentities()
-                        .then((collection: Array<IdentityInfo>) => {
-                            return resolve(collection?.find?.((item: IdentityInfo) => {
-                                return item.hash === identity.hash
-                            }));
-                        });
+    async activateIdentity(identity: IdentityInfo): Promise<IdentityActivated> {
+        return new Promise((resolve: (value: IdentityActivated) => void, reject) => {
+            invoke<IdentityActivated>('api_activate_identity', {hashHex: identity.hash})
+                .then((activated: IdentityActivated) => {
+                    return resolve(activated);
                 })
                 .catch(reject);
         });
     }
+
+    async unlockIdentity(identity: IdentityInfo, passcode: string): Promise<IdentityActivated> {
+        return new Promise((resolve: (value: IdentityActivated) => void, reject) => {
+            invoke<IdentityActivated>('unlock_identity', {secret: passcode})
+                .then((unlocked: IdentityActivated) => {
+                    this.fetchActiveIdentity().then((active: IdentityInfo) => {
+                        return resolve(unlocked);
+                    });
+                })
+                .catch(reject);
+        });
+    }
+
 
     async deleteIdentity(identity: IdentityInfo): Promise<void> {
         return new Promise((resolve: (value: void) => void, reject) => {
