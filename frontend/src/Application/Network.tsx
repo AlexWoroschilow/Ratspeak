@@ -58,34 +58,34 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
             return iface.type == "TCPServerInterface";
         })
 
-        return <>
-
-            <div className="view" id="view-network">
+        return <div className={"Network"}>
+            <div className="view">
                 <div className="network-layout">
                     <Status/>
+
                     <div className="network-main">
-                        <nav className="sidebar">
-                            <a className={`nav-item ${this.state.screen == "tcp" && "active"}`} title="Internet / TCP"
+                        <nav className="scrollable">
+                            <a className={`peers-row ${this.state.screen == "tcp" && "selected"}`} title="Internet / TCP"
                                onClick={() => this.route("tcp")}>
                                 <GoGlobe size={20}/>
                                 <span className="nav-label">Internet / TCP ({tcp?.length || 0})</span>
                             </a>
-                            <a className={`nav-item ${this.state.screen == "bluetooth" && "active"}`} title="Bluetooth Peer"
+                            <a className={`peers-row ${this.state.screen == "bluetooth" && "selected"}`} title="Bluetooth Peer"
                                onClick={() => this.route("bluetooth")}>
                                 <IoIosBluetooth size={20}/>
                                 <span className="nav-label">Bluetooth Peer</span>
                             </a>
-                            <a className={`nav-item ${this.state.screen == "local" && "active"}`} title="Local Network"
+                            <a className={`peers-row ${this.state.screen == "local" && "selected"}`} title="Local Network"
                                onClick={() => this.route("local")}>
                                 <IoWifi size={20}/>
                                 <span className="nav-label">Local Network</span>
                             </a>
-                            <a className={`nav-item ${this.state.screen == "radio" && "active"}`} title="Radio"
+                            <a className={`peers-row ${this.state.screen == "radio" && "selected"}`} title="Radio"
                                onClick={() => this.route("radio")}>
                                 <IoRadioOutline size={20}/>
                                 <span className="nav-label">Radio</span>
                             </a>
-                            <a className={`nav-item ${this.state.screen == "host" && "active"}`} title="Host"
+                            <a className={`peers-row ${this.state.screen == "host" && "selected"}`} title="Host"
                                onClick={() => this.route("host")}>
                                 <RxServer size={20}/>
                                 <span className="nav-label">Host ({hosts?.length || 0})</span>
@@ -97,12 +97,10 @@ export class Network extends React.Component<NetworkProps, NetworkState> {
                             {this?.state?.screen == "bluetooth" && <Bluetooth/>}
                             {this?.state?.screen == "radio" && <Radio/>}
                             {this?.state?.screen == "host" && <Host/>}
-
-
                         </div>
                     </div>
                 </div>
             </div>
-        </>
+        </div>
     }
 }
