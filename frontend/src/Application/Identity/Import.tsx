@@ -5,6 +5,7 @@ import {inject, observer} from "mobx-react";
 import {RatspeakBackup} from "./Import/RatspeakBackup";
 import {ReticulumBackup} from "./Import/ReticulumBackup";
 import {RecoveryPhrase} from "./Import/RecoveryPhrase";
+import {IoIosArrowBack} from "react-icons/io";
 
 interface ImportProps {
     identity?: IdentityStore;
@@ -48,6 +49,7 @@ export class Import extends React.PureComponent<ImportProps, ImportState> {
             </>}
 
             <div className="identity-passcode-fields">
+
                 {(["default"]).includes(this.state.screen) && <>
                     <div className="rs-dialog-choices">
                         <button className="rs-dialog-choice" onClick={() => {
@@ -83,18 +85,33 @@ export class Import extends React.PureComponent<ImportProps, ImportState> {
                         </span>
                         </button>
                     </div>
+
+                    <div className="bottom-sheet-footer">
+                        <button className="nr-btn nr-btn-xs"
+                                onClick={() => {
+                                    window.location.href = "#identity";
+                                }}>
+                            <IoIosArrowBack size={12}/> {"Cancel"}
+                        </button>
+                    </div>
                 </>}
 
                 {(["ratspeak"]).includes(this.state.screen) && <>
-                    <RatspeakBackup/>
+                    <RatspeakBackup onCancel={() => {
+                        this.setState({screen: "default"});
+                    }}/>
                 </>}
 
                 {(["reticulum"]).includes(this.state.screen) && <>
-                    <ReticulumBackup/>
+                    <ReticulumBackup onCancel={() => {
+                        this.setState({screen: "default"});
+                    }}/>
                 </>}
 
                 {(["phrase"]).includes(this.state.screen) && <>
-                    <RecoveryPhrase/>
+                    <RecoveryPhrase onCancel={() => {
+                        this.setState({screen: "default"});
+                    }}/>
                 </>}
 
 

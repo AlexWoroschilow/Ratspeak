@@ -7,9 +7,11 @@ import {readFile} from '@tauri-apps/plugin-fs';
 import {info} from "@tauri-apps/plugin-log";
 import {MdClear} from "react-icons/md";
 import {CiImport} from "react-icons/ci";
+import {IoIosArrowBack} from "react-icons/io";
 
 interface RatspeakBackupProps {
     identity?: IdentityStore;
+    onCancel?: () => void;
 }
 
 interface RatspeakBackupState {
@@ -177,10 +179,17 @@ export class RatspeakBackup extends React.PureComponent<RatspeakBackupProps, Rat
                 <div className="modal-field">
                     <p>
                         <button className="nr-btn nr-btn-xs"
+                                onClick={this?.props?.onCancel}>
+                            <IoIosArrowBack size={20}/> {"Cancel"}
+                        </button>
+                        &nbsp;
+                        <button className="nr-btn nr-btn-xs"
                                 disabled={!(this?.state?.file && this?.state?.passcode)}
                                 onClick={this.onImportFile.bind(this)}>
                             <CiImport size={20}/> {preview == undefined ? "Preview" : "Import"}
                         </button>
+
+
                     </p>
                 </div>
             </div>

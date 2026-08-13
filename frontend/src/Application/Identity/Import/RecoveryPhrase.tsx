@@ -8,6 +8,7 @@ import {info} from "@tauri-apps/plugin-log";
 
 interface RecoveryPhraseProps {
     identity?: IdentityStore;
+    onCancel?: () => void;
 }
 
 interface RecoveryPhraseState {

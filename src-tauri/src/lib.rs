@@ -868,7 +868,7 @@ pub fn run() {
             channel_deep_link::take_native_channel_share,
             ratspeak_tauri::commands::system::api_version,
             ratspeak_tauri::commands::system::api_startup_progress,
-            ratspeak_tauri::commands::stauri_plugin_dialogystem::api_setup_status,
+            ratspeak_tauri::commands::system::api_setup_status,
             ratspeak_tauri::commands::identity::api_identity,
             ratspeak_tauri::commands::network::api_announces,
             ratspeak_tauri::commands::network::api_alerts,

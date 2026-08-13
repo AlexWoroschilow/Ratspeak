@@ -7,9 +7,11 @@ import {readFile} from '@tauri-apps/plugin-fs';
 import {info} from "@tauri-apps/plugin-log";
 import {MdClear} from "react-icons/md";
 import {CiImport} from "react-icons/ci";
+import {IoIosArrowBack} from "react-icons/io";
 
 interface ReticulumBackupProps {
     identity?: IdentityStore;
+    onCancel?: () => void;
 }
 
 interface ReticulumBackupState {
@@ -152,6 +154,11 @@ export class ReticulumBackup extends React.PureComponent<ReticulumBackupProps, R
 
                 <div className="modal-field">
                     <p>
+                        <button className="nr-btn nr-btn-xs"
+                                onClick={this?.props?.onCancel}>
+                            <IoIosArrowBack size={20}/> {"Cancel"}
+                        </button>
+                        &nbsp;
                         <button className="nr-btn nr-btn-xs"
                                 disabled={!(this?.state?.file)}
                                 onClick={this.onImportFile.bind(this)}>

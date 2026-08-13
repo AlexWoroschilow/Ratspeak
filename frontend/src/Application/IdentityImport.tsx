@@ -26,15 +26,7 @@ export class IdentityImport extends React.Component<IdentityImportProps, Identit
                     <div className="rs-dialog-message">
                         Choose the source format.
                     </div>
-
                     <Import/>
-
-                </div>
-                <div className="bottom-sheet-footer">
-                    <button onClick={() => {
-                        window.location.href = "#identity";
-                    }} className="rs-dialog-cancel">Cancel
-                    </button>
                 </div>
             </div>
         </>
