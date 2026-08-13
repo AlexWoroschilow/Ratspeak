@@ -1,5 +1,17 @@
+function isCompactLayout() {
+    var breakpoint = window.RS && window.RS.config ? window.RS.config.MOBILE_BREAKPOINT : 768;
+    return window.innerWidth <= breakpoint;
+}
+
+function isTouchDevice() {
+    return window.__RATSPEAK_MOBILE__ === true || navigator.maxTouchPoints > 0;
+}
+
+// Legacy interaction predicate. Layout decisions should use
+// isCompactLayout(); gesture and soft-keyboard decisions use isMobile().
 function isMobile() {
-    return navigator.maxTouchPoints > 0 && window.innerWidth <= 1024;
+    var breakpoint = window.RS && window.RS.config ? window.RS.config.MOBILE_TOUCH_BREAKPOINT : 1024;
+    return isTouchDevice() && window.innerWidth <= breakpoint;
 }
 
 // Tauri injects __RATSPEAK_MOBILE__ / __RATSPEAK_DESKTOP__ globals.
@@ -18,6 +30,11 @@ function isAndroid() {
 
 function isTauriMobile() { return window.__RATSPEAK_MOBILE__ === true; }
 function isTauriDesktop() { return window.__RATSPEAK_DESKTOP__ === true; }
+function supportsHardwareIdentities() {
+    if (isTauriMobile()) return false;
+    if (isTauriDesktop()) return true;
+    return !isIOS() && !isAndroid();
+}
 function hasAndroidBridge() {
     return isTauriMobile() && typeof window.RatspeakAndroid !== 'undefined';
 }
@@ -193,8 +210,13 @@ function _rsBrowserMediaPermission(audio, camera) {
     });
 }
 
-function _rsDesktopMicrophonePermission(audio) {
-    if (!audio || typeof isTauriDesktop !== 'function' || !isTauriDesktop()) {
+function _rsNativeMicrophonePermission(audio) {
+    var nativeApple = typeof isTauriDesktop === 'function' && isTauriDesktop();
+    if (!nativeApple && typeof isTauriMobile === 'function' && isTauriMobile() &&
+        typeof isIOS === 'function' && isIOS()) {
+        nativeApple = true;
+    }
+    if (!audio || !nativeApple) {
         return Promise.resolve(null);
     }
     if (!window.RS || typeof RS.invoke !== 'function') {
@@ -216,9 +238,9 @@ window.RS.mediaPermissions = {
         if (!audio && !camera) return Promise.resolve(true);
         return _rsAndroidMediaPermission(audio, camera).then(function(androidGranted) {
             if (androidGranted !== null) return androidGranted;
-            return _rsDesktopMicrophonePermission(audio).then(function(desktopMicGranted) {
-                if (desktopMicGranted === false) return false;
-                return _rsBrowserMediaPermission(audio && desktopMicGranted !== true, camera).then(function(browserGranted) {
+            return _rsNativeMicrophonePermission(audio).then(function(nativeMicGranted) {
+                if (nativeMicGranted === false) return false;
+                return _rsBrowserMediaPermission(audio && nativeMicGranted !== true, camera).then(function(browserGranted) {
                     return browserGranted !== false;
                 });
             });
@@ -228,16 +250,33 @@ window.RS.mediaPermissions = {
 
 var _rsAudioPlaybackContext = null;
 var _rsAudioPlaybackUnlockInstalled = false;
+var _rsAudioPlaybackUnlockInFlight = false;
 var _rsAudioPlaybackUnlocked = false;
+var _rsAudioPlaybackPrimed = false;
+var _rsAudioPlaybackUnlockEvents = ['pointerdown', 'touchend', 'mousedown', 'keydown'];
+
+function _rsNativeAndroidAudioAvailable() {
+    return !!(window.RatspeakAndroid &&
+        typeof window.RatspeakAndroid.playCallRingtone === 'function' &&
+        typeof window.RatspeakAndroid.startCallAudioRoute === 'function');
+}
 
 function _rsAudioPlaybackCtor() {
     return window.AudioContext || window.webkitAudioContext || null;
 }
 
 function _rsGetAudioPlaybackContext() {
+    if (_rsNativeAndroidAudioAvailable()) return null;
     var ctor = _rsAudioPlaybackCtor();
     if (!ctor) return null;
-    if (_rsAudioPlaybackContext) return _rsAudioPlaybackContext;
+    if (_rsAudioPlaybackContext && _rsAudioPlaybackContext.state !== 'closed') {
+        return _rsAudioPlaybackContext;
+    }
+    if (_rsAudioPlaybackContext && _rsAudioPlaybackContext.state === 'closed') {
+        _rsAudioPlaybackContext = null;
+        _rsAudioPlaybackUnlocked = false;
+        _rsAudioPlaybackPrimed = false;
+    }
     try {
         _rsAudioPlaybackContext = new ctor();
     } catch (err) {
@@ -248,7 +287,8 @@ function _rsGetAudioPlaybackContext() {
 }
 
 function _rsPrimeAudioPlayback(ctx) {
-    if (!ctx) return;
+    if (!ctx || _rsAudioPlaybackPrimed) return;
+    _rsAudioPlaybackPrimed = true;
     try {
         var gain = ctx.createGain();
         gain.gain.setValueAtTime(0, ctx.currentTime);
@@ -263,39 +303,49 @@ function _rsPrimeAudioPlayback(ctx) {
             try { gain.disconnect(); } catch (_) {}
         };
     } catch (err) {
+        _rsAudioPlaybackPrimed = false;
         window.RS.diag('warn', '[audio] playback priming failed:', err);
     }
 }
 
 function _rsInstallAudioPlaybackUnlock() {
-    if (_rsAudioPlaybackUnlockInstalled) return;
+    // Android call tones and LXST output use native AudioTracks. Creating a
+    // Web Audio destination there would keep a second, silent output path
+    // alive and can make the speaker re-open when the Activity resumes.
+    if (_rsNativeAndroidAudioAvailable() || _rsAudioPlaybackUnlockInstalled) return;
     _rsAudioPlaybackUnlockInstalled = true;
-    var events = ['pointerdown', 'touchend', 'mousedown', 'keydown'];
     var unlock = function() {
+        if (_rsAudioPlaybackUnlockInFlight) return;
+        _rsAudioPlaybackUnlockInFlight = true;
         window.RS.audioPlayback.ensure({ installUnlock: false }).then(function(ok) {
+            _rsAudioPlaybackUnlockInFlight = false;
             if (!ok) return;
-            events.forEach(function(eventName) {
+            _rsAudioPlaybackUnlockEvents.forEach(function(eventName) {
                 document.removeEventListener(eventName, unlock, true);
             });
+        }).catch(function() {
+            _rsAudioPlaybackUnlockInFlight = false;
         });
     };
-    events.forEach(function(eventName) {
+    _rsAudioPlaybackUnlockEvents.forEach(function(eventName) {
         document.addEventListener(eventName, unlock, true);
     });
 }
 
 function _rsEnsureAudioPlayback(opts) {
     opts = opts || {};
+    if (opts.installUnlock !== false) _rsInstallAudioPlaybackUnlock();
     var ctx = _rsGetAudioPlaybackContext();
     if (!ctx) return Promise.resolve(false);
-    if (opts.installUnlock !== false) _rsInstallAudioPlaybackUnlock();
-    var resume = (ctx.state === 'suspended' && typeof ctx.resume === 'function')
+    var needsResume = ctx.state === 'suspended' || ctx.state === 'interrupted';
+    var resume = (needsResume && typeof ctx.resume === 'function')
         ? ctx.resume()
         : Promise.resolve();
     return Promise.resolve(resume).then(function() {
         _rsPrimeAudioPlayback(ctx);
-        _rsAudioPlaybackUnlocked = ctx.state === 'running' || ctx.state === 'interrupted';
-        var ready = _rsAudioPlaybackUnlocked || ctx.state !== 'suspended';
+        _rsAudioPlaybackUnlocked = ctx.state === 'running';
+        var ready = _rsAudioPlaybackUnlocked ||
+            (ctx.state !== 'suspended' && ctx.state !== 'interrupted' && ctx.state !== 'closed');
         if (ready) {
             try { document.dispatchEvent(new CustomEvent('rs-audio-playback-ready')); } catch (_) {}
         }
@@ -308,10 +358,14 @@ function _rsEnsureAudioPlayback(opts) {
 
 window.RS.audioPlayback = {
     ensure: _rsEnsureAudioPlayback,
+    installUnlock: _rsInstallAudioPlaybackUnlock,
     context: _rsGetAudioPlaybackContext,
     isReady: function() {
         var ctx = _rsAudioPlaybackContext;
-        return !!(_rsAudioPlaybackUnlocked || (ctx && ctx.state !== 'suspended'));
+        return !!(_rsAudioPlaybackUnlocked || (ctx &&
+            ctx.state !== 'suspended' &&
+            ctx.state !== 'interrupted' &&
+            ctx.state !== 'closed'));
     }
 };
 
@@ -332,10 +386,11 @@ function pathCountSummary(stats) {
 }
 
 // Tauri event bridge. Returns Promise<unlisten-fn>; await before assuming
-// the handler is live. Polls up to 1s for `window.__TAURI__.event` to appear,
-// since iOS WKWebView can inject Tauri globals after DOMContentLoaded — pre-fix
-// this would silently no-op listeners and the events never reached the page.
-window.RS.listen = function(eventName, handler) {
+// the handler is live. Required subscriptions reject with a static error so
+// callers such as Activity can retry a late iOS bridge instead of mistaking a
+// no-op unlisten function for a successfully installed listener.
+window.RS.listen = function(eventName, handler, options) {
+    options = options || {};
     function attach() {
         return window.__TAURI__.event.listen(eventName, function(ev) {
             try { handler(ev && ev.payload); } catch (e) { window.RS.diag('error', '[RS.listen]', eventName, e); }
@@ -344,7 +399,7 @@ window.RS.listen = function(eventName, handler) {
     if (window.__TAURI__ && window.__TAURI__.event && typeof window.__TAURI__.event.listen === 'function') {
         return attach();
     }
-    return new Promise(function(resolve) {
+    return new Promise(function(resolve, reject) {
         var attempts = 0;
         var iv = setInterval(function() {
             attempts++;
@@ -353,28 +408,108 @@ window.RS.listen = function(eventName, handler) {
                 resolve(attach());
             } else if (attempts >= 20) {
                 clearInterval(iv);
-                window.RS.diag('warn', '[RS.listen] Tauri event bridge never appeared, dropping subscription:', eventName);
-                resolve(function() {});
+                if (options.required === true) {
+                    var err = new Error('Required Tauri event bridge is unavailable');
+                    err.code = 'event_bridge_unavailable';
+                    reject(err);
+                } else {
+                    window.RS.diag('warn', '[RS.listen] Tauri event bridge never appeared, dropping subscription:', eventName);
+                    resolve(function() {});
+                }
             }
         }, 50);
     });
 };
 
-// Fetch an LXMF file attachment over IPC; returns a blob-URL. Caller must
-// URL.revokeObjectURL when done — `RS.saveFile` does this on a timer.
-window.RS.fileDownload = function(storedName) {
-    return window.RS.invoke('api_file_download', { storedName: storedName }).then(function(result) {
-        var raw = atob(result.data_base64);
-        var arr = new Uint8Array(raw.length);
-        for (var i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
-        var blob = new Blob([arr], { type: result.mime || 'application/octet-stream' });
-        return {
-            url: URL.createObjectURL(blob),
-            filename: result.filename || storedName,
-            mime: result.mime || 'application/octet-stream',
-            data_base64: result.data_base64 || '',
-        };
+function _rsRawIpcBytes(value) {
+    if (value instanceof Uint8Array) return value;
+    if (value instanceof ArrayBuffer) return new Uint8Array(value);
+    if (ArrayBuffer.isView(value)) {
+        return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    }
+    throw new Error('Attachment chunk response was not binary');
+}
+
+// Fetch an LXMF file attachment as bounded raw IPC chunks. This deliberately
+// avoids retaining whole-file base64/JSON strings in either WebView or Rust.
+// Caller must URL.revokeObjectURL when done — `RS.saveFile` does this on a timer.
+window.RS.fileMetadata = function(storedName) {
+    return window.RS.invoke('api_file_metadata', { storedName: storedName });
+};
+
+var _rsFileDownloadInFlight = {};
+var _rsLargeFileDownloadActive = false;
+var _rsSmallFileDownloadBytes = 0;
+
+window.RS.fileDownload = function(storedName, knownMeta) {
+    if (_rsFileDownloadInFlight[storedName]) return _rsFileDownloadInFlight[storedName];
+    var metadata = knownMeta
+        ? Promise.resolve(knownMeta)
+        : window.RS.fileMetadata(storedName);
+    var lane = null;
+    var admittedBytes = 0;
+    var download = metadata.then(function(meta) {
+        var size = Number(meta && meta.size) || 0;
+        if (size > (1024 * 1024 - 1)) {
+            if (_rsLargeFileDownloadActive) {
+                var busy = new Error('Another large attachment is being loaded');
+                busy.code = 'attachment_busy';
+                throw busy;
+            }
+            _rsLargeFileDownloadActive = true;
+            lane = 'large';
+        } else {
+            if (_rsSmallFileDownloadBytes + size > 8 * 1024 * 1024) {
+                var pressure = new Error('Attachment memory budget is currently full');
+                pressure.code = 'attachment_memory_pressure';
+                throw pressure;
+            }
+            _rsSmallFileDownloadBytes += size;
+            admittedBytes = size;
+            lane = 'small';
+        }
+        var chunkBytes = Math.min(Number(meta && meta.chunk_bytes) || (256 * 1024), 256 * 1024);
+        var chunks = [];
+        var offset = 0;
+
+        function readNext() {
+            if (offset >= size) return Promise.resolve();
+            var length = Math.min(chunkBytes, size - offset);
+            return window.RS.invoke('api_file_read_chunk', {
+                storedName: storedName,
+                offset: offset,
+                length: length,
+            }).then(function(raw) {
+                var bytes = _rsRawIpcBytes(raw);
+                if (bytes.byteLength !== length) throw new Error('Attachment chunk was truncated');
+                chunks.push(bytes);
+                offset += length;
+                return readNext();
+            });
+        }
+
+        return readNext().then(function() {
+            var mime = (meta && meta.mime) || 'application/octet-stream';
+            var blob = new Blob(chunks, { type: mime });
+            return {
+                url: URL.createObjectURL(blob),
+                blob: blob,
+                size: blob.size,
+                filename: (meta && meta.filename) || storedName,
+                mime: mime,
+            };
+        });
+    }).finally(function() {
+        if (lane === 'large') _rsLargeFileDownloadActive = false;
+        if (lane === 'small') {
+            _rsSmallFileDownloadBytes = Math.max(0, _rsSmallFileDownloadBytes - admittedBytes);
+        }
+        if (_rsFileDownloadInFlight[storedName] === download) {
+            delete _rsFileDownloadInFlight[storedName];
+        }
     });
+    _rsFileDownloadInFlight[storedName] = download;
+    return download;
 };
 
 var _rsAndroidFileSaveSeq = 0;
@@ -397,7 +532,7 @@ window._onAndroidFileSaveResult = function(data) {
 
 function _rsNativeAndroidSave(file, opts) {
     opts = opts || {};
-    if (!hasAndroidBridge()) return null;
+    if (!hasAndroidBridge() || !file.data_base64) return null;
     var bridge = window.RatspeakAndroid;
     var image = /^image\//i.test(file.mime || '');
     var method = image && opts.preferPhotos && typeof bridge.saveImageToPhotos === 'function'
@@ -425,7 +560,7 @@ function _rsNativeAndroidSave(file, opts) {
 
 function _rsNativeIosSavePhoto(file, opts) {
     opts = opts || {};
-    if (!isIOS() || !opts.preferPhotos || !/^image\//i.test(file.mime || '')) return null;
+    if (!isIOS() || !file.data_base64 || !opts.preferPhotos || !/^image\//i.test(file.mime || '')) return null;
     if (typeof window.RS.invoke !== 'function') return null;
     return window.RS.invoke('save_image_to_photos', {
         filename: file.filename || 'image',
@@ -434,13 +569,46 @@ function _rsNativeIosSavePhoto(file, opts) {
     });
 }
 
+function _rsSaveStoredFileNative(storedName, opts) {
+    if (!(isTauriMobile() || isTauriDesktop()) || typeof window.RS.invoke !== 'function') return null;
+    opts = opts || {};
+    var requestId = 'stored-save-' + Date.now() + '-' + (++_rsAndroidFileSaveSeq);
+    var callbackPromise = null;
+    if (isAndroid()) {
+        callbackPromise = new Promise(function(resolve, reject) {
+            _rsAndroidFileSaveWaiters[requestId] = { resolve: resolve, reject: reject };
+            setTimeout(function() {
+                if (!_rsAndroidFileSaveWaiters[requestId]) return;
+                delete _rsAndroidFileSaveWaiters[requestId];
+                var timeout = new Error('Save timed out');
+                timeout.code = 'native_save_timeout';
+                reject(timeout);
+            }, 60000);
+        });
+    }
+    return window.RS.invoke('save_stored_attachment_native', {
+        storedName: storedName,
+        preferPhotos: !!opts.preferPhotos,
+        requestId: requestId,
+    }).then(function(status) {
+        if (status === 'complete') return true;
+        if (status === 'cancelled') return false;
+        if (status === 'pending' && callbackPromise) return callbackPromise;
+        delete _rsAndroidFileSaveWaiters[requestId];
+        var unsupported = new Error('Native stored-file save is unavailable');
+        unsupported.code = 'native_save_unsupported';
+        throw unsupported;
+    }, function(error) {
+        delete _rsAndroidFileSaveWaiters[requestId];
+        throw error;
+    });
+}
+
 function _rsShareFile(file) {
     if (!navigator.share || typeof File === 'undefined') return null;
     try {
-        var raw = atob(file.data_base64 || '');
-        var bytes = new Uint8Array(raw.length);
-        for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-        var shareFile = new File([bytes], file.filename || 'download', {
+        if (!file.blob) return null;
+        var shareFile = new File([file.blob], file.filename || 'download', {
             type: file.mime || 'application/octet-stream'
         });
         if (navigator.canShare && !navigator.canShare({ files: [shareFile] })) return null;
@@ -475,6 +643,15 @@ window.RS.saveDownloadedFile = function(file, opts) {
 };
 
 window.RS.saveFile = function(storedName, opts) {
+    var nativeSave = _rsSaveStoredFileNative(storedName, opts || {});
+    if (nativeSave) {
+        return nativeSave.catch(function(error) {
+            if (!error || error.code !== 'native_save_unsupported') throw error;
+            return window.RS.fileDownload(storedName).then(function(f) {
+                return window.RS.saveDownloadedFile(f, opts || {});
+            });
+        });
+    }
     return window.RS.fileDownload(storedName).then(function(f) {
         return window.RS.saveDownloadedFile(f, opts || {});
     });
@@ -486,21 +663,57 @@ window.RS.openExternalUrl = function(url) {
     if (!/^https?:\/\//i.test(clean)) clean = 'https://' + clean;
     if (hasAndroidBridge() && typeof window.RatspeakAndroid.openExternalUrl === 'function') {
         try {
-            if (window.RatspeakAndroid.openExternalUrl(clean)) return Promise.resolve(true);
+            return Promise.resolve(!!window.RatspeakAndroid.openExternalUrl(clean));
+        } catch (error) {
+            return Promise.reject(error);
+        }
+    }
+    if (_rsInvokeAvailable() || isTauriMobile() || isTauriDesktop()) {
+        return window.RS.invoke('open_external_url', { url: clean }).then(function() { return true; });
+    }
+    try {
+        var opened = window.open(clean, '_blank');
+        if (opened) opened.opener = null;
+        return Promise.resolve(!!opened);
+    } catch (error) {
+        return Promise.reject(error);
+    }
+};
+
+window.RS.openSupportEmail = function(subject, body) {
+    var cleanSubject = String(subject || '').trim();
+    var cleanBody = String(body || '');
+    if (!cleanSubject || cleanSubject.length > 180 || cleanBody.length > 8000) {
+        return Promise.reject(new Error('Invalid support email'));
+    }
+    if (hasAndroidBridge() && typeof window.RatspeakAndroid.openSupportEmail === 'function') {
+        try {
+            return Promise.resolve(!!window.RatspeakAndroid.openSupportEmail(cleanSubject, cleanBody));
         } catch (_) {}
     }
     if (typeof window.RS.invoke === 'function') {
-        return window.RS.invoke('open_external_url', { url: clean }).then(function() { return true; }).catch(function() {
-            window.open(clean, '_blank', 'noopener');
-            return true;
-        });
+        return window.RS.invoke('open_support_email', {
+            subject: cleanSubject,
+            body: cleanBody
+        }).then(function() { return true; }).catch(function() { return false; });
     }
-    window.open(clean, '_blank', 'noopener');
-    return Promise.resolve(true);
+    return Promise.resolve(false);
 };
 
-// Mobile uses native RatspeakService channel; rsNotify is desktop-only.
+// Native notifications share one app preference. Android permission recovery
+// uses its Activity bridge; iOS and desktop use Tauri's notification plugin.
 var _desktopNotifEnabled = true;
+var _mobileNotificationPermissionKey = 'ratspeak_notification_permission_requested';
+
+function _mobileNotificationPermissionWasRequested() {
+    try { return localStorage.getItem(_mobileNotificationPermissionKey) === '1'; }
+    catch (_) { return false; }
+}
+
+function _markMobileNotificationPermissionRequested() {
+    try { localStorage.setItem(_mobileNotificationPermissionKey, '1'); }
+    catch (_) {}
+}
 
 function _rsNotifyInvoke(cmd, payload) {
     return window.__TAURI_INTERNALS__.invoke('plugin:notification|' + cmd, payload || {});
@@ -521,15 +734,44 @@ window.rsNotify = {
     setEnabled: function(enabled) { _desktopNotifEnabled = !!enabled; },
     isEnabled: function() { return _desktopNotifEnabled; },
     available: function() {
-        if (isTauriMobile()) return false;
+        if (hasAndroidBridge()) return true;
         if (window.__TAURI_INTERNALS__) return true;
         return 'Notification' in window;
     },
-    requestPermission: function() {
-        if (isTauriMobile()) return Promise.resolve('default');
+    permissionState: function() {
+        if (hasAndroidBridge() && typeof window.RatspeakAndroid.notificationAuthorizationStatus === 'function') {
+            try { return Promise.resolve(window.RatspeakAndroid.notificationAuthorizationStatus()); }
+            catch (_) { return Promise.resolve('unavailable'); }
+        }
         if (window.__TAURI_INTERNALS__) {
             return _rsNotifyInvoke('is_permission_granted').then(function(granted) {
-                return granted ? 'granted' : _rsNotifyInvoke('request_permission');
+                if (granted === true) return 'granted';
+                if (granted === false && isTauriMobile()) {
+                    return _mobileNotificationPermissionWasRequested() ? 'denied' : 'prompt';
+                }
+                return granted === false ? 'denied' : 'prompt';
+            }).catch(function() { return 'unavailable'; });
+        }
+        if ('Notification' in window) return Promise.resolve(Notification.permission);
+        return Promise.resolve('unavailable');
+    },
+    requestPermission: function() {
+        if (hasAndroidBridge() && typeof window.RatspeakAndroid.requestNotificationPermission === 'function') {
+            try {
+                _markMobileNotificationPermissionRequested();
+                window.RatspeakAndroid.requestNotificationPermission();
+            }
+            catch (_) { return Promise.resolve('unavailable'); }
+            return Promise.resolve('prompt');
+        }
+        if (window.__TAURI_INTERNALS__) {
+            return _rsNotifyInvoke('is_permission_granted').then(function(granted) {
+                if (granted === true) return 'granted';
+                if (granted === false && (!isTauriMobile() || _mobileNotificationPermissionWasRequested())) {
+                    return 'denied';
+                }
+                if (isTauriMobile()) _markMobileNotificationPermissionRequested();
+                return _rsNotifyInvoke('request_permission');
             }).catch(function(err) {
                 window.RS.diag('warn', '[rsNotify] permission probe failed:', err);
                 return 'default';
@@ -682,6 +924,7 @@ function formatConvTime(ts) {
     var dd = d.getDate().toString().padStart(2, '0');
     var mm = (d.getMonth() + 1).toString().padStart(2, '0');
     var yyyy = d.getFullYear();
+    if (yyyy === now.getFullYear()) return _dateOrderDMY ? dd + '/' + mm : mm + '/' + dd;
     return _dateOrderDMY ? dd + '/' + mm + '/' + yyyy : mm + '/' + dd + '/' + yyyy;
 }
 
@@ -747,9 +990,10 @@ function copyableHash(fullHash, displayLength) {
     if (displayLength && fullHash.length > displayLength) {
         displayText = shortHash(fullHash, displayLength, 4);
     }
-    return '<span class="hash-copy" data-full="' + escapeHtml(fullHash) +
-        '" title="Click to copy: ' + escapeHtml(fullHash) + '">' +
-        escapeHtml(displayText) + '</span>';
+    return '<button class="hash-copy" type="button" dir="ltr" data-full="' + escapeHtml(fullHash) +
+        '" aria-label="Copy address ' + escapeHtml(fullHash) +
+        '" title="Copy ' + escapeHtml(fullHash) + '">' +
+        escapeHtml(displayText) + '</button>';
 }
 
 function debounce(fn, delay) {
@@ -800,6 +1044,8 @@ document.addEventListener('click', function(e) {
             target.classList.add('copied');
             setTimeout(function() { target.classList.remove('copied'); }, 850);
         } else {
+            target.textContent = fullHash;
+            target.title = 'Address selected for manual copy';
             var range = document.createRange();
             range.selectNodeContents(target);
             var sel = window.getSelection();
@@ -827,8 +1073,27 @@ function animateCountUp(element, target, duration) {
 
 var _lifecycleWasHidden = false;
 
-function _postLifecycleForeground(foreground) {
-    return RS.invoke('api_set_foreground', { args: { foreground: foreground } }).catch(function() {});
+function _postLifecycleForeground(foreground, detail) {
+    if (!window.__RATSPEAK_DESKTOP__) {
+        if (foreground) {
+            var mobileDetail = detail || {};
+            mobileDetail.foreground = true;
+            try {
+                document.dispatchEvent(new CustomEvent('rs-lifecycle-foreground-handled', { detail: mobileDetail }));
+            } catch (_) {}
+        }
+        return Promise.resolve(true);
+    }
+    return RS.invoke('api_set_foreground', { args: { foreground: foreground } }).then(function() {
+        if (foreground) {
+            var eventDetail = detail || {};
+            eventDetail.foreground = true;
+            try {
+                document.dispatchEvent(new CustomEvent('rs-lifecycle-foreground-handled', { detail: eventDetail }));
+            } catch (_) {}
+        }
+        return true;
+    }, function() { return false; });
 }
 
 function _currentLifecycleForeground() {
@@ -855,15 +1120,15 @@ function _refreshAfterResume() {
 }
 
 // visibilitychange doesn't fire on initial visible state.
-_postLifecycleForeground(_currentLifecycleForeground());
+_postLifecycleForeground(_currentLifecycleForeground(), { source: 'initial', persisted: false });
 _lifecycleWasHidden = document.hidden;
 
 function _handleLifecycleChange() {
     var foreground = _currentLifecycleForeground();
     var nowVisible = !document.hidden;
-    _postLifecycleForeground(foreground);
+    var lifecycleHandled = _postLifecycleForeground(foreground, { source: 'lifecycle', persisted: false });
     if (!window.__RATSPEAK_DESKTOP__ && nowVisible && _lifecycleWasHidden) {
-        _refreshAfterResume();
+        lifecycleHandled.then(function(handled) { if (handled) _refreshAfterResume(); });
     }
     _lifecycleWasHidden = !nowVisible;
 }
@@ -877,9 +1142,16 @@ if (!window.__RATSPEAK_DESKTOP__) {
     // pageshow covers mobile Safari bfcache where visibilitychange may not fire.
     window.addEventListener('pageshow', function(e) {
         if (e.persisted) {
-            _postLifecycleForeground(true);
-            _refreshAfterResume();
+            _postLifecycleForeground(true, { source: 'pageshow', persisted: true }).then(function(handled) {
+                if (handled) _refreshAfterResume();
+            });
             _lifecycleWasHidden = false;
         }
     });
 }
+
+RS.listen('attachment_memory_pressure', function(payload) {
+    if (typeof handleAttachmentMemoryPressure === 'function') {
+        handleAttachmentMemoryPressure(!!(payload && payload.critical));
+    }
+}).catch(function() {});

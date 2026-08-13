@@ -1,20 +1,38 @@
 //! RNS runtime integration: init + stats queries.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
 
+use rns_interface::rnode::RNodeStartupOptions;
+#[cfg(all(feature = "ble", target_os = "android"))]
+use rns_runtime::interface_factory::BleRNodeInterfaceConfig;
 use rns_runtime::lifecycle::ShutdownSignal;
-use rns_runtime::reticulum::{self, InstanceMode, ReticulumHandle};
+use rns_runtime::reticulum::{
+    self, InitOptions, InstanceMode, ReticulumHandle, StartupRNodeRuntime,
+};
 use rns_transport::messages::{TransportMessage, TransportQuery, TransportQueryResponse};
+
+use crate::rnode_activity::RNodeActivityRuntimeContext;
+use crate::state::RNodeActivityOrigin;
 
 pub const UI_PATH_TABLE_LIMIT: usize = 500;
 
 pub struct RnsManager {
     pub handle: ReticulumHandle,
     pub shutdown: ShutdownSignal,
+    /// Exact, observation-only records for RNodes registered while this
+    /// runtime initialized. This is a startup snapshot, not current inventory
+    /// or teardown authority.
+    startup_rnode_runtimes: Vec<StartupRNodeRuntime>,
+    /// Exact RNode registrations whose lifecycle is supplied by the driver
+    /// observer instead of inferred from generic transport statistics.
+    /// Entries are session tombstones and live until this manager is dropped.
+    activity_covered_rnodes: HashSet<rns_interface::traits::InterfaceId>,
+    activity_session: Option<RNodeActivityOrigin>,
 }
 
 impl RnsManager {
@@ -26,14 +44,17 @@ impl RnsManager {
         is_foreground: Arc<AtomicBool>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let shutdown = ShutdownSignal::new();
-        let handle = reticulum::init(
+        let handle = reticulum::init_with_options_and_rnode_startup_options(
             Some(config_dir),
             socket_dir,
             shutdown.clone(),
             is_foreground,
+            InitOptions::default(),
+            RNodeStartupOptions::require_capability_admission(),
         )
         .await
         .map_err(|e| format!("RNS init failed: {e:?}"))?;
+        let startup_rnode_runtimes = handle.startup_rnode_runtimes();
 
         tracing::info!(
             "RNS initialized: mode={:?}, interfaces={}",
@@ -46,7 +67,75 @@ impl RnsManager {
             ))
             .await;
 
-        Ok(Self { handle, shutdown })
+        let activity_covered_rnodes = startup_rnode_runtimes
+            .iter()
+            .map(|runtime| runtime.interface_id)
+            .collect();
+
+        Ok(Self {
+            handle,
+            shutdown,
+            startup_rnode_runtimes,
+            activity_covered_rnodes,
+            activity_session: None,
+        })
+    }
+
+    /// Exact startup registrations retained for this runtime session.
+    ///
+    /// Absence does not prove that no RNode is configured, and these records
+    /// must not be used as current inventory or lifecycle authority.
+    pub fn startup_rnode_runtimes(&self) -> &[StartupRNodeRuntime] {
+        &self.startup_rnode_runtimes
+    }
+
+    #[cfg(all(feature = "ble", target_os = "android"))]
+    pub fn deferred_android_ble_rnodes(&self) -> Vec<BleRNodeInterfaceConfig> {
+        self.handle.deferred_android_ble_rnodes()
+    }
+
+    pub(crate) fn bind_rnode_activity_session(&mut self, session: RNodeActivityOrigin) {
+        self.activity_session = Some(session);
+    }
+
+    pub(crate) fn rnode_activity_runtime_context(
+        &self,
+        identity_generation: u64,
+    ) -> Option<RNodeActivityRuntimeContext> {
+        let origin = self.activity_session?;
+        if origin.identity_generation() != identity_generation {
+            return None;
+        }
+        Some(RNodeActivityRuntimeContext::new(
+            self.handle.clone(),
+            origin,
+        ))
+    }
+
+    pub(crate) fn cover_rnode_activity_interface(
+        &mut self,
+        interface_id: rns_interface::traits::InterfaceId,
+        origin: RNodeActivityOrigin,
+    ) -> bool {
+        if self.activity_session != Some(origin) {
+            return false;
+        }
+        self.activity_covered_rnodes.insert(interface_id);
+        true
+    }
+
+    pub(crate) fn is_rnode_activity_interface_covered(
+        &self,
+        interface_id: rns_interface::traits::InterfaceId,
+        identity_generation: u64,
+    ) -> bool {
+        self.activity_session
+            .is_some_and(|session| session.identity_generation() == identity_generation)
+            && self.activity_covered_rnodes.contains(&interface_id)
+    }
+
+    pub(crate) fn owns_rnode_activity_session(&self, session: RNodeActivityOrigin) -> bool {
+        self.activity_session == Some(session)
     }
 
     async fn query(&self, q: TransportQuery) -> Option<TransportQueryResponse> {
@@ -94,10 +183,10 @@ impl RnsManager {
     }
 
     pub async fn get_path_table(&self) -> Vec<Value> {
-        match self.query(TransportQuery::GetPathTable).await {
-            Some(TransportQueryResponse::PathTable(entries)) => path_table_ui_snapshot(entries).0,
-            _ => vec![],
-        }
+        crate::transport_observation::authoritative_path_table(&self.handle)
+            .await
+            .map(|entries| path_table_ui_snapshot(entries).0)
+            .unwrap_or_default()
     }
 
     pub async fn get_rate_table(&self) -> Vec<Value> {
@@ -144,13 +233,11 @@ impl RnsManager {
 
     pub async fn build_stats_update(&self) -> Value {
         let interface_stats = self.get_interface_stats().await;
-        let (path_table, path_index, path_table_total, path_table_truncated) = match self
-            .query(TransportQuery::GetPathTable)
-            .await
-        {
-            Some(TransportQueryResponse::PathTable(entries)) => path_table_stats_snapshot(entries),
-            _ => (vec![], Value::Object(Map::new()), 0, false),
-        };
+        let (path_table, path_index, path_table_total, path_table_truncated) =
+            match crate::transport_observation::authoritative_path_table(&self.handle).await {
+                Some(entries) => path_table_stats_snapshot(entries),
+                _ => (vec![], Value::Object(Map::new()), 0, false),
+            };
         let rate_table = self.get_rate_table().await;
         let link_count = self.get_link_count().await;
 
@@ -175,8 +262,8 @@ impl RnsManager {
         })
     }
 
-    pub fn shutdown(&self) {
-        self.shutdown.trigger();
+    pub async fn shutdown(&self) {
+        self.handle.shutdown_and_wait().await;
     }
 }
 

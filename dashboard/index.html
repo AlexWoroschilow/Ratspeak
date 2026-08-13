@@ -1,17 +1,18 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-channel-hosting="off">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-visual">
     <meta name="theme-color" content="#FAF7F3">
-    <script src="/static/js/theme.js"></script>
+    <script src="/static/js/theme.js?v=ui-20260804"></script>
+    <script src="/static/js/text_scale.js?v=ui-20260804"></script>
     <!-- Safe-area insets (--sat/--sab/--sal/--sar) are defined in 00-tokens.css
          via env(safe-area-inset-*). iOS feeds env() through viewport-fit=cover +
          WKWebView contentInsetAdjustmentBehavior=.never; Android MainActivity
          injects pixel values via evaluateJavascript; desktop falls back to 0. -->
     <title>Ratspeak - Dashboard</title>
-    <link rel="stylesheet" href="/static/fonts/fonts.css">
-    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/fonts/fonts.css?v=ui-20260804">
+    <link rel="stylesheet" href="/static/style.css?v=ui-20260804">
 </head>
 <body class="checking-setup">
 
@@ -73,6 +74,11 @@
             <span class="nav-label">Messages</span>
             <span class="nav-unread-dot" id="nav-unread-dot" style="display:none;"></span>
         </a>
+        <a class="nav-item" data-view="channels" href="#channels" title="Channels">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 16.5a6 6 0 0 1 0-9"/><path d="M15.5 7.5a6 6 0 0 1 0 9"/><path d="M5.5 19.5a10 10 0 0 1 0-15"/><path d="M18.5 4.5a10 10 0 0 1 0 15"/><circle cx="12" cy="12" r="1.7" fill="currentColor" stroke="none"/></svg>
+            <span class="nav-label">Channels</span>
+            <span class="nav-unread-dot" id="nav-channels-unread" style="display:none;"></span>
+        </a>
         <a class="nav-item" data-view="contacts" href="#contacts" title="Contacts">
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
             <span class="nav-label">Contacts</span>
@@ -114,20 +120,21 @@
     </nav>
 
     <nav class="bottom-bar" id="bottom-bar" role="navigation" aria-label="Main navigation">
-        <a class="bottom-bar-item active" data-view="peers" role="button" tabindex="0" aria-label="Peers">
+        <button class="bottom-bar-item active" type="button" data-view="peers" aria-label="Peers" aria-current="page">
             <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-        </a>
-        <a class="bottom-bar-item" data-view="message" role="button" tabindex="0" aria-label="Messages">
+        </button>
+        <button class="bottom-bar-item" type="button" data-view="message" aria-label="Messages">
             <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
             <span class="bottom-bar-badge" id="bb-unread" style="display:none;" aria-hidden="true"></span>
-        </a>
-        <a class="bottom-bar-item" data-view="contacts" role="button" tabindex="0" aria-label="Contacts">
-            <svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-        </a>
-        <a class="bottom-bar-item bottom-bar-hamburger" id="bottom-bar-hamburger" role="button" tabindex="0" aria-label="More options">
+        </button>
+        <button class="bottom-bar-item" type="button" data-view="channels" aria-label="Channels">
+            <svg viewBox="0 0 24 24"><path d="M8 16H5l-3 3V7a3 3 0 0 1 3-3h9a3 3 0 0 1 3 3v6a3 3 0 0 1-3 3Z"/><path d="M8 19h7l4 3v-3h1a2 2 0 0 0 2-2v-7a3 3 0 0 0-3-3"/></svg>
+            <span class="bottom-bar-badge" id="bb-channels-unread" style="display:none;" aria-hidden="true"></span>
+        </button>
+        <button class="bottom-bar-item bottom-bar-hamburger" id="bottom-bar-hamburger" type="button" aria-label="More options">
             <svg viewBox="0 0 24 24"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>
             <span class="bottom-bar-badge" id="bb-more-unread" style="display:none;" aria-hidden="true"></span>
-        </a>
+        </button>
     </nav>
 
     <div class="lxst-call-strip lxst-call-global" id="lxst-call-global" hidden aria-live="polite">
@@ -161,60 +168,64 @@
     </div>
 
     <div class="bottom-sheet-overlay bottom-sheet-overlay--mobile-only" id="bottom-sheet-overlay"></div>
-    <div class="bottom-sheet bottom-sheet--mobile-only" id="bottom-sheet">
+    <div class="bottom-sheet bottom-sheet--mobile-only" id="bottom-sheet" role="dialog" aria-modal="true" aria-label="More navigation">
         <div class="bottom-sheet-handle"></div>
         <div class="bottom-sheet-items">
-            <a class="bottom-sheet-item" data-view="identity">
+            <button class="bottom-sheet-item" type="button" data-view="contacts">
+                <svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                Contacts
+            </button>
+            <button class="bottom-sheet-item" type="button" data-view="identity">
                 <svg viewBox="0 0 24 24"><path d="M2.6 17.4A2 2 0 0 0 2 18.8V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.2a2 2 0 0 0 1.4-.6l.8-.8A6.5 6.5 0 1 0 9.4 10.6z"/><circle cx="16.5" cy="7.5" r="1.5"/></svg>
                 Identity
-            </a>
-            <a class="bottom-sheet-item" data-view="games">
+            </button>
+            <button class="bottom-sheet-item" type="button" data-view="games">
                 <svg viewBox="0 0 24 24"><path d="M6 11h4M8 9v4"/><line x1="15" y1="12" x2="15.01" y2="12"/><line x1="18" y1="10" x2="18.01" y2="10"/><path d="M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z"/></svg>
                 Games
                 <span class="bottom-sheet-badge" id="bs-games-unread" style="display:none;"></span>
-            </a>
-            <a class="bottom-sheet-item" data-view="network">
+            </button>
+            <button class="bottom-sheet-item" type="button" data-view="network">
                 <svg viewBox="0 0 24 24"><rect x="2" y="2" width="6" height="6" rx="1"/><rect x="16" y="2" width="6" height="6" rx="1"/><rect x="9" y="16" width="6" height="6" rx="1"/><path d="M5 8v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8"/><line x1="12" y1="13" x2="12" y2="16"/></svg>
                 Network
-            </a>
+            </button>
             <div class="bottom-sheet-divider"></div>
-            <a class="bottom-sheet-item" data-view="settings">
+            <button class="bottom-sheet-item" type="button" data-view="settings">
                 <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
                 Settings
-            </a>
+            </button>
         </div>
     </div>
 
     <div class="bottom-sheet-overlay bottom-sheet-overlay--mobile-only" id="conn-detail-sheet-overlay"></div>
-    <div class="bottom-sheet bottom-sheet--mobile-only conn-detail-sheet" id="conn-detail-sheet">
+    <div class="bottom-sheet bottom-sheet--mobile-only conn-detail-sheet" id="conn-detail-sheet" role="dialog" aria-modal="true" aria-label="Peer details">
         <div class="bottom-sheet-handle"></div>
         <div id="conn-detail-sheet-content"></div>
     </div>
 
     <div class="bottom-sheet-overlay bottom-sheet-overlay--mobile-only" id="conn-sort-sheet-overlay"></div>
-    <div class="bottom-sheet bottom-sheet--mobile-only" id="conn-sort-sheet">
+    <div class="bottom-sheet bottom-sheet--mobile-only" id="conn-sort-sheet" role="dialog" aria-modal="true" aria-labelledby="conn-sort-sheet-title">
         <div class="bottom-sheet-handle"></div>
-        <div class="bottom-sheet-title">Sort Peers</div>
+        <div class="bottom-sheet-title" id="conn-sort-sheet-title">Sort Peers</div>
         <div class="bottom-sheet-items">
-            <div class="conn-sort-option bottom-sheet-item active" data-sort="name">Name</div>
-            <div class="conn-sort-option bottom-sheet-item" data-sort="status">Status</div>
-            <div class="conn-sort-option bottom-sheet-item" data-sort="hops">Hops</div>
-            <div class="conn-sort-option bottom-sheet-item" data-sort="last_seen">Last Seen</div>
+            <button class="conn-sort-option bottom-sheet-item active" type="button" data-sort="name">Name</button>
+            <button class="conn-sort-option bottom-sheet-item" type="button" data-sort="status">Status</button>
+            <button class="conn-sort-option bottom-sheet-item" type="button" data-sort="hops">Hops</button>
+            <button class="conn-sort-option bottom-sheet-item" type="button" data-sort="last_seen">Last Seen</button>
         </div>
     </div>
 
     <div class="bottom-sheet-overlay bottom-sheet-overlay--mobile-only" id="iface-action-overlay"></div>
-    <div class="bottom-sheet bottom-sheet--mobile-only" id="iface-action-sheet">
+    <div class="bottom-sheet bottom-sheet--mobile-only" id="iface-action-sheet" role="dialog" aria-modal="true" aria-labelledby="iface-action-title">
         <div class="bottom-sheet-handle"></div>
         <div class="bottom-sheet-title" id="iface-action-title"></div>
         <div class="bottom-sheet-items" id="iface-action-items"></div>
     </div>
 
     <div class="bottom-sheet-overlay bottom-sheet-overlay--mobile-only" id="fab-contact-picker-overlay"></div>
-    <div class="bottom-sheet bottom-sheet--mobile-only fab-contact-picker-sheet" id="fab-contact-picker-sheet">
+    <div class="bottom-sheet bottom-sheet--mobile-only fab-contact-picker-sheet" id="fab-contact-picker-sheet" role="dialog" aria-modal="true" aria-labelledby="fab-contact-picker-title">
         <div class="bottom-sheet-handle"></div>
         <div class="fab-contact-picker-header">
-            <span class="fab-contact-picker-title">Start Conversation</span>
+            <span class="fab-contact-picker-title" id="fab-contact-picker-title">Start Conversation</span>
         </div>
         <div class="fab-contact-picker-list" id="fab-contact-picker-list"></div>
     </div>
@@ -519,7 +530,30 @@
                             </div>
                             <button class="reply-preview-close" aria-label="Cancel reply">&times;</button>
                         </div>
-                        <div class="lxmf-compose" id="lxmf-compose-bar" style="display:none;">
+                        <div class="lxmf-compose message-composer voice-memo-recorder" id="lxmf-voice-recorder" data-state="idle" hidden aria-label="Voice message recorder">
+                            <button class="voice-memo-action voice-memo-discard" id="voice-memo-discard-btn" type="button" title="Discard recording" aria-label="Discard voice message">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6m3 0V4h8v2"/></svg>
+                            </button>
+                            <div class="voice-memo-field">
+                                <button class="voice-memo-action voice-memo-play" id="voice-memo-play-btn" type="button" title="Preview recording" aria-label="Play voice message" hidden>
+                                    <svg class="voice-memo-state-icon" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+                                </button>
+                                <span class="voice-memo-live-dot" id="voice-memo-live-dot" aria-hidden="true"></span>
+                                <div class="voice-memo-waveform" id="voice-memo-waveform" aria-hidden="true"></div>
+                                <span class="voice-memo-timer" id="voice-memo-timer" aria-live="polite">0:00</span>
+                                <span class="sr-only" id="voice-memo-announcer" aria-live="assertive"></span>
+                                <button class="voice-memo-action voice-memo-pause" id="voice-memo-pause-btn" type="button" title="Pause recording" aria-label="Pause voice message recording">
+                                    <svg class="voice-memo-state-icon" width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+                                </button>
+                            </div>
+                            <button class="voice-memo-action voice-memo-stop" id="voice-memo-stop-btn" type="button" title="Finish recording" aria-label="Finish voice message recording">
+                                <span aria-hidden="true"></span>
+                            </button>
+                            <button class="lxmf-send-btn message-send-btn voice-memo-send" id="voice-memo-send-btn" type="button" title="Send voice message" aria-label="Send voice message" hidden>
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+                            </button>
+                        </div>
+                        <div class="lxmf-compose message-composer" id="lxmf-compose-bar" style="display:none;">
                             <input type="file" id="lxmf-file-input" style="display:none;">
                             <input type="file" id="lxmf-photos-input" accept="image/*,video/*" style="display:none;">
                             <input type="file" id="lxmf-camera-input" accept="image/*" capture="environment" style="display:none;">
@@ -527,14 +561,139 @@
                             <button class="lxmf-compose-attach-btn" id="attach-file-btn" title="Attach" aria-label="Attach emoji or file">
                                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                             </button>
-                            <textarea id="lxmf-input" class="nr-input" placeholder="Message..." aria-label="Message input" rows="1" title="Enter to send, Shift+Enter for new line"></textarea>
+                            <textarea id="lxmf-input" class="nr-input message-composer-input" placeholder="Message..." aria-label="Message input" rows="1" title="Enter to send, Shift+Enter for new line"></textarea>
                             <span class="lxmf-char-count" id="lxmf-char-count" aria-live="polite" style="display:none;"></span>
-                            <button class="lxmf-send-btn" id="send-msg-btn" aria-label="Send message">
+                            <button class="voice-memo-record-btn" id="voice-memo-record-btn" type="button" title="Record a voice message" aria-label="Record a voice message">
+                                <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5M8 22h8"/></svg>
+                            </button>
+                            <button class="lxmf-send-btn message-send-btn" id="send-msg-btn" aria-label="Send message">
                                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
                             </button>
                         </div>
                     </div>
                 </div>
+            </div>
+        </div>
+
+        <div class="view" id="view-channels">
+            <div class="channels-layout" id="channels-layout">
+                <aside class="channels-sidebar" aria-label="Channel rooms">
+                    <div class="channels-sidebar-header">
+                        <h2>Channels</h2>
+                        <button class="nr-btn nr-btn-ghost channels-icon-btn" id="channels-connect-btn" type="button" title="Manage Hub" aria-label="Manage Hub">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                        </button>
+                    </div>
+
+                    <div class="channel-hub-strip" id="channel-hub-strip" data-phase="offline">
+                        <button class="channel-hub-summary" id="channel-hub-summary" type="button" title="Hub options" aria-label="Channel hub options" aria-haspopup="menu" data-channel-action="hub-actions">
+                            <span class="channel-hub-strip-copy">
+                                <strong id="channel-hub-strip-title">Not connected</strong>
+                                <span id="channel-hub-strip-meta">Choose a hub to begin</span>
+                            </span>
+                        </button>
+                        <button class="nr-btn nr-btn-ghost channels-icon-btn channel-hub-menu-btn" id="channel-hub-menu-btn" type="button" title="Manage Hub" aria-label="Manage Hub" aria-haspopup="dialog" hidden>
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
+                        </button>
+                    </div>
+
+                    <section class="channel-owned-hub" id="channel-owned-hub" aria-labelledby="channel-owned-hub-label" hidden>
+                        <div class="channel-owned-hub-heading">
+                            <span class="channels-section-label" id="channel-owned-hub-label">Hosting</span>
+                        </div>
+                        <div class="channel-owned-hub-card" id="channel-owned-hub-card" data-tone="offline">
+                            <button class="channel-owned-hub-open" id="channel-owned-hub-open" type="button">
+                                <span class="channel-owned-hub-icon" aria-hidden="true">
+                                    <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><path d="M8.7 8.7a4.7 4.7 0 0 0 0 6.6M15.3 15.3a4.7 4.7 0 0 0 0-6.6"/><path d="M5.3 5.3a9.5 9.5 0 0 0 0 13.4M18.7 18.7a9.5 9.5 0 0 0 0-13.4"/></svg>
+                                </span>
+                                <span class="channel-owned-hub-copy">
+                                    <strong id="channel-owned-hub-name">Your hub</strong>
+                                    <span class="channel-owned-hub-meta"><i aria-hidden="true"></i><span id="channel-owned-hub-status">Not hosting</span></span>
+                                </span>
+                            </button>
+                            <button class="channel-owned-hub-manage" id="channel-owned-hub-manage" type="button" title="Manage your hub" aria-label="Manage your channel hub">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
+                            </button>
+                        </div>
+                    </section>
+
+                    <div class="channels-list-toolbar">
+                        <span class="channels-section-label" id="channels-list-label">Available hubs</span>
+                        <button class="nr-btn nr-btn-ghost nr-btn-sm channels-text-btn" id="channels-join-btn" type="button" aria-label="Join a channel" hidden>Join</button>
+                    </div>
+                    <div class="channels-list" id="channels-list" aria-live="polite">
+                        <div class="channels-list-empty">
+                            <span>No channel hubs yet</span>
+                            <button class="nr-btn nr-btn-sm" type="button" data-channel-action="connect">Connect to a hub</button>
+                        </div>
+                    </div>
+
+                </aside>
+
+                <main class="channel-room-pane" id="channel-room-pane">
+                    <header class="channel-room-header" id="channel-room-header" hidden>
+                        <button class="mobile-back-btn" id="channel-room-back-btn" type="button" aria-label="Back to channels">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                        </button>
+                        <div class="channel-room-heading">
+                            <div class="channel-room-title-line">
+                                <h3 id="channel-room-title">Channel</h3>
+                                <span class="channel-room-phase" id="channel-room-phase">Joining</span>
+                            </div>
+                            <span id="channel-room-meta">Waiting for hub</span>
+                        </div>
+                        <div class="channel-room-actions">
+                            <button class="nr-btn nr-btn-ghost channels-icon-btn" id="channel-members-toggle" type="button" title="Members" aria-label="Show channel members">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/></svg>
+                            </button>
+                            <button class="nr-btn nr-btn-ghost channels-icon-btn" id="channel-room-menu-btn" type="button" title="Channel options" aria-label="Channel options">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
+                            </button>
+                        </div>
+                    </header>
+
+                    <div class="channel-transcript" id="channel-transcript" aria-live="polite">
+                        <div class="channel-welcome-state">
+                            <div class="channel-welcome-mark" aria-hidden="true">
+                                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 16.5a6 6 0 0 1 0-9"/><path d="M15.5 7.5a6 6 0 0 1 0 9"/><path d="M5.5 19.5a10 10 0 0 1 0-15"/><path d="M18.5 4.5a10 10 0 0 1 0 15"/><circle cx="12" cy="12" r="1.7" fill="currentColor" stroke="none"/></svg>
+                            </div>
+                            <h3>Join a conversation</h3>
+                            <p>Connect to a trusted hub, then choose a channel.</p>
+                            <button class="nr-btn nr-btn-primary" type="button" data-channel-action="connect">Find a hub</button>
+                        </div>
+                    </div>
+
+                    <div class="channel-compose message-composer" id="channel-compose" hidden>
+                        <textarea id="channel-message-input" class="nr-input message-composer-input" rows="1" placeholder="Message..." aria-label="Channel message" title="Enter to send, Shift+Enter for a new line"></textarea>
+                        <span class="channel-char-count" id="channel-char-count" aria-live="polite" hidden></span>
+                        <button class="channel-send-btn message-send-btn" id="channel-send-btn" type="button" aria-label="Send channel message">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+                        </button>
+                    </div>
+                </main>
+
+                <button class="channel-members-scrim" id="channel-members-scrim" type="button" aria-label="Close channel members"></button>
+                <aside class="channel-members-pane" id="channel-members-pane" aria-label="Channel members">
+                    <div class="channel-members-header">
+                        <button class="channel-members-back" id="channel-members-back" type="button" aria-label="Back to people here" hidden>
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+                            <span>People</span>
+                        </button>
+                        <div class="channel-members-heading">
+                            <span class="channel-members-label-row">
+                                <span class="channels-section-label" id="channel-members-label">People here</span>
+                                <button class="channel-members-info" id="channel-members-info" type="button" aria-label="About channel visibility" aria-expanded="false" data-tooltip="Visible people are reported by the hub and may be incomplete. Seen here remembers recent activity and peers already known to this device." hidden>
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><line x1="12" y1="11" x2="12" y2="16"></line><circle cx="12" cy="8" r="0.7" fill="currentColor" stroke="none"></circle></svg>
+                                </button>
+                            </span>
+                            <strong id="channel-members-count">0 visible</strong>
+                        </div>
+                        <button class="nr-btn nr-btn-ghost channels-icon-btn channel-members-close" id="channel-members-close" type="button" aria-label="Close member list">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                        </button>
+                    </div>
+                    <div class="channel-members-list" id="channel-members-list"></div>
+                </aside>
             </div>
         </div>
 
@@ -550,11 +709,11 @@
                             New
                         </button>
                     </div>
-                    <div class="games-sidebar-tabs">
-                        <button class="games-tab active" data-filter="all">All</button>
-                        <button class="games-tab" data-filter="active">Active</button>
-                        <button class="games-tab" data-filter="pending">Pending</button>
-                        <button class="games-tab" data-filter="completed">Completed</button>
+                    <div class="games-sidebar-tabs section-subtabs" aria-label="Filter games">
+                        <button class="games-tab section-subtab-btn active" type="button" data-filter="all" aria-pressed="true">All</button>
+                        <button class="games-tab section-subtab-btn" type="button" data-filter="active" aria-pressed="false">Active</button>
+                        <button class="games-tab section-subtab-btn" type="button" data-filter="pending" aria-pressed="false">Pending</button>
+                        <button class="games-tab section-subtab-btn" type="button" data-filter="completed" aria-pressed="false">Completed</button>
                     </div>
                     <div class="games-session-list" id="games-session-list">
                         <div class="games-empty-sidebar">No games yet</div>
@@ -661,9 +820,9 @@
                     </div>
                 </div>
 
-                <div class="network-subtabs" id="network-subtabs">
-                    <button class="network-subtab-btn active" data-subtab="connections">Connections</button>
-                    <button class="network-subtab-btn" data-subtab="activity">Activity</button>
+                <div class="network-subtabs section-subtabs" id="network-subtabs" role="tablist" aria-label="Network details">
+                    <button class="network-subtab-btn section-subtab-btn active" type="button" role="tab" aria-selected="true" data-subtab="connections">Connections</button>
+                    <button class="network-subtab-btn section-subtab-btn" type="button" role="tab" aria-selected="false" data-subtab="activity">Activity</button>
                 </div>
 
                 <div class="network-main">
@@ -741,9 +900,18 @@
                         </div>
 
                         <div class="activity-header">
-                            <span class="activity-title">Network Activity</span>
+                            <div class="activity-heading">
+                                <div class="activity-title-row">
+                                    <span class="activity-title">Activity</span>
+                                    <span class="activity-status" id="activity-status" data-state="off" hidden>
+                                        <span id="activity-status-label"></span>
+                                    </span>
+                                </div>
+                                <span class="activity-subtitle">Network, messages, channels and calls</span>
+                            </div>
                             <div class="activity-controls">
-                                <button class="nr-btn nr-btn-xs" id="activity-clear-btn" style="display:none;">Clear</button>
+                                <button class="nr-btn nr-btn-xs nr-btn-ghost" id="activity-capture-btn" style="display:none;">Stop</button>
+                                <button class="nr-btn nr-btn-xs nr-btn-ghost" id="activity-clear-btn" style="display:none;">Clear</button>
                             </div>
                         </div>
 
@@ -751,26 +919,31 @@
                             <svg class="activity-privacy-icon" viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5">
                                 <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
                             </svg>
-                            <span class="activity-privacy-label">Privacy mode is active</span>
-                            <span class="activity-privacy-desc">No activity is being collected or saved. Enable for this session to see network events in real time.</span>
-                            <button class="nr-btn nr-btn-sm" id="activity-enable-btn">Enable For This Session</button>
+                            <span class="activity-privacy-label">Activity is off</span>
+                            <span class="activity-privacy-desc">Start a private, on-device view of what Ratspeak is doing.</span>
+                            <button class="nr-btn nr-btn-sm" id="activity-enable-btn">Start Activity</button>
                         </div>
 
                         <div class="activity-active" id="activity-active" style="display:none;">
                             <div class="activity-toolbar">
-                                <div class="activity-level-select" id="activity-level-select">
-                                    <button class="activity-level-btn" data-level="essential">Essential</button>
-                                    <button class="activity-level-btn active" data-level="standard">Standard</button>
-                                    <button class="activity-level-btn" data-level="detailed">Detailed</button>
-                                </div>
-                                <label class="prop-toggle activity-toggle">
-                                    <input type="checkbox" id="activity-enabled-toggle" checked>
-                                    <span class="prop-slider"></span>
+                                <label class="activity-search">
+                                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+                                        <circle cx="11" cy="11" r="7"/>
+                                        <line x1="16.5" y1="16.5" x2="21" y2="21"/>
+                                    </svg>
+                                    <input id="activity-search-input" type="search" placeholder="Search activity" aria-label="Search activity" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
                                 </label>
+                                <div class="activity-profile-select" id="activity-profile-select" aria-label="Capture detail">
+                                    <button class="activity-profile-btn active" data-profile="normal" aria-pressed="true">Normal</button>
+                                    <button class="activity-profile-btn" data-profile="trace" aria-pressed="false">Trace</button>
+                                </div>
                             </div>
-                            <div class="activity-filters" id="activity-filters"></div>
-                            <div class="activity-feed" id="activity-feed">
-                                <div class="activity-empty">Listening for network events...</div>
+                            <div class="activity-filter-bar">
+                                <div class="activity-filters" id="activity-filters" aria-label="Filter activity"></div>
+                                <span class="activity-result-count" id="activity-result-count"></span>
+                            </div>
+                            <div class="activity-feed" id="activity-feed" role="log" aria-live="polite">
+                                <div class="activity-empty">Waiting for activity…</div>
                             </div>
                         </div>
                     </div>
@@ -779,7 +952,7 @@
         </div>
 
         <div class="bottom-sheet-overlay" id="identity-modal-overlay"></div>
-        <div class="bottom-sheet" id="identity-modal" role="dialog" aria-labelledby="identity-modal-title">
+        <div class="bottom-sheet" id="identity-modal" role="dialog" aria-modal="true" aria-labelledby="identity-modal-title">
             <div class="bottom-sheet-handle"></div>
             <div class="bottom-sheet-header">
                 <div class="bottom-sheet-title" id="identity-modal-title">Identity</div>
@@ -928,7 +1101,6 @@
             <div class="identity-page">
                 <div class="identity-page-header">
                     <div class="identity-title-block">
-                        <div class="identity-page-kicker">Identity</div>
                         <div class="identity-page-title" id="identity-page-title">Identity Management</div>
                     </div>
                     <div class="identity-toolbar">
@@ -979,13 +1151,17 @@
                                 <span class="settings-nav-label">General</span>
                                 <span class="settings-nav-desc">Theme, vibration, notifications, and blocks</span>
                             </button>
+                            <button class="settings-nav-item" type="button" data-settings-panel="panel-settings-channels" data-settings-title="Channels" data-settings-desc="Hosting and channel preferences.">
+                                <span class="settings-nav-label">Channels</span>
+                                <span class="settings-nav-desc">Hosting and channel preferences</span>
+                            </button>
                             <button class="settings-nav-item" type="button" data-settings-panel="panel-settings-identity" data-settings-title="Identity" data-settings-desc="Active identity, status, backup, and recovery.">
                                 <span class="settings-nav-label">Identity</span>
                                 <span class="settings-nav-desc">Active identity, status, backup, and recovery</span>
                             </button>
-                            <button class="settings-nav-item" type="button" data-settings-panel="panel-settings-privacy" data-settings-title="Privacy" data-settings-desc="Privacy related preferences">
+                            <button class="settings-nav-item" type="button" data-settings-panel="panel-settings-privacy" data-settings-title="Privacy" data-settings-desc="Activity identity protection and presence sharing.">
                                 <span class="settings-nav-label">Privacy</span>
-                                <span class="settings-nav-desc">Privacy related preferences</span>
+                                <span class="settings-nav-desc">Activity identity protection and presence sharing</span>
                             </button>
                             <button class="settings-nav-item" type="button" data-settings-panel="panel-settings-network" data-settings-title="Network" data-settings-desc="Transport behavior and announce cadence.">
                                 <span class="settings-nav-label">Network</span>
@@ -1020,37 +1196,87 @@
                                 <span>Settings</span>
                             </button>
                             <div class="settings-mobile-detail-copy">
-                                <span class="settings-mobile-detail-eyebrow">Section</span>
                                 <h2 id="settings-mobile-detail-title">General</h2>
                             </div>
                         </div>
                         <div class="settings-detail-header">
                             <div>
-                                <span class="settings-detail-eyebrow">Ratspeak</span>
                                 <h2 id="settings-detail-title">General</h2>
                             </div>
                             <p id="settings-detail-desc">Theme, haptics, and app preferences.</p>
                         </div>
                         <div class="settings-page-inner settings-detail-panels">
                             <div class="panel settings-panel settings-panel-selected" id="panel-settings-general">
-                        <div class="panel-header">General</div>
                         <div class="panel-body">
-                            <div class="settings-row">
+                            <div class="settings-row settings-theme-family-row">
                                 <div class="settings-row-info">
                                     <span class="settings-row-label">Theme</span>
-                                    <span class="settings-row-desc">Choose light, dark, or match your system</span>
+                                    <span class="settings-row-desc" id="settings-theme-family-desc">Choose a color system for every part of Ratspeak.</span>
                                 </div>
-                                <div class="theme-toggle" id="theme-toggle">
-                                    <button class="theme-toggle-btn" data-theme="light" aria-label="Light theme">
+                                <fieldset class="theme-family-picker" id="theme-family-picker" aria-describedby="settings-theme-family-desc">
+                                    <legend class="theme-family-legend">Theme family</legend>
+                                    <div class="theme-family-grid" id="theme-family-grid"></div>
+                                </fieldset>
+                            </div>
+                            <div class="settings-row settings-theme-mode-row">
+                                <div class="settings-row-info">
+                                    <span class="settings-row-label">Color mode</span>
+                                    <span class="settings-row-desc">Choose light, dark, or match your system.</span>
+                                </div>
+                                <div class="theme-toggle" id="theme-toggle" role="group" aria-label="Color mode">
+                                    <button class="theme-toggle-btn" type="button" data-theme="light" aria-label="Use light mode" title="Light">
                                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
                                     </button>
-                                    <button class="theme-toggle-btn" data-theme="auto" aria-label="System theme">
+                                    <button class="theme-toggle-btn" type="button" data-theme="auto" aria-label="Match system color mode" title="System">
                                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
                                     </button>
-                                    <button class="theme-toggle-btn" data-theme="dark" aria-label="Dark theme">
+                                    <button class="theme-toggle-btn" type="button" data-theme="dark" aria-label="Use dark mode" title="Dark">
                                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
                                     </button>
                                 </div>
+                            </div>
+                            <div class="settings-row settings-text-scale-row">
+                                <div class="settings-row-info">
+                                    <span class="settings-row-label" id="settings-text-scale-label">Text size</span>
+                                    <span class="settings-row-desc" id="settings-text-scale-desc">Choose a comfortable reading size without enlarging controls or touch targets.</span>
+                                </div>
+                                <fieldset class="settings-type-presets" aria-labelledby="settings-text-scale-label" aria-describedby="settings-text-scale-desc">
+                                    <label class="settings-type-preset" data-scale="100">
+                                        <input type="radio" name="settings-text-scale" value="100" checked>
+                                        <span class="settings-type-preset-card">
+                                            <span class="settings-type-preset-sample" aria-hidden="true">Aa</span>
+                                            <span class="settings-type-preset-value">100%</span>
+                                        </span>
+                                    </label>
+                                    <label class="settings-type-preset" data-scale="110">
+                                        <input type="radio" name="settings-text-scale" value="110">
+                                        <span class="settings-type-preset-card">
+                                            <span class="settings-type-preset-sample" aria-hidden="true">Aa</span>
+                                            <span class="settings-type-preset-value">110%</span>
+                                        </span>
+                                    </label>
+                                    <label class="settings-type-preset" data-scale="120">
+                                        <input type="radio" name="settings-text-scale" value="120">
+                                        <span class="settings-type-preset-card">
+                                            <span class="settings-type-preset-sample" aria-hidden="true">Aa</span>
+                                            <span class="settings-type-preset-value">120%</span>
+                                        </span>
+                                    </label>
+                                    <label class="settings-type-preset" data-scale="130">
+                                        <input type="radio" name="settings-text-scale" value="130">
+                                        <span class="settings-type-preset-card">
+                                            <span class="settings-type-preset-sample" aria-hidden="true">Aa</span>
+                                            <span class="settings-type-preset-value">130%</span>
+                                        </span>
+                                    </label>
+                                    <label class="settings-type-preset" data-scale="140">
+                                        <input type="radio" name="settings-text-scale" value="140">
+                                        <span class="settings-type-preset-card">
+                                            <span class="settings-type-preset-sample" aria-hidden="true">Aa</span>
+                                            <span class="settings-type-preset-value">140%</span>
+                                        </span>
+                                    </label>
+                                </fieldset>
                             </div>
                             <div class="settings-row">
                                 <div class="settings-row-info">
@@ -1064,13 +1290,47 @@
                             </div>
                             <div class="settings-row" id="settings-row-notifications" style="display:none;">
                                 <div class="settings-row-info">
-                                    <span class="settings-row-label">Desktop Notifications</span>
+                                    <span class="settings-row-label">Notifications</span>
                                     <span class="settings-row-desc">Show a system notification when a new message arrives while Ratspeak is in the background</span>
                                 </div>
-                                <label class="prop-toggle" aria-label="Desktop Notifications">
+                                <button class="selector-badge selector-badge-no-caret" id="settings-notification-action" type="button" style="display:none;">Open Settings</button>
+                                <label class="prop-toggle" aria-label="Notifications">
                                     <input type="checkbox" id="desktop-notifications-toggle" checked>
                                     <span class="prop-slider"></span>
                                 </label>
+                            </div>
+                            <div class="settings-row" id="settings-row-keep-connected" style="display:none;">
+                                <div class="settings-row-info">
+                                    <span class="settings-row-label">Keep Ratspeak connected</span>
+                                    <span class="settings-row-desc" id="settings-keep-connected-desc">Android may pause background radio and message delivery.</span>
+                                </div>
+                                <button class="selector-badge selector-badge-no-caret" id="settings-keep-connected-action" type="button" aria-describedby="settings-keep-connected-desc">Review</button>
+                            </div>
+                            <div class="settings-row">
+                                <div class="settings-row-info">
+                                    <span class="settings-row-label">Limit incoming messages to 1 MB</span>
+                                    <span class="settings-row-desc">Reject larger messages and attachments.</span>
+                                </div>
+                                <label class="prop-toggle" aria-label="Limit incoming messages to 1 MB">
+                                    <input type="checkbox" id="lxmf-limit-1mb-toggle" checked>
+                                    <span class="prop-slider"></span>
+                                </label>
+                            </div>
+                            <div class="settings-row">
+                                <div class="settings-row-info">
+                                    <span class="settings-row-label">Hide known spam peers</span>
+                                    <span class="settings-row-desc" id="settings-hide-known-spam-peers-desc">Hide repeated bridge-style IDs unless you have saved or messaged the peer.</span>
+                                </div>
+                                <div class="settings-radio-group" role="radiogroup" aria-label="Hide known spam peers" aria-describedby="settings-hide-known-spam-peers-desc">
+                                    <label class="settings-radio-option">
+                                        <input type="radio" name="settings-hide-known-spam-peers" id="settings-hide-known-spam-peers-off" value="off">
+                                        <span>OFF</span>
+                                    </label>
+                                    <label class="settings-radio-option">
+                                        <input type="radio" name="settings-hide-known-spam-peers" id="settings-hide-known-spam-peers-on" value="on" checked>
+                                        <span>ON</span>
+                                    </label>
+                                </div>
                             </div>
                             <div class="settings-row" style="border-bottom:none;">
                                 <div class="settings-row-info">
@@ -1082,8 +1342,28 @@
                         </div>
                     </div>
 
+                            <div class="panel settings-panel" id="panel-settings-channels">
+                        <div class="panel-body">
+                            <div class="settings-row">
+                                <div class="settings-row-info">
+                                    <span class="settings-row-label">Channel hosting</span>
+                                    <span class="settings-row-desc" id="settings-channel-hosting-desc" aria-live="polite">Show hub controls in Channels and allow this device to host.</span>
+                                </div>
+                                <div class="settings-radio-group" role="radiogroup" aria-label="Channel hosting">
+                                    <label class="settings-radio-option">
+                                        <input type="radio" name="settings-channel-hosting" id="settings-channel-hosting-off" value="off" checked>
+                                        <span>OFF</span>
+                                    </label>
+                                    <label class="settings-radio-option">
+                                        <input type="radio" name="settings-channel-hosting" id="settings-channel-hosting-on" value="on">
+                                        <span>ON</span>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                             <div class="panel settings-panel" id="panel-settings-identity">
-                        <div class="panel-header">Identity</div>
                         <div class="panel-body">
                             <div class="settings-row">
                                 <div class="settings-row-info">
@@ -1097,10 +1377,7 @@
                                     <span class="settings-row-label">Status</span>
                                     <span class="settings-row-desc" id="settings-identity-status-desc">Not set.</span>
                                 </div>
-                                <div class="settings-row-actions">
-                                    <button class="selector-badge selector-badge-no-caret" id="settings-edit-status-btn">Edit</button>
-                                    <button class="selector-badge selector-badge-no-caret" id="settings-clear-status-btn" disabled>Clear</button>
-                                </div>
+                                <button class="selector-badge selector-badge-no-caret" id="settings-status-action-btn">Set</button>
                             </div>
                             <div class="settings-row">
                                 <div class="settings-row-info">
@@ -1119,16 +1396,31 @@
                             <div class="settings-row" id="hw-lock-row" style="display:none;border-bottom:none;">
                                 <div class="settings-row-info">
                                     <span class="settings-row-label">Hardware Key Auto-Lock</span>
-                                    <span class="settings-row-desc">Lock a YubiKey identity after inactivity; PIN required to resume. Off relies on lock-on-quit. Applies on next unlock.</span>
+                                    <span class="settings-row-desc">Lock a YubiKey identity after inactivity; PIN required to resume. When disabled, it locks only when you quit. Applies on next unlock.</span>
                                 </div>
-                                <button class="selector-badge" id="hw-lock-timeout-select">Off</button>
+                                <button class="selector-badge settings-state-value" id="hw-lock-timeout-select">OFF</button>
                             </div>
                         </div>
                     </div>
 
                             <div class="panel settings-panel" id="panel-settings-privacy">
-                        <div class="panel-header">Privacy</div>
                         <div class="panel-body">
+                            <div class="settings-row">
+                                <div class="settings-row-info">
+                                    <span class="settings-row-label">Protect Activity identities</span>
+                                    <span class="settings-row-desc" id="settings-activity-identity-protection-desc" aria-live="polite">Hide peer names and addresses until you reveal an Activity event.</span>
+                                </div>
+                                <div class="settings-radio-group" role="radiogroup" aria-label="Protect Activity identities">
+                                    <label class="settings-radio-option">
+                                        <input type="radio" name="settings-activity-identity-protection" id="settings-activity-identity-protection-off" value="off">
+                                        <span>OFF</span>
+                                    </label>
+                                    <label class="settings-radio-option">
+                                        <input type="radio" name="settings-activity-identity-protection" id="settings-activity-identity-protection-on" value="on" checked>
+                                        <span>ON</span>
+                                    </label>
+                                </div>
+                            </div>
                             <div class="settings-row" style="border-bottom:none;">
                                 <div class="settings-row-info">
                                     <span class="settings-row-label">Announce Ratspeak usage</span>
@@ -1143,14 +1435,13 @@
                     </div>
 
                             <div class="panel settings-panel" id="panel-settings-network">
-                        <div class="panel-header">Network</div>
                         <div class="panel-body">
                             <div class="settings-row">
                                 <div class="settings-row-info">
                                     <span class="settings-row-label">Transport Mode</span>
                                     <span class="settings-row-desc">Relay packets for other nodes on the network</span>
                                 </div>
-                                <button class="selector-badge" id="transport-mode-select">OFF</button>
+                                <button class="selector-badge settings-state-value" id="transport-mode-select">OFF</button>
                             </div>
                             <div class="settings-row">
                                 <div class="settings-row-info">
@@ -1163,10 +1454,6 @@
                     </div>
 
                             <div class="panel settings-panel" id="panel-settings-offline-inbox">
-                        <div class="panel-header">
-                            Offline Inbox
-                            <span class="panel-header-dot" id="settings-relay-dot"></span>
-                        </div>
                         <div class="panel-body">
                             <div class="settings-row" style="border-bottom:none;">
                                 <div class="settings-row-info">
@@ -1180,22 +1467,20 @@
                     </div>
 
                             <div class="panel settings-panel" id="panel-settings-system">
-                        <div class="panel-header">System</div>
                         <div class="panel-body system-panel-body">
-                            <div class="settings-panel-section-title">System</div>
                             <div class="settings-row">
                                 <div class="settings-row-info">
                                     <span class="settings-row-label">Developer Mode</span>
-                                    <span class="settings-row-desc">Show advanced developer settings when available.</span>
+                                    <span class="settings-row-desc">Show advanced interface controls and developer settings when available.</span>
                                 </div>
                                 <div class="settings-radio-group" role="radiogroup" aria-label="Developer Mode">
                                     <label class="settings-radio-option">
                                         <input type="radio" name="settings-developer-mode" id="settings-developer-mode-off" value="off" checked>
-                                        <span>Off</span>
+                                        <span>OFF</span>
                                     </label>
                                     <label class="settings-radio-option">
                                         <input type="radio" name="settings-developer-mode" id="settings-developer-mode-on" value="on">
-                                        <span>On</span>
+                                        <span>ON</span>
                                     </label>
                                 </div>
                             </div>
@@ -1207,15 +1492,15 @@
                                 <div class="settings-radio-group" role="radiogroup" aria-label="Window Decorations">
                                     <label class="settings-radio-option">
                                         <input type="radio" name="settings-window-decorations" id="settings-window-decorations-auto" value="auto" checked>
-                                        <span>Auto</span>
+                                        <span>AUTO</span>
                                     </label>
                                     <label class="settings-radio-option">
                                         <input type="radio" name="settings-window-decorations" id="settings-window-decorations-on" value="on">
-                                        <span>On</span>
+                                        <span>ON</span>
                                     </label>
                                     <label class="settings-radio-option">
                                         <input type="radio" name="settings-window-decorations" id="settings-window-decorations-off" value="off">
-                                        <span>Off</span>
+                                        <span>OFF</span>
                                     </label>
                                 </div>
                             </div>
@@ -1307,7 +1592,7 @@
 </div>
 
 <div class="bottom-sheet-overlay" id="node-modal-overlay"></div>
-<div class="bottom-sheet" id="node-modal" role="dialog" aria-labelledby="modal-title">
+<div class="bottom-sheet" id="node-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
     <div class="bottom-sheet-handle"></div>
     <div class="bottom-sheet-header">
         <div class="bottom-sheet-title" id="modal-title">Hub Info</div>
@@ -1355,7 +1640,7 @@
 </div>
 
 <div class="bottom-sheet-overlay" id="connect-modal-overlay"></div>
-<div class="bottom-sheet connect-sheet" id="connect-modal">
+<div class="bottom-sheet connect-sheet" id="connect-modal" role="dialog" aria-modal="true" aria-label="Connect to network">
     <div class="bottom-sheet-handle"></div>
     <div class="bottom-sheet-header">
         <div class="bottom-sheet-title">Connect to Network</div>
@@ -1420,7 +1705,7 @@
 </div>
 
 <div class="bottom-sheet-overlay" id="host-modal-overlay"></div>
-<div class="bottom-sheet" id="host-modal">
+<div class="bottom-sheet" id="host-modal" role="dialog" aria-modal="true" aria-label="Host network">
     <div class="bottom-sheet-handle"></div>
     <div class="bottom-sheet-header">
         <div class="bottom-sheet-title">Host Network</div>
@@ -1464,7 +1749,7 @@
 </div>
 
 <div class="bottom-sheet-overlay" id="backbone-host-modal-overlay"></div>
-<div class="bottom-sheet" id="backbone-host-modal">
+<div class="bottom-sheet" id="backbone-host-modal" role="dialog" aria-modal="true" aria-label="Host Backbone server">
     <div class="bottom-sheet-handle"></div>
     <div class="bottom-sheet-header">
         <div class="bottom-sheet-title">Host Backbone Server</div>
@@ -1508,7 +1793,7 @@
 </div>
 
 <div class="bottom-sheet-overlay" id="rnode-modal-overlay"></div>
-<div class="bottom-sheet" id="rnode-modal" role="dialog" aria-labelledby="rnode-modal-title">
+<div class="bottom-sheet" id="rnode-modal" role="dialog" aria-modal="true" aria-labelledby="rnode-modal-title">
     <div class="bottom-sheet-handle"></div>
     <div class="bottom-sheet-header">
         <div class="bottom-sheet-title" id="rnode-modal-title">Add LoRa Device</div>
@@ -1587,15 +1872,15 @@
                     <span class="inline-hint-sm" id="rnode-preset-hint"></span>
                 </div>
                 <div class="modal-field" id="rnode-mode-field" style="display:none;">
-                    <label>Interface Mode</label>
-                    <select id="rnode-interface-mode" class="nr-select">
+                    <label for="rnode-interface-mode">Interface Mode</label>
+                    <select id="rnode-interface-mode" class="nr-select" aria-describedby="rnode-interface-mode-hint">
                         <option value="full">Full</option>
                         <option value="gateway">Gateway</option>
                         <option value="access_point">Access Point (AP)</option>
                         <option value="boundary">Boundary</option>
-                        <option value="roaming">Roaming</option>
+                        <option value="roaming" selected>Roaming (recommended)</option>
                     </select>
-                    <span class="inline-hint-sm">Mode affects routing and announce propagation.</span>
+                    <span class="inline-hint-sm" id="rnode-interface-mode-hint">Best for mobile radios. Choose another mode only when this RNode has a fixed routing role.</span>
                 </div>
 
                 <details id="rnode-advanced" class="rnode-advanced-details">
@@ -1679,37 +1964,43 @@
 <!-- Synchronous load order matters: state/constants/setup/nav before any caller
      of their module-level functions; tauri_events.js last (wires everything above).
      Reordering breaks fresh boots silently. -->
-<script src="/static/js/state.js"></script>
-<script src="/static/js/constants.js"></script>
-<script src="/static/js/no_pinch.js"></script>
-<script src="/static/js/setup.js"></script>
-<script src="/static/js/nav.js"></script>
-<script src="/static/js/gestures.js"></script>
-<script src="/static/js/view_stack.js"></script>
+<script src="/static/js/state.js?v=ui-20260804"></script>
+<script src="/static/js/constants.js?v=ui-20260804"></script>
+<script src="/static/js/setup.js?v=ui-20260804"></script>
+<script src="/static/js/nav.js?v=ui-20260804"></script>
+<script src="/static/js/gestures.js?v=ui-20260804"></script>
+<script src="/static/js/view_stack.js?v=ui-20260804"></script>
 
-<script src="/static/js/peers_cache.js"></script>
-<script src="/static/js/connections.js"></script>
-<script src="/static/js/peers.js"></script>
-<script src="/static/js/toasts.js"></script>
-<script src="/static/js/dialogs.js"></script>
-<script src="/static/js/action_popover.js"></script>
-<script src="/static/js/ui_shared.js"></script>
-<script src="/static/js/events.js"></script>
-<script src="/static/js/activity.js"></script>
-<script src="/static/js/health.js"></script>
-<script src="/static/js/modals.js"></script>
-<script src="/static/js/emoji_data.js"></script>
-<script src="/static/js/emoji_picker.js"></script>
-<script src="/static/js/voice_ringtones.js"></script>
+<script src="/static/js/peers_cache.js?v=ui-20260804"></script>
+<script src="/static/js/connections.js?v=ui-20260804"></script>
+<script src="/static/js/peers.js?v=ui-20260804"></script>
+<script src="/static/js/toasts.js?v=ui-20260804"></script>
+<script src="/static/js/dialogs.js?v=ui-20260804"></script>
+<script src="/static/js/legal_documents.js?v=ui-20260804"></script>
+<script src="/static/js/action_popover.js?v=ui-20260804"></script>
+<script src="/static/js/ui_shared.js?v=ui-20260804"></script>
+<script src="/static/js/events.js?v=ui-20260804"></script>
+<script src="/static/js/activity.js?v=ui-20260804"></script>
+<script src="/static/js/health.js?v=ui-20260804"></script>
+<script src="/static/js/modals.js?v=ui-20260804"></script>
+<script src="/static/js/emoji_data.js?v=ui-20260804"></script>
+<script src="/static/js/emoji_picker.js?v=ui-20260804"></script>
+<script src="/static/js/voice_ringtones.js?v=ui-20260804"></script>
 <script src="/static/js/vendor/jsQR.js"></script>
-<script src="/static/js/contact_card.js"></script>
-<script src="/static/js/lxmf.js"></script>
-<script src="/static/js/propagation.js"></script>
-<script src="/static/js/settings.js"></script>
-<script src="/static/js/identity.js"></script>
-<script src="/static/js/confetti.js"></script>
-<script src="/static/js/games_tab.js"></script>
-<script src="/static/js/tauri_events.js"></script>
-<script src="/static/js/init_dom_handlers.js"></script>
+<script src="/static/js/contact_card.js?v=ui-20260804"></script>
+<script src="/static/js/lxmf.js?v=ui-20260804"></script>
+<script src="/static/js/voice_memos.js?v=ui-20260804"></script>
+<script src="/static/js/channels.js?v=ui-20260804"></script>
+<script src="/static/js/channel_hub.js?v=ui-20260804"></script>
+<script src="/static/js/propagation.js?v=ui-20260804"></script>
+<script src="/static/js/settings.js?v=ui-20260804"></script>
+<script src="/static/js/identity.js?v=ui-20260804"></script>
+<script src="/static/js/confetti.js?v=ui-20260804"></script>
+<script src="/static/js/game_registry.js?v=ui-20260804"></script>
+<script src="/static/js/four_in_a_row_view.js?v=ui-20260804"></script>
+<script src="/static/js/games_tab.js?v=ui-20260804"></script>
+<script src="/static/js/native_channel_share.js?v=ui-20260804"></script>
+<script src="/static/js/tauri_events.js?v=ui-20260804"></script>
+<script src="/static/js/init_dom_handlers.js?v=ui-20260804"></script>
 </body>
 </html>

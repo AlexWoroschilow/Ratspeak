@@ -5,11 +5,26 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  RATSPEAK_RSRETICULUM_REF: a1b78564e08988c11f8ecac80c3ea6d596b22cab
+  RATSPEAK_RSLXMF_REF: 681c0f5961acce637183efc9a4047bf25ead56bf
+  RATSPEAK_RSLXST_REF: 47827c9e2adb1fbdff84b12e687581f9c8991344
+  RATSPEAK_LRGP_REF: 58909b23b1ea0657e7668274e9c3bee4a511e353
 
 jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
         with:
@@ -17,24 +32,29 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: ${{ github.repository_owner }}/rsReticulum
+          ref: ${{ env.RATSPEAK_RSRETICULUM_REF }}
           path: rsReticulum
       - uses: actions/checkout@v5
         with:
           repository: ${{ github.repository_owner }}/rsLXMF
+          ref: ${{ env.RATSPEAK_RSLXMF_REF }}
           path: rsLXMF
       - uses: actions/checkout@v5
         with:
           repository: ${{ github.repository_owner }}/rsLXST
+          ref: ${{ env.RATSPEAK_RSLXST_REF }}
           path: rsLXST
       - uses: actions/checkout@v5
         with:
           repository: ${{ github.repository_owner }}/lrgp-rs
+          ref: ${{ env.RATSPEAK_LRGP_REF }}
           path: lrgp-rs
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
           workspaces: Ratspeak
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install system deps
         run: |
           sudo apt-get update
@@ -49,15 +69,32 @@ jobs:
             libasound2-dev \
             libdbus-1-dev \
             pkg-config
-      - run: cargo test --workspace
+      - name: Validate shell scripts
+        run: bash -n dashboard/build-css.sh scripts/release/*.sh
+        working-directory: Ratspeak
+      - name: Validate ordinary workflow dependency pins
+        run: bash scripts/ci/check-workflow-dependency-pins.sh
+        working-directory: Ratspeak
+      - name: Build dashboard CSS
+        run: bash dashboard/build-css.sh
+        working-directory: Ratspeak
+      - name: Test Rust workspace
+        run: cargo test --workspace --locked
+        working-directory: Ratspeak
+      - name: Test dashboard behavior
+        run: |
+          for test in dashboard/scripts/test_*.js; do
+            node "$test"
+          done
         working-directory: Ratspeak
       - name: Check Tauri desktop shell
-        run: cargo check --manifest-path src-tauri/Cargo.toml
+        run: cargo check --manifest-path src-tauri/Cargo.toml --locked
         working-directory: Ratspeak
 
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
         with:
@@ -65,18 +102,22 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: ${{ github.repository_owner }}/rsReticulum
+          ref: ${{ env.RATSPEAK_RSRETICULUM_REF }}
           path: rsReticulum
       - uses: actions/checkout@v5
         with:
           repository: ${{ github.repository_owner }}/rsLXMF
+          ref: ${{ env.RATSPEAK_RSLXMF_REF }}
           path: rsLXMF
       - uses: actions/checkout@v5
         with:
           repository: ${{ github.repository_owner }}/rsLXST
+          ref: ${{ env.RATSPEAK_RSLXST_REF }}
           path: rsLXST
       - uses: actions/checkout@v5
         with:
           repository: ${{ github.repository_owner }}/lrgp-rs
+          ref: ${{ env.RATSPEAK_LRGP_REF }}
           path: lrgp-rs
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -85,6 +126,7 @@ jobs:
         with:
           cache-bin: false
           workspaces: Ratspeak
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install system deps
         run: |
           sudo apt-get update
@@ -101,5 +143,206 @@ jobs:
             pkg-config
       - run: cargo fmt --all -- --check
         working-directory: Ratspeak
-      - run: cargo clippy --workspace -- -D warnings
+      - name: Clippy (workspace, all targets and features)
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
         working-directory: Ratspeak
+      - name: Clippy (Tauri application shell)
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings
+        working-directory: Ratspeak
+
+  msrv:
+    name: Rust 1.85 MSRV
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: Ratspeak
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/rsReticulum
+          ref: ${{ env.RATSPEAK_RSRETICULUM_REF }}
+          path: rsReticulum
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/rsLXMF
+          ref: ${{ env.RATSPEAK_RSLXMF_REF }}
+          path: rsLXMF
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/rsLXST
+          ref: ${{ env.RATSPEAK_RSLXST_REF }}
+          path: rsLXST
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/lrgp-rs
+          ref: ${{ env.RATSPEAK_LRGP_REF }}
+          path: lrgp-rs
+      - uses: dtolnay/rust-toolchain@1.85.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          workspaces: |
+            Ratspeak
+            Ratspeak/src-tauri
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libssl-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libudev-dev \
+            libpcsclite-dev \
+            libasound2-dev \
+            libdbus-1-dev \
+            pkg-config
+      - name: Clippy (workspace, all targets and features)
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+        working-directory: Ratspeak
+      - name: Clippy (Tauri application shell)
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings
+        working-directory: Ratspeak
+
+  platform-check:
+    name: Platform check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: Ratspeak
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/rsReticulum
+          ref: ${{ env.RATSPEAK_RSRETICULUM_REF }}
+          path: rsReticulum
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/rsLXMF
+          ref: ${{ env.RATSPEAK_RSLXMF_REF }}
+          path: rsLXMF
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/rsLXST
+          ref: ${{ env.RATSPEAK_RSLXST_REF }}
+          path: rsLXST
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/lrgp-rs
+          ref: ${{ env.RATSPEAK_LRGP_REF }}
+          path: lrgp-rs
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          workspaces: |
+            Ratspeak
+            Ratspeak/src-tauri
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Check desktop shell
+        run: cargo check --manifest-path Ratspeak/src-tauri/Cargo.toml --locked
+
+  mobile-rust-lint:
+    name: Mobile gate (${{ matrix.target }}, ${{ matrix.toolchain }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: aarch64-linux-android
+            toolchain: stable
+            native_android_lint: true
+          - os: ubuntu-latest
+            target: aarch64-linux-android
+            toolchain: 1.85.0
+            native_android_lint: false
+          - os: macos-latest
+            target: aarch64-apple-ios-sim
+            toolchain: stable
+            native_android_lint: false
+          - os: macos-latest
+            target: aarch64-apple-ios-sim
+            toolchain: 1.85.0
+            native_android_lint: false
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: Ratspeak
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/rsReticulum
+          ref: ${{ env.RATSPEAK_RSRETICULUM_REF }}
+          path: rsReticulum
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/rsLXMF
+          ref: ${{ env.RATSPEAK_RSLXMF_REF }}
+          path: rsLXMF
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/rsLXST
+          ref: ${{ env.RATSPEAK_RSLXST_REF }}
+          path: rsLXST
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/lrgp-rs
+          ref: ${{ env.RATSPEAK_LRGP_REF }}
+          path: lrgp-rs
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          targets: ${{ matrix.target }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          workspaces: Ratspeak/src-tauri
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: nttld/setup-ndk@v1
+        if: matrix.target == 'aarch64-linux-android'
+        id: setup-ndk
+        with:
+          ndk-version: r27d
+          add-to-path: false
+      - uses: actions/setup-java@v5
+        if: matrix.native_android_lint
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+          cache-dependency-path: Ratspeak/src-tauri/gen/android/**/*.gradle*
+      - name: Clippy Android
+        if: matrix.target == 'aarch64-linux-android'
+        working-directory: Ratspeak
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          AR_aarch64_linux_android: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+          CC_aarch64_linux_android: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+          CXX_aarch64_linux_android: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++
+          TAURI_ANDROID_PROJECT_PATH: ${{ github.workspace }}/Ratspeak/src-tauri/gen/android
+          TAURI_ANDROID_PACKAGE_UNESCAPED: org.ratspeak.android
+          WRY_ANDROID_PACKAGE: org.ratspeak.android
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }} --all-targets --all-features --locked -- -D warnings
+      - name: Compile Kotlin and run Android lint
+        if: matrix.native_android_lint
+        working-directory: Ratspeak/src-tauri/gen/android
+        run: |
+          test -s tauri.settings.gradle
+          test -s app/tauri.build.gradle.kts
+          ./gradlew :app:compileArm64DebugKotlin :app:lintArm64Debug --warning-mode all --no-daemon
+      - name: Clippy iOS simulator
+        if: matrix.target == 'aarch64-apple-ios-sim'
+        working-directory: Ratspeak
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }} --all-targets --all-features --locked -- -D warnings

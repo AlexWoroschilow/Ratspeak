@@ -4,6 +4,18 @@ var setupRecoveryMnemonic = '';
 var setupConnectingDotsTimer = null;
 var setupConnectingDotCount = 1;
 
+function requestSetupNotificationPermissionIfEnabled() {
+    if (typeof isTauriMobile !== 'function' || !isTauriMobile()) return;
+    if (typeof rsNotify === 'undefined' || !rsNotify.available()) return;
+    RS.invoke('api_notification_settings').then(function(data) {
+        if (!data || data.enabled !== true) return;
+        rsNotify.setEnabled(true);
+        return rsNotify.permissionState().then(function(state) {
+            if (state === 'prompt') return rsNotify.requestPermission();
+        });
+    }).catch(function() {});
+}
+
 function setSetupBackupLayout(active) {
     document.body.classList.toggle('setup-backup-active', !!active);
 }
@@ -75,6 +87,9 @@ function checkSetupStatus() {
                 document.body.classList.remove('setup-active');
                 setSetupBackupLayout(false);
                 setSetupConnectingDotsActive(false);
+                // Existing installs upgrading to native mobile notifications
+                // get the same one-time, visible OS prompt as new identities.
+                requestSetupNotificationPermissionIfEnabled();
             }
             document.body.classList.remove('checking-setup');
         })
@@ -333,6 +348,7 @@ function resetSetupToStart() {
 
 function completeSetupAfterIdentityImport() {
     showSetupConnectingStep();
+    requestSetupNotificationPermissionIfEnabled();
     // The imported identity is already active when setup has no identity.
     // Restart the core so the dashboard opens on the imported session.
     RS.invoke('api_setup_restart').catch(function() {});
@@ -388,6 +404,7 @@ function completeSetupAfterHardwareIdentity(result, pin) {
 
     RS.invoke('hw_activate_and_unlock', { hash: hash, pin: pin }).then(function(res) {
         if (res && res.ok) {
+            requestSetupNotificationPermissionIfEnabled();
             runConnectingProgress();
             return;
         }
@@ -401,43 +418,10 @@ function completeSetupAfterHardwareIdentity(result, pin) {
 
 window.completeSetupAfterHardwareIdentity = completeSetupAfterHardwareIdentity;
 
-// Mobile tap-toggle for .tooltip-trigger; desktop uses CSS hover/focus.
 function initSetupTooltips() {
-    if (!isMobile()) return;
-    var triggers = document.querySelectorAll('#view-setup .tooltip-trigger');
-    if (!triggers.length) return;
-
-    var backdrop = document.querySelector('.tooltip-backdrop');
-    if (!backdrop) {
-        backdrop = document.createElement('div');
-        backdrop.className = 'tooltip-backdrop';
-        document.body.appendChild(backdrop);
+    if (RS.ui && typeof RS.ui.bindHelpPopovers === 'function') {
+        RS.ui.bindHelpPopovers(document.getElementById('view-setup'));
     }
-
-    var open = null;
-    function close() {
-        if (!open) return;
-        open.classList.remove('open');
-        backdrop.classList.remove('open');
-        open = null;
-    }
-
-    triggers.forEach(function(t) {
-        t.addEventListener('click', function(e) {
-            e.preventDefault();
-            e.stopPropagation();
-            if (open === t) { close(); return; }
-            close();
-            t.classList.add('open');
-            backdrop.classList.add('open');
-            open = t;
-        });
-    });
-
-    backdrop.addEventListener('click', close);
-    document.addEventListener('keydown', function(e) {
-        if (e.key === 'Escape') close();
-    });
 }
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -543,7 +527,7 @@ document.addEventListener('DOMContentLoaded', function() {
         // `hardware` feature + hw_* commands are gated off on mobile.
         // TODO(ratkey-mobile): mobile needs the wrapped-session model (tap to
         // unlock a software session via on-card ECDH) — see HARDWARE_STATUS.md.
-        if ((typeof isMobile === 'function') && isMobile()) {
+        if ((typeof supportsHardwareIdentities === 'function') && !supportsHardwareIdentities()) {
             hardwareKeyBtn.style.display = 'none';
         }
         hardwareKeyBtn.addEventListener('click', function() {
@@ -584,6 +568,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
             RS.invoke('api_setup_complete', { args: { display_name: displayName || '' } })
             .then(function() {
+                requestSetupNotificationPermissionIfEnabled();
                 setSetupStep(3);
                 setSetupBackupLayout(false);
                 setSetupConnectingDotsActive(true);

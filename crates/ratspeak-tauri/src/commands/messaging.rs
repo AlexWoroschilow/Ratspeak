@@ -8,18 +8,203 @@ use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::State;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::commands::shared::remove_stored_file_refs;
 use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::helpers::{active_identity_id, sanitize_text, validate_hex};
 use crate::lxmf::{
-    AttachmentMessageRequest, DeliveryPreference, DeliveryProfile, MessageSendRequest,
-    ReactionSendRequest, ReplyMessageSendRequest,
+    AttachmentMessageRequest, DeliveryPreference, DeliveryProfile, LxmfManager,
+    LxmfSubmissionFailure, MessageSendRequest, ReactionSendRequest, ReplyMessageSendRequest,
 };
-use crate::state::AppState;
+use crate::state::{
+    AppState, AttachmentTransferAdmissionError, AttachmentTransferLease,
+    LxmfClientSendAdmissionError, LxmfClientSendCancellation, LxmfClientSendCancellationProbe,
+    LxmfClientSendGuard, StagedAttachment,
+};
+use ratspeak_runtime::activity::producer;
 
 const MAX_LXMF_MESSAGE_BYTES: usize = rns_protocol::resource::MAX_RESOURCE_SIZE;
+const ATTACHMENT_IPC_CHUNK_BYTES: usize = 256 * 1024;
+const LEGACY_BASE64_ATTACHMENT_MAX_BYTES: usize = 1_000_000;
+const INLINE_IMAGE_MAX_PIXELS: u64 = 16_000_000;
+const INLINE_IMAGE_MAX_DIMENSION: u32 = 8192;
+
+enum LxmfClientSendAttempt<T> {
+    Queued(T),
+    Cancelled,
+    Failed(producer::LxmfSubmissionFailureReason),
+}
+
+fn queue_lxmf_client_send<T>(
+    state: &AppState,
+    cancellation: Option<&LxmfClientSendCancellationProbe>,
+    queue: impl FnOnce(&mut LxmfManager) -> Option<T>,
+) -> LxmfClientSendAttempt<T> {
+    if cancellation.is_some_and(LxmfClientSendCancellationProbe::is_cancelled) {
+        return LxmfClientSendAttempt::Cancelled;
+    }
+    let send_lock_started = std::time::Instant::now();
+    let Ok(mut lxmf) = state.lxmf.lock() else {
+        return LxmfClientSendAttempt::Failed(
+            producer::LxmfSubmissionFailureReason::RouterUnavailable,
+        );
+    };
+    let waited = send_lock_started.elapsed();
+    if waited > std::time::Duration::from_secs(1) {
+        tracing::warn!(
+            waited_ms = waited.as_millis() as u64,
+            "send waited on lxmf manager lock"
+        );
+    }
+    if cancellation.is_some_and(LxmfClientSendCancellationProbe::is_cancelled) {
+        return LxmfClientSendAttempt::Cancelled;
+    }
+    let Some(manager) = lxmf.as_mut() else {
+        return LxmfClientSendAttempt::Failed(
+            producer::LxmfSubmissionFailureReason::RouterUnavailable,
+        );
+    };
+    queue(manager)
+        .map(LxmfClientSendAttempt::Queued)
+        .unwrap_or(LxmfClientSendAttempt::Failed(
+            producer::LxmfSubmissionFailureReason::PreparationFailed,
+        ))
+}
+
+fn normalize_lxmf_client_msg_id(raw: Option<&str>) -> AppResult<Option<String>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let client_msg_id = sanitize_text(raw, 128);
+    let valid = client_msg_id.len() == 36
+        && client_msg_id.starts_with("out_")
+        && validate_hex(&client_msg_id[4..], 32, 32);
+    if !valid {
+        return Err(AppError::bad_request("Invalid client message ID"));
+    }
+    Ok(Some(client_msg_id))
+}
+
+fn begin_lxmf_client_send(
+    state: &Arc<AppState>,
+    client_msg_id: Option<&String>,
+) -> AppResult<Option<LxmfClientSendGuard>> {
+    let Some(client_msg_id) = client_msg_id else {
+        return Ok(None);
+    };
+    state
+        .begin_lxmf_client_send(client_msg_id.clone())
+        .map(Some)
+        .map_err(|error| match error {
+            LxmfClientSendAdmissionError::Duplicate => {
+                AppError::conflict("Message is already being prepared")
+            }
+            LxmfClientSendAdmissionError::Capacity => {
+                AppError::service_unavailable("Too many messages are being prepared")
+            }
+        })
+}
+
+fn emit_prequeue_lxmf_cancellation(state: &AppState, client_msg_id: &str) -> Value {
+    state.emit_to_all(
+        "lxmf_step",
+        json!({
+            "step": "cancelled",
+            "client_msg_id": client_msg_id,
+        }),
+    );
+    json!({
+        "ok": true,
+        "cancelled": true,
+        "client_msg_id": client_msg_id,
+    })
+}
+
+fn cancelled_lxmf_client_send_response(
+    state: &AppState,
+    guard: Option<&LxmfClientSendGuard>,
+) -> Option<Value> {
+    guard
+        .filter(|guard| guard.is_cancelled())
+        .map(|guard| emit_prequeue_lxmf_cancellation(state, guard.client_msg_id()))
+}
+
+fn activity_lxmf_delivery_method(
+    method: lxmf_core::constants::DeliveryMethod,
+) -> producer::LxmfDeliveryMethod {
+    match method {
+        lxmf_core::constants::DeliveryMethod::Direct => producer::LxmfDeliveryMethod::Direct,
+        lxmf_core::constants::DeliveryMethod::Opportunistic => {
+            producer::LxmfDeliveryMethod::Opportunistic
+        }
+        lxmf_core::constants::DeliveryMethod::Paper => producer::LxmfDeliveryMethod::Paper,
+        lxmf_core::constants::DeliveryMethod::Propagated => {
+            producer::LxmfDeliveryMethod::Propagated
+        }
+    }
+}
+
+fn record_lxmf_delivery_queued(
+    state: &AppState,
+    fence: crate::state::ActivityRequestFence,
+    message_id: &str,
+    destination_hash: &str,
+    method: lxmf_core::constants::DeliveryMethod,
+) {
+    state.activity.record_event_fenced(
+        || state.is_current_activity_origin_fence(fence),
+        || {
+            let message = producer::MessageId::from_hex(message_id)?;
+            let destination = producer::DestinationHash::from_hex(destination_hash)?;
+            Ok(producer::lxmf_delivery_queued(
+                producer::LxmfDeliveryQueued {
+                    message,
+                    destination,
+                    method: activity_lxmf_delivery_method(method),
+                },
+            ))
+        },
+    );
+}
+
+fn record_lxmf_submission_failed(
+    state: &AppState,
+    fence: crate::state::ActivityRequestFence,
+    destination_hash: &str,
+    reason: producer::LxmfSubmissionFailureReason,
+) {
+    state.activity.record_event_fenced(
+        || state.is_current_activity_origin_fence(fence),
+        || {
+            let destination = producer::DestinationHash::from_hex(destination_hash)?;
+            Ok(producer::lxmf_submission_failed(
+                producer::LxmfSubmissionFailed {
+                    destination,
+                    reason,
+                },
+            ))
+        },
+    );
+}
+
+fn emit_lxmf_send_error(
+    state: &AppState,
+    client_msg_id: Option<&str>,
+    code: &'static str,
+    message: &'static str,
+) {
+    state.emit_to_all(
+        "lxmf_step",
+        json!({
+            "step": "error",
+            "code": code,
+            "message": message,
+            "client_msg_id": client_msg_id,
+        }),
+    );
+}
 
 fn base64_decoded_len_upper_bound(encoded_len: usize) -> Option<usize> {
     encoded_len.checked_add(3)?.checked_div(4)?.checked_mul(3)
@@ -97,12 +282,12 @@ pub async fn api_conversation(
     });
     match tokio::time::timeout(Duration::from_secs(5), fetch).await {
         Ok(Ok(messages)) => Ok(json!(messages)),
-        Ok(Err(e)) => {
-            tracing::warn!(%dest_hash, ?e, "api_conversation db task failed");
+        Ok(Err(_)) => {
+            tracing::warn!(reason = "db_task_failed", "api_conversation db task failed");
             Err(AppError::internal("Database task failed"))
         }
         Err(_) => {
-            tracing::warn!(%dest_hash, "api_conversation timed out after 5s");
+            tracing::warn!(reason = "timeout", "api_conversation timed out after 5s");
             Err(AppError::service_unavailable(
                 "Database temporarily unavailable",
             ))
@@ -138,8 +323,11 @@ pub async fn api_search_messages(
         db::search_messages(&p, &query_str, &id_for_db, 50)
     })
     .await
-    .unwrap_or_else(|e| {
-        tracing::error!(error = %e, "search_messages db task panicked — returning empty");
+    .unwrap_or_else(|_| {
+        tracing::error!(
+            reason = "task_panicked",
+            "search_messages db task panicked — returning empty"
+        );
         Default::default()
     });
     Ok(json!(results))
@@ -215,8 +403,21 @@ fn destination_identity_known(state: &AppState, dest_hash: &str) -> bool {
         .unwrap_or(false)
 }
 
-async fn maybe_announce_before_user_send(state: &Arc<AppState>, dest_hash: &str) {
-    let _ = crate::maybe_opportunistic_announce_before_user_send(state, dest_hash).await;
+pub(crate) fn schedule_announce_after_user_send_from_origin(
+    state: &Arc<AppState>,
+    dest_hash: &str,
+    activity_fence: crate::state::ActivityRequestFence,
+) {
+    let state = Arc::clone(state);
+    let dest_hash = dest_hash.to_string();
+    tokio::spawn(async move {
+        let _ = crate::maybe_opportunistic_announce_before_user_send_from_origin(
+            &state,
+            &dest_hash,
+            activity_fence,
+        )
+        .await;
+    });
 }
 
 pub(crate) async fn ensure_propagation_ready_for_send(
@@ -226,7 +427,6 @@ pub(crate) async fn ensure_propagation_ready_for_send(
     profile: DeliveryProfile,
     client_msg_id: Option<&str>,
 ) -> AppResult<()> {
-    let identity_id = active_identity_id(state);
     let st = Arc::clone(state);
     let dh = dest_hash.to_string();
     let method = tokio::task::spawn_blocking(move || {
@@ -279,8 +479,6 @@ pub(crate) async fn ensure_propagation_ready_for_send(
         }),
     );
     tracing::warn!(
-        identity = %identity_id,
-        dest = %dest_hash,
         ?readiness,
         "propagation send held until a reachable Offline Inbox is available"
     );
@@ -306,14 +504,19 @@ pub async fn send_lxmf_message(
     let content = sanitize_message_content(&args.content)?;
     let title = sanitize_text(args.title.as_deref().unwrap_or(""), 256);
     let delivery_pref = parse_delivery_preference(args.delivery_method.as_deref());
-    let client_msg_id = args.client_msg_id.clone();
+    let client_msg_id = normalize_lxmf_client_msg_id(args.client_msg_id.as_deref())?;
 
     if !validate_hex(&dest_hash, 16, 64) {
-        state.emit_to_all(
-            "lxmf_step",
-            json!({ "step": "error", "message": "Invalid identity hash" }),
+        emit_lxmf_send_error(
+            &state,
+            client_msg_id.as_deref(),
+            "invalid_destination",
+            "Invalid identity hash",
         );
-        return Err(AppError::bad_request("Invalid identity hash"));
+        return Err(AppError::new(
+            "invalid_destination",
+            "Invalid identity hash",
+        ));
     }
     if content.is_empty() {
         state.emit_to_all(
@@ -323,36 +526,39 @@ pub async fn send_lxmf_message(
         return Err(AppError::bad_request("Empty message"));
     }
     validate_delivery_preference(&state, delivery_pref)?;
+    let state_arc = Arc::clone(&state);
+    let client_send = begin_lxmf_client_send(&state_arc, client_msg_id.as_ref())?;
 
-    resolve_before_send(&state, &dest_hash).await;
-    ensure_propagation_ready_for_send(
+    let activity_fence = state.activity_request_fence();
+    let _ = crate::commands::shared::hydrate_contact_identity_for_send(&state, &dest_hash).await;
+    if let Some(response) = cancelled_lxmf_client_send_response(&state, client_send.as_ref()) {
+        return Ok(response);
+    }
+    let propagation_readiness = ensure_propagation_ready_for_send(
         &state,
         &dest_hash,
         delivery_pref,
         DeliveryProfile::Message,
         client_msg_id.as_deref(),
     )
-    .await?;
-    maybe_announce_before_user_send(&state, &dest_hash).await;
-
+    .await;
+    if let Some(response) = cancelled_lxmf_client_send_response(&state, client_send.as_ref()) {
+        return Ok(response);
+    }
+    propagation_readiness?;
     let identity_id = active_identity_id(&state);
     let st: Arc<AppState> = Arc::clone(&state);
     let dh = dest_hash.clone();
     let ct = content.clone();
     let tt = title.clone();
     let id_c = identity_id.clone();
-    let msg_id = tokio::task::spawn_blocking(move || {
-        let send_lock_started = std::time::Instant::now();
-        if let Ok(mut lxmf) = st.lxmf.lock() {
-            let waited = send_lock_started.elapsed();
-            if waited > std::time::Duration::from_secs(1) {
-                tracing::warn!(
-                    waited_ms = waited.as_millis() as u64,
-                    "send waited on lxmf manager lock"
-                );
-            }
-            lxmf.as_mut().and_then(|mgr| {
-                mgr.send_message_with_preference(MessageSendRequest {
+    let cancellation = client_send
+        .as_ref()
+        .map(LxmfClientSendGuard::cancellation_probe);
+    let send_result = tokio::task::spawn_blocking(move || {
+        queue_lxmf_client_send(&st, cancellation.as_ref(), |manager| {
+            manager
+                .send_message_with_preference_report(MessageSendRequest {
                     dest_hash_hex: &dh,
                     content: &ct,
                     title: &tt,
@@ -361,22 +567,25 @@ pub async fn send_lxmf_message(
                     preference: delivery_pref,
                     profile: DeliveryProfile::Message,
                 })
-            })
-        } else {
-            None
-        }
+                .ok()
+        })
     })
     .await
     .map_err(|_| AppError::internal("send_message task panicked"))?;
 
-    match msg_id {
-        Some(id) => {
-            state.lxmf_notify.notify_one();
-            if let Some(ref cid) = client_msg_id
-                && let Ok(mut map) = state.msg_id_map.lock()
-            {
-                map.insert(id.clone(), cid.clone());
+    match send_result {
+        LxmfClientSendAttempt::Queued(queued) => {
+            let id = queued.message_id;
+            if finalize_lxmf_client_send(&state_arc, client_send.as_ref(), &id).await? {
+                return Ok(json!({
+                    "msg_id": id,
+                    "client_msg_id": client_msg_id,
+                    "cancelled": true,
+                }));
             }
+            schedule_announce_after_user_send_from_origin(&state, &dest_hash, activity_fence);
+            record_lxmf_delivery_queued(&state, activity_fence, &id, &dest_hash, queued.method);
+            state.lxmf_notify.notify_one();
             state.emit_to_all(
                 "lxmf_step",
                 json!({
@@ -386,55 +595,50 @@ pub async fn send_lxmf_message(
                     "client_msg_id": client_msg_id,
                 }),
             );
-            if state
-                .network_log_enabled
-                .load(std::sync::atomic::Ordering::Relaxed)
-            {
-                state.emit_network_event(
-                    "message",
-                    &format!(
-                        "Message queued for {}...",
-                        &dest_hash[..8.min(dest_hash.len())]
-                    ),
-                    &dest_hash,
-                    "standard",
-                );
-            }
             broadcast_conversations(Arc::clone(&state));
             Ok(json!({ "msg_id": id, "client_msg_id": client_msg_id }))
         }
-        None => {
-            state.emit_to_all(
-                "lxmf_step",
-                json!({ "step": "error", "message": "LXMF not initialized" }),
-            );
-            if state
-                .network_log_enabled
-                .load(std::sync::atomic::Ordering::Relaxed)
-            {
-                state.emit_network_event(
-                    "error",
-                    "Message send failed: LXMF not initialized",
-                    "",
-                    "essential",
-                );
-            }
-            Err(AppError::lxmf_not_initialized("LXMF not initialized"))
+        LxmfClientSendAttempt::Cancelled => Ok(emit_prequeue_lxmf_cancellation(
+            &state,
+            client_msg_id.as_deref().unwrap_or_default(),
+        )),
+        LxmfClientSendAttempt::Failed(reason) => {
+            record_lxmf_submission_failed(&state, activity_fence, &dest_hash, reason);
+            let (message, error) = match reason {
+                producer::LxmfSubmissionFailureReason::RouterUnavailable => (
+                    "LXMF not initialized",
+                    AppError::lxmf_not_initialized("LXMF not initialized"),
+                ),
+                producer::LxmfSubmissionFailureReason::PreparationFailed => (
+                    "Message could not be queued",
+                    AppError::internal("Message could not be queued"),
+                ),
+                producer::LxmfSubmissionFailureReason::AttachmentBusy => (
+                    "Another attachment transfer is already active",
+                    AppError::conflict("Another attachment transfer is already active"),
+                ),
+                producer::LxmfSubmissionFailureReason::AttachmentMemoryPressure => (
+                    "Attachment transfers are paused while memory recovers",
+                    AppError::conflict("Attachment transfers are paused while memory recovers"),
+                ),
+                producer::LxmfSubmissionFailureReason::AttachmentTooLarge => (
+                    "Attachment exceeds the configured receive limit",
+                    AppError::bad_request("Attachment exceeds the configured receive limit"),
+                ),
+                producer::LxmfSubmissionFailureReason::AttachmentEnvelopeTooLarge => (
+                    "Attachment and message metadata exceed the protocol resource limit",
+                    AppError::bad_request(
+                        "Attachment and message metadata exceed the protocol resource limit",
+                    ),
+                ),
+                producer::LxmfSubmissionFailureReason::AttachmentStorageFailed => (
+                    "Attachment storage is unavailable",
+                    AppError::internal("Attachment storage is unavailable"),
+                ),
+            };
+            state.emit_to_all("lxmf_step", json!({ "step": "error", "message": message }));
+            Err(error)
         }
-    }
-}
-
-/// Resolve identity+path before send; no-ops if transport not ready.
-async fn resolve_before_send(state: &AppState, dest_hash: &str) {
-    let _ = crate::commands::shared::hydrate_contact_identity_for_send(state, dest_hash).await;
-
-    let tx = state
-        .lxmf
-        .lock()
-        .ok()
-        .and_then(|l| l.as_ref().and_then(|mgr| mgr.router.transport_tx.clone()));
-    if let Some(ref tx) = tx {
-        crate::lxmf::resolve_destination(state, dest_hash, tx).await;
     }
 }
 
@@ -468,9 +672,11 @@ pub async fn send_reaction(
         return Err(AppError::bad_request("Missing message_id or emoji"));
     }
     validate_delivery_preference(&state, delivery_pref)?;
+    let activity_fence = state.activity_request_fence();
 
     if validate_hex(&dest_hash, 16, 64) {
-        resolve_before_send(&state, &dest_hash).await;
+        let _ =
+            crate::commands::shared::hydrate_contact_identity_for_send(&state, &dest_hash).await;
         ensure_propagation_ready_for_send(
             &state,
             &dest_hash,
@@ -479,7 +685,6 @@ pub async fn send_reaction(
             None,
         )
         .await?;
-        maybe_announce_before_user_send(&state, &dest_hash).await;
     }
 
     let identity_id = active_identity_id(&state);
@@ -508,8 +713,7 @@ pub async fn send_reaction(
                     db_pool: &st.db,
                     identity_id: &id_c,
                     preference: delivery_pref,
-                });
-                true
+                })
             } else {
                 false
             }
@@ -520,6 +724,7 @@ pub async fn send_reaction(
     .await
     .unwrap_or(false);
     if sent {
+        schedule_announce_after_user_send_from_origin(&state, &dest_hash, activity_fence);
         state.lxmf_notify.notify_one();
         let mid_for_db = message_id.clone();
         let id_for_db = identity_id.clone();
@@ -575,7 +780,7 @@ pub async fn send_lxmf_reply(
         })
         .unwrap_or_else(|| reply_to_id.clone());
     let delivery_pref = parse_delivery_preference(args.delivery_method.as_deref());
-    let client_msg_id = args.client_msg_id.clone();
+    let client_msg_id = normalize_lxmf_client_msg_id(args.client_msg_id.as_deref())?;
 
     if !validate_hex(&dest_hash, 16, 64) || content.is_empty() {
         state.emit_to_all(
@@ -585,62 +790,64 @@ pub async fn send_lxmf_reply(
         return Err(AppError::bad_request("Invalid reply"));
     }
     validate_delivery_preference(&state, delivery_pref)?;
+    let state_arc = Arc::clone(&state);
+    let client_send = begin_lxmf_client_send(&state_arc, client_msg_id.as_ref())?;
+    let activity_fence = state.activity_request_fence();
 
-    resolve_before_send(&state, &dest_hash).await;
-    ensure_propagation_ready_for_send(
+    let _ = crate::commands::shared::hydrate_contact_identity_for_send(&state, &dest_hash).await;
+    if let Some(response) = cancelled_lxmf_client_send_response(&state, client_send.as_ref()) {
+        return Ok(response);
+    }
+    let propagation_readiness = ensure_propagation_ready_for_send(
         &state,
         &dest_hash,
         delivery_pref,
         DeliveryProfile::Message,
         client_msg_id.as_deref(),
     )
-    .await?;
-    maybe_announce_before_user_send(&state, &dest_hash).await;
-
+    .await;
+    if let Some(response) = cancelled_lxmf_client_send_response(&state, client_send.as_ref()) {
+        return Ok(response);
+    }
+    propagation_readiness?;
     let identity_id = active_identity_id(&state);
     let st: Arc<AppState> = Arc::clone(&state);
     let dh = dest_hash.clone();
     let ct = content.clone();
     let id_c = identity_id.clone();
     let reply_id_for_send = wire_reply_to_id.clone();
+    let cancellation = client_send
+        .as_ref()
+        .map(LxmfClientSendGuard::cancellation_probe);
     let msg_id = tokio::task::spawn_blocking(move || {
-        let send_lock_started = std::time::Instant::now();
-        if let Ok(mut lxmf) = st.lxmf.lock() {
-            let waited = send_lock_started.elapsed();
-            if waited > std::time::Duration::from_secs(1) {
-                tracing::warn!(
-                    waited_ms = waited.as_millis() as u64,
-                    "send waited on lxmf manager lock"
-                );
-            }
-            lxmf.as_mut().and_then(|mgr| {
-                mgr.send_reply_with_preference(ReplyMessageSendRequest {
-                    dest_hash_hex: &dh,
-                    content: &ct,
-                    title: "",
-                    reply_to_id: &reply_id_for_send,
-                    reply_to_preview: &reply_to_preview,
-                    db_pool: &st.db,
-                    identity_id: &id_c,
-                    preference: delivery_pref,
-                    profile: DeliveryProfile::Message,
-                })
+        queue_lxmf_client_send(&st, cancellation.as_ref(), |manager| {
+            manager.send_reply_with_preference(ReplyMessageSendRequest {
+                dest_hash_hex: &dh,
+                content: &ct,
+                title: "",
+                reply_to_id: &reply_id_for_send,
+                reply_to_preview: &reply_to_preview,
+                db_pool: &st.db,
+                identity_id: &id_c,
+                preference: delivery_pref,
+                profile: DeliveryProfile::Message,
             })
-        } else {
-            None
-        }
+        })
     })
     .await
     .map_err(|_| AppError::internal("send_reply task panicked"))?;
 
     match msg_id {
-        Some(id) => {
-            state.lxmf_notify.notify_one();
-            if let Some(ref cid) = client_msg_id
-                && let Ok(mut map) = state.msg_id_map.lock()
-            {
-                map.insert(id.clone(), cid.clone());
+        LxmfClientSendAttempt::Queued(id) => {
+            if finalize_lxmf_client_send(&state_arc, client_send.as_ref(), &id).await? {
+                return Ok(json!({
+                    "msg_id": id,
+                    "client_msg_id": client_msg_id,
+                    "cancelled": true,
+                }));
             }
+            schedule_announce_after_user_send_from_origin(&state, &dest_hash, activity_fence);
+            state.lxmf_notify.notify_one();
             state.emit_to_all(
                 "lxmf_step",
                 json!({
@@ -653,7 +860,11 @@ pub async fn send_lxmf_reply(
             broadcast_conversations(Arc::clone(&state));
             Ok(json!({ "msg_id": id, "client_msg_id": client_msg_id }))
         }
-        None => {
+        LxmfClientSendAttempt::Cancelled => Ok(emit_prequeue_lxmf_cancellation(
+            &state,
+            client_msg_id.as_deref().unwrap_or_default(),
+        )),
+        LxmfClientSendAttempt::Failed(_) => {
             state.emit_to_all(
                 "lxmf_step",
                 json!({ "step": "error", "message": "LXMF not initialized" }),
@@ -683,14 +894,19 @@ pub async fn send_lxmf_propagated(
     let dest_hash = sanitize_text(&args.dest_hash, 128);
     let content = sanitize_message_content(&args.content)?;
     let title = sanitize_text(args.title.as_deref().unwrap_or(""), 200);
-    let client_msg_id = args.client_msg_id.clone();
+    let client_msg_id = normalize_lxmf_client_msg_id(args.client_msg_id.as_deref())?;
 
     if !validate_hex(&dest_hash, 16, 64) {
-        state.emit_to_all(
-            "lxmf_step",
-            json!({ "step": "error", "message": "Invalid identity hash" }),
+        emit_lxmf_send_error(
+            &state,
+            client_msg_id.as_deref(),
+            "invalid_destination",
+            "Invalid identity hash",
         );
-        return Err(AppError::bad_request("Invalid identity hash"));
+        return Err(AppError::new(
+            "invalid_destination",
+            "Invalid identity hash",
+        ));
     }
     if content.is_empty() {
         state.emit_to_all(
@@ -701,60 +917,69 @@ pub async fn send_lxmf_propagated(
     }
 
     validate_delivery_preference(&state, DeliveryPreference::Propagated)?;
+    let state_arc = Arc::clone(&state);
+    let client_send = begin_lxmf_client_send(&state_arc, client_msg_id.as_ref())?;
 
+    let activity_fence = state.activity_request_fence();
     // Propagation still needs the recipient identity for encryption.
-    resolve_before_send(&state, &dest_hash).await;
-    ensure_propagation_ready_for_send(
+    let _ = crate::commands::shared::hydrate_contact_identity_for_send(&state, &dest_hash).await;
+    if let Some(response) = cancelled_lxmf_client_send_response(&state, client_send.as_ref()) {
+        return Ok(response);
+    }
+    let propagation_readiness = ensure_propagation_ready_for_send(
         &state,
         &dest_hash,
         DeliveryPreference::Propagated,
         DeliveryProfile::Message,
         client_msg_id.as_deref(),
     )
-    .await?;
-    maybe_announce_before_user_send(&state, &dest_hash).await;
-
+    .await;
+    if let Some(response) = cancelled_lxmf_client_send_response(&state, client_send.as_ref()) {
+        return Ok(response);
+    }
+    propagation_readiness?;
     let identity_id = active_identity_id(&state);
     let st: Arc<AppState> = Arc::clone(&state);
     let dh = dest_hash.clone();
     let ct = content.clone();
     let tt = title.clone();
     let id_c = identity_id.clone();
+    let cancellation = client_send
+        .as_ref()
+        .map(LxmfClientSendGuard::cancellation_probe);
     let msg_id = tokio::task::spawn_blocking(move || {
-        let send_lock_started = std::time::Instant::now();
-        if let Ok(mut lxmf) = st.lxmf.lock() {
-            let waited = send_lock_started.elapsed();
-            if waited > std::time::Duration::from_secs(1) {
-                tracing::warn!(
-                    waited_ms = waited.as_millis() as u64,
-                    "send waited on lxmf manager lock"
-                );
-            }
-            lxmf.as_mut().and_then(|mgr| {
-                mgr.send_message_with_method(
-                    &dh,
-                    &ct,
-                    &tt,
-                    &st.db,
-                    &id_c,
-                    DeliveryMethod::Propagated,
-                )
-            })
-        } else {
-            None
-        }
+        queue_lxmf_client_send(&st, cancellation.as_ref(), |manager| {
+            manager.send_message_with_method(
+                &dh,
+                &ct,
+                &tt,
+                &st.db,
+                &id_c,
+                DeliveryMethod::Propagated,
+            )
+        })
     })
     .await
     .map_err(|_| AppError::internal("send_propagated task panicked"))?;
 
     match msg_id {
-        Some(id) => {
-            state.lxmf_notify.notify_one();
-            if let Some(ref cid) = client_msg_id
-                && let Ok(mut map) = state.msg_id_map.lock()
-            {
-                map.insert(id.clone(), cid.clone());
+        LxmfClientSendAttempt::Queued(id) => {
+            if finalize_lxmf_client_send(&state_arc, client_send.as_ref(), &id).await? {
+                return Ok(json!({
+                    "msg_id": id,
+                    "client_msg_id": client_msg_id,
+                    "cancelled": true,
+                }));
             }
+            schedule_announce_after_user_send_from_origin(&state, &dest_hash, activity_fence);
+            record_lxmf_delivery_queued(
+                &state,
+                activity_fence,
+                &id,
+                &dest_hash,
+                DeliveryMethod::Propagated,
+            );
+            state.lxmf_notify.notify_one();
             state.emit_to_all(
                 "lxmf_step",
                 json!({
@@ -764,24 +989,14 @@ pub async fn send_lxmf_propagated(
                     "client_msg_id": client_msg_id,
                 }),
             );
-            if state
-                .network_log_enabled
-                .load(std::sync::atomic::Ordering::Relaxed)
-            {
-                state.emit_network_event(
-                    "message",
-                    &format!(
-                        "Message queued via propagation for {}...",
-                        &dest_hash[..8.min(dest_hash.len())]
-                    ),
-                    &dest_hash,
-                    "standard",
-                );
-            }
             broadcast_conversations(Arc::clone(&state));
             Ok(json!({ "msg_id": id, "client_msg_id": client_msg_id }))
         }
-        None => {
+        LxmfClientSendAttempt::Cancelled => Ok(emit_prequeue_lxmf_cancellation(
+            &state,
+            client_msg_id.as_deref().unwrap_or_default(),
+        )),
+        LxmfClientSendAttempt::Failed(_) => {
             state.emit_to_all(
                 "lxmf_step",
                 json!({
@@ -814,6 +1029,237 @@ pub struct SendWithAttachmentArgs {
     pub client_msg_id: Option<String>,
 }
 
+enum AttachmentLeaseOwner {
+    Direct { lease: AttachmentTransferLease },
+    Staged { staged: StagedAttachment },
+}
+
+impl AttachmentLeaseOwner {
+    fn into_transfer_lease(self) -> AttachmentTransferLease {
+        match self {
+            Self::Direct { lease } => lease,
+            Self::Staged { staged } => staged.into_transfer_lease(),
+        }
+    }
+
+    fn staged_path(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::Direct { .. } => None,
+            Self::Staged { staged } => Some(&staged.path),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn queue_prepared_attachment(
+    state: Arc<AppState>,
+    dest_hash: String,
+    content: String,
+    delivery_pref: DeliveryPreference,
+    client_msg_id: Option<String>,
+    file_name: String,
+    file_bytes: Vec<u8>,
+    is_image: bool,
+    image_mime: String,
+    attachment_owner: AttachmentLeaseOwner,
+) -> AppResult<Value> {
+    let client_send = begin_lxmf_client_send(&state, client_msg_id.as_ref())?;
+    let activity_fence = state.activity_request_fence();
+    let _ = crate::commands::shared::hydrate_contact_identity_for_send(&state, &dest_hash).await;
+    if let Some(response) = cancelled_lxmf_client_send_response(&state, client_send.as_ref()) {
+        return Ok(response);
+    }
+    let propagation_readiness = ensure_propagation_ready_for_send(
+        &state,
+        &dest_hash,
+        delivery_pref,
+        DeliveryProfile::Attachment,
+        client_msg_id.as_deref(),
+    )
+    .await;
+    if let Some(response) = cancelled_lxmf_client_send_response(&state, client_send.as_ref()) {
+        return Ok(response);
+    }
+    propagation_readiness?;
+    let identity_id = active_identity_id(&state);
+    let st = Arc::clone(&state);
+    let dh = dest_hash.clone();
+    let ct = content.clone();
+    let fn_c = file_name.clone();
+    let im = image_mime.clone();
+    let cancellation = client_send
+        .as_ref()
+        .map(LxmfClientSendGuard::cancellation_probe);
+    let staged_path = attachment_owner
+        .staged_path()
+        .map(std::path::Path::to_path_buf);
+    let (send_result, attachment_owner) = tokio::task::spawn_blocking(move || {
+        let msg_content = if ct.is_empty() {
+            format!("[File: {}]", fn_c)
+        } else {
+            format!("{}\n[File: {}]", ct, fn_c)
+        };
+        let attempt = queue_lxmf_client_send(&st, cancellation.as_ref(), |manager| {
+            Some(
+                manager.send_message_with_attachment_fields_preference_report(
+                    AttachmentMessageRequest {
+                        dest_hash_hex: &dh,
+                        content: &msg_content,
+                        title: "",
+                        file_name: &fn_c,
+                        file_bytes: &file_bytes,
+                        staged_path: staged_path.as_deref(),
+                        is_image,
+                        image_mime: &im,
+                        db_pool: &st.db,
+                        identity_id: &identity_id,
+                        preference: delivery_pref,
+                    },
+                ),
+            )
+        });
+        (attempt, attachment_owner)
+    })
+    .await
+    .map_err(|_| AppError::internal("send_attachment task panicked"))?;
+
+    match send_result {
+        LxmfClientSendAttempt::Queued(Ok(queued)) => {
+            let id = queued.message_id;
+            state
+                .hold_attachment_delivery_lease(id.clone(), attachment_owner.into_transfer_lease());
+            if finalize_lxmf_client_send(&state, client_send.as_ref(), &id).await? {
+                return Ok(json!({
+                    "msg_id": id,
+                    "client_msg_id": client_msg_id,
+                    "cancelled": true,
+                }));
+            }
+            schedule_announce_after_user_send_from_origin(&state, &dest_hash, activity_fence);
+            record_lxmf_delivery_queued(&state, activity_fence, &id, &dest_hash, queued.method);
+            state.emit_to_all(
+                "lxmf_step",
+                json!({
+                    "step": "sending",
+                    "message": "Message with attachment queued for delivery",
+                    "msg_id": id,
+                    "client_msg_id": client_msg_id,
+                }),
+            );
+            broadcast_conversations(Arc::clone(&state));
+            state.lxmf_notify.notify_one();
+            Ok(json!({ "msg_id": id, "client_msg_id": client_msg_id }))
+        }
+        LxmfClientSendAttempt::Queued(Err(LxmfSubmissionFailure::ResourceLimitExceeded {
+            actual_bytes,
+            limit_bytes,
+        })) => {
+            record_lxmf_submission_failed(
+                &state,
+                activity_fence,
+                &dest_hash,
+                producer::LxmfSubmissionFailureReason::AttachmentEnvelopeTooLarge,
+            );
+            emit_lxmf_send_error(
+                &state,
+                client_msg_id.as_deref(),
+                "attachment_envelope_too_large",
+                "Attachment and message metadata exceed the protocol resource limit",
+            );
+            Err(AppError::new(
+                "attachment_envelope_too_large",
+                format!(
+                    "Attachment and message metadata use {actual_bytes} bytes; the protocol limit is {limit_bytes} bytes"
+                ),
+            ))
+        }
+        LxmfClientSendAttempt::Queued(Err(LxmfSubmissionFailure::PreparationFailed)) => {
+            record_lxmf_submission_failed(
+                &state,
+                activity_fence,
+                &dest_hash,
+                producer::LxmfSubmissionFailureReason::PreparationFailed,
+            );
+            emit_lxmf_send_error(
+                &state,
+                client_msg_id.as_deref(),
+                "lxmf_preparation_failed",
+                "Attachment could not be queued",
+            );
+            Err(AppError::new(
+                "lxmf_preparation_failed",
+                "Attachment could not be queued",
+            ))
+        }
+        LxmfClientSendAttempt::Queued(Err(LxmfSubmissionFailure::StorageFailed)) => {
+            record_lxmf_submission_failed(
+                &state,
+                activity_fence,
+                &dest_hash,
+                producer::LxmfSubmissionFailureReason::AttachmentStorageFailed,
+            );
+            emit_lxmf_send_error(
+                &state,
+                client_msg_id.as_deref(),
+                "attachment_storage_failed",
+                "Attachment storage is unavailable",
+            );
+            Err(AppError::new(
+                "attachment_storage_failed",
+                "Attachment storage is unavailable",
+            ))
+        }
+        LxmfClientSendAttempt::Cancelled => Ok(emit_prequeue_lxmf_cancellation(
+            &state,
+            client_msg_id.as_deref().unwrap_or_default(),
+        )),
+        LxmfClientSendAttempt::Failed(reason) => {
+            record_lxmf_submission_failed(&state, activity_fence, &dest_hash, reason);
+            let (code, message, error) = match reason {
+                producer::LxmfSubmissionFailureReason::RouterUnavailable => (
+                    "lxmf_not_initialized",
+                    "LXMF not initialized",
+                    AppError::lxmf_not_initialized("LXMF not initialized"),
+                ),
+                producer::LxmfSubmissionFailureReason::PreparationFailed => (
+                    "lxmf_preparation_failed",
+                    "Attachment could not be queued",
+                    AppError::new("lxmf_preparation_failed", "Attachment could not be queued"),
+                ),
+                producer::LxmfSubmissionFailureReason::AttachmentBusy => (
+                    "attachment_busy",
+                    "Another attachment transfer is already active",
+                    AppError::conflict("Another attachment transfer is already active"),
+                ),
+                producer::LxmfSubmissionFailureReason::AttachmentMemoryPressure => (
+                    "attachment_memory_pressure",
+                    "Attachment transfers are paused while memory recovers",
+                    AppError::conflict("Attachment transfers are paused while memory recovers"),
+                ),
+                producer::LxmfSubmissionFailureReason::AttachmentTooLarge => (
+                    "attachment_too_large",
+                    "Attachment exceeds the configured receive limit",
+                    AppError::bad_request("Attachment exceeds the configured receive limit"),
+                ),
+                producer::LxmfSubmissionFailureReason::AttachmentEnvelopeTooLarge => (
+                    "attachment_envelope_too_large",
+                    "Attachment and message metadata exceed the protocol resource limit",
+                    AppError::bad_request(
+                        "Attachment and message metadata exceed the protocol resource limit",
+                    ),
+                ),
+                producer::LxmfSubmissionFailureReason::AttachmentStorageFailed => (
+                    "attachment_storage_failed",
+                    "Attachment storage is unavailable",
+                    AppError::internal("Attachment storage is unavailable"),
+                ),
+            };
+            emit_lxmf_send_error(&state, client_msg_id.as_deref(), code, message);
+            Err(error)
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn send_lxmf_with_attachment(
     state: State<'_, Arc<AppState>>,
@@ -822,7 +1268,7 @@ pub async fn send_lxmf_with_attachment(
     let dest_hash = sanitize_text(&args.dest_hash, 128);
     let content = sanitize_message_content(args.content.as_deref().unwrap_or(""))?;
     let delivery_pref = parse_delivery_preference(args.delivery_method.as_deref());
-    let client_msg_id = args.client_msg_id.clone();
+    let client_msg_id = normalize_lxmf_client_msg_id(args.client_msg_id.as_deref())?;
 
     let is_image = args.image_data.as_deref().is_some_and(|s| !s.is_empty());
     let image_mime = if is_image {
@@ -850,134 +1296,316 @@ pub async fn send_lxmf_with_attachment(
     };
 
     if !validate_hex(&dest_hash, 16, 64) {
-        state.emit_to_all(
-            "lxmf_step",
-            json!({ "step": "error", "message": "Invalid identity hash" }),
+        emit_lxmf_send_error(
+            &state,
+            client_msg_id.as_deref(),
+            "invalid_destination",
+            "Invalid identity hash",
         );
-        return Err(AppError::bad_request("Invalid identity hash"));
+        return Err(AppError::new(
+            "invalid_destination",
+            "Invalid identity hash",
+        ));
     }
     validate_delivery_preference(&state, delivery_pref)?;
     if file_data_b64.is_empty() {
-        state.emit_to_all(
-            "lxmf_step",
-            json!({ "step": "error", "message": "No file data provided" }),
+        emit_lxmf_send_error(
+            &state,
+            client_msg_id.as_deref(),
+            "attachment_missing",
+            "No file data provided",
         );
-        return Err(AppError::bad_request("No file data provided"));
+        return Err(AppError::new("attachment_missing", "No file data provided"));
     }
     if base64_decoded_len_upper_bound(file_data_b64.len()).unwrap_or(usize::MAX)
-        > rns_protocol::resource::MAX_RESOURCE_SIZE
+        > LEGACY_BASE64_ATTACHMENT_MAX_BYTES
     {
-        state.emit_to_all(
-            "lxmf_step",
-            json!({ "step": "error", "message": "Attachment exceeds protocol resource limit" }),
+        emit_lxmf_send_error(
+            &state,
+            client_msg_id.as_deref(),
+            "attachment_too_large",
+            "Legacy attachment input is limited to 1 MB; use staged transfer",
         );
-        return Err(AppError::bad_request(
-            "Attachment exceeds protocol resource limit",
+        return Err(AppError::new(
+            "attachment_too_large",
+            "Legacy attachment input is limited to 1 MB; use staged transfer",
         ));
     }
+    let state_arc = Arc::clone(&state);
+
+    let decoded_upper_bound = base64_decoded_len_upper_bound(file_data_b64.len())
+        .ok_or_else(|| AppError::new("attachment_too_large", "Attachment is too large"))?;
+    let attachment_lease = state_arc
+        .reserve_attachment_transfer(decoded_upper_bound)
+        .map_err(|error| {
+            let (code, message) = match error {
+                AttachmentTransferAdmissionError::Busy => (
+                    "attachment_busy",
+                    "Another large attachment is being prepared",
+                ),
+                AttachmentTransferAdmissionError::MemoryPressure => (
+                    "attachment_memory_pressure",
+                    "Attachment memory budget is currently full",
+                ),
+                AttachmentTransferAdmissionError::TooLarge => (
+                    "attachment_too_large",
+                    "Attachment exceeds the supported limit",
+                ),
+                AttachmentTransferAdmissionError::Storage => (
+                    "attachment_storage_failed",
+                    "Could not create private attachment staging",
+                ),
+            };
+            emit_lxmf_send_error(&state, client_msg_id.as_deref(), code, message);
+            AppError::new(code, message)
+        })?;
 
     let file_bytes = B64.decode(file_data_b64).map_err(|_| {
-        state.emit_to_all(
-            "lxmf_step",
-            json!({ "step": "error", "message": "Invalid base64 file data" }),
+        emit_lxmf_send_error(
+            &state,
+            client_msg_id.as_deref(),
+            "attachment_invalid",
+            "Invalid base64 file data",
         );
-        AppError::bad_request("Invalid base64 file data")
+        AppError::new("attachment_invalid", "Invalid base64 file data")
     })?;
-    if file_bytes.len() > rns_protocol::resource::MAX_RESOURCE_SIZE {
-        state.emit_to_all(
-            "lxmf_step",
-            json!({ "step": "error", "message": "Attachment exceeds protocol resource limit" }),
+    if file_bytes.len() > LEGACY_BASE64_ATTACHMENT_MAX_BYTES {
+        emit_lxmf_send_error(
+            &state,
+            client_msg_id.as_deref(),
+            "attachment_too_large",
+            "Legacy attachment input is limited to 1 MB; use staged transfer",
         );
-        return Err(AppError::bad_request(
-            "Attachment exceeds protocol resource limit",
+        return Err(AppError::new(
+            "attachment_too_large",
+            "Legacy attachment input is limited to 1 MB; use staged transfer",
         ));
     }
 
-    resolve_before_send(&state, &dest_hash).await;
-    ensure_propagation_ready_for_send(
-        &state,
-        &dest_hash,
+    queue_prepared_attachment(
+        state_arc,
+        dest_hash,
+        content,
         delivery_pref,
-        DeliveryProfile::Attachment,
-        client_msg_id.as_deref(),
+        client_msg_id,
+        file_name,
+        file_bytes,
+        is_image,
+        image_mime,
+        AttachmentLeaseOwner::Direct {
+            lease: attachment_lease,
+        },
     )
-    .await?;
-    maybe_announce_before_user_send(&state, &dest_hash).await;
+    .await
+}
 
-    let identity_id = active_identity_id(&state);
-    let st: Arc<AppState> = Arc::clone(&state);
-    let dh = dest_hash.clone();
-    let ct = content.clone();
-    let fn_c = file_name.clone();
-    let im = image_mime.clone();
-    let id_c = identity_id.clone();
-    let msg_id = tokio::task::spawn_blocking(move || {
-        let send_lock_started = std::time::Instant::now();
-        if let Ok(mut lxmf) = st.lxmf.lock() {
-            let waited = send_lock_started.elapsed();
-            if waited > std::time::Duration::from_secs(1) {
-                tracing::warn!(
-                    waited_ms = waited.as_millis() as u64,
-                    "send waited on lxmf manager lock"
-                );
+#[derive(Deserialize)]
+pub struct BeginAttachmentStageArgs {
+    pub file_name: String,
+    pub mime: String,
+    pub declared_size: usize,
+    #[serde(default)]
+    pub dest_hash: Option<String>,
+    #[serde(default)]
+    pub is_image: bool,
+}
+
+fn validate_outbound_attachment_size(declared_size: usize) -> AppResult<()> {
+    if declared_size == 0 || declared_size > ratspeak_runtime::state::LXMF_DELIVERY_LIMIT_MAX_BYTES
+    {
+        return Err(AppError::new(
+            "attachment_too_large",
+            "Attachment exceeds the supported limit",
+        ));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn begin_attachment_stage(
+    state: State<'_, Arc<AppState>>,
+    args: BeginAttachmentStageArgs,
+) -> AppResult<Value> {
+    validate_outbound_attachment_size(args.declared_size)?;
+    let activity_fence = state.activity_request_fence();
+    let destination = args
+        .dest_hash
+        .as_deref()
+        .map(|value| sanitize_text(value, 128))
+        .filter(|value| validate_hex(value, 16, 64));
+    let mime = sanitize_text(&args.mime, 200);
+    let file_name = ensure_filename_extension(
+        &args.file_name,
+        if args.is_image { &mime } else { "" },
+        if args.is_image { "image" } else { "attachment" },
+    );
+    let token = Arc::clone(&state)
+        .begin_attachment_staging(file_name, mime, args.declared_size, args.is_image)
+        .map_err(|error| {
+            let (reason, app_error) = match error {
+                AttachmentTransferAdmissionError::Busy => (
+                    producer::LxmfSubmissionFailureReason::AttachmentBusy,
+                    AppError::conflict("Another large attachment is being prepared"),
+                ),
+                AttachmentTransferAdmissionError::MemoryPressure => (
+                    producer::LxmfSubmissionFailureReason::AttachmentMemoryPressure,
+                    AppError::service_unavailable("Attachment memory budget is currently full"),
+                ),
+                AttachmentTransferAdmissionError::TooLarge => (
+                    producer::LxmfSubmissionFailureReason::AttachmentTooLarge,
+                    AppError::new(
+                        "attachment_too_large",
+                        "Attachment exceeds the supported limit",
+                    ),
+                ),
+                AttachmentTransferAdmissionError::Storage => (
+                    producer::LxmfSubmissionFailureReason::AttachmentStorageFailed,
+                    AppError::new(
+                        "attachment_storage_failed",
+                        "Could not create private attachment staging",
+                    ),
+                ),
+            };
+            if let Some(destination) = destination.as_deref() {
+                record_lxmf_submission_failed(&state, activity_fence, destination, reason);
             }
-            if let Some(mgr) = lxmf.as_mut() {
-                // Append "[File: …]" so non-attachment clients see the name.
-                let msg_content = if ct.is_empty() {
-                    format!("[File: {}]", fn_c)
-                } else {
-                    format!("{}\n[File: {}]", ct, fn_c)
-                };
-                mgr.send_message_with_attachment_fields_preference(AttachmentMessageRequest {
-                    dest_hash_hex: &dh,
-                    content: &msg_content,
-                    title: "",
-                    file_name: &fn_c,
-                    file_bytes: &file_bytes,
-                    is_image,
-                    image_mime: &im,
-                    db_pool: &st.db,
-                    identity_id: &id_c,
-                    preference: delivery_pref,
-                })
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+            app_error
+        })?;
+    Ok(json!({
+        "token": token,
+        "chunk_bytes": ATTACHMENT_IPC_CHUNK_BYTES,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct AppendAttachmentStageArgs {
+    pub token: String,
+    pub offset: usize,
+    pub data_base64: String,
+}
+
+#[tauri::command]
+pub async fn append_attachment_stage(
+    state: State<'_, Arc<AppState>>,
+    args: AppendAttachmentStageArgs,
+) -> AppResult<Value> {
+    let decoded_bound = base64_decoded_len_upper_bound(args.data_base64.len())
+        .ok_or_else(|| AppError::bad_request("Invalid attachment chunk"))?;
+    if decoded_bound > ATTACHMENT_IPC_CHUNK_BYTES {
+        return Err(AppError::bad_request("Attachment chunk is too large"));
+    }
+    let bytes = B64
+        .decode(args.data_base64)
+        .map_err(|_| AppError::bad_request("Invalid attachment chunk"))?;
+    if bytes.is_empty() || bytes.len() > ATTACHMENT_IPC_CHUNK_BYTES {
+        return Err(AppError::bad_request("Invalid attachment chunk"));
+    }
+    let st = Arc::clone(&state);
+    let token = args.token;
+    let written = tokio::task::spawn_blocking(move || {
+        st.append_attachment_staging(&token, args.offset, &bytes)
     })
     .await
-    .map_err(|_| AppError::internal("send_attachment task panicked"))?;
+    .map_err(|_| AppError::internal("attachment staging task panicked"))?
+    .map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => AppError::not_found("Attachment staging expired"),
+        std::io::ErrorKind::InvalidInput => AppError::bad_request("Invalid attachment chunk"),
+        _ => AppError::new("attachment_storage_failed", "Could not stage attachment"),
+    })?;
+    Ok(json!({ "written": written }))
+}
 
-    match msg_id {
-        Some(id) => {
-            if let Some(ref cid) = client_msg_id
-                && let Ok(mut map) = state.msg_id_map.lock()
-            {
-                map.insert(id.clone(), cid.clone());
-            }
-            state.emit_to_all(
-                "lxmf_step",
-                json!({
-                    "step": "sending",
-                    "message": "Message with attachment queued for delivery",
-                    "msg_id": id,
-                    "client_msg_id": client_msg_id,
-                }),
-            );
-            broadcast_conversations(Arc::clone(&state));
-            state.lxmf_notify.notify_one();
-            Ok(json!({ "msg_id": id, "client_msg_id": client_msg_id }))
-        }
-        None => {
-            state.emit_to_all(
-                "lxmf_step",
-                json!({ "step": "error", "message": "LXMF not initialized" }),
-            );
-            Err(AppError::lxmf_not_initialized("LXMF not initialized"))
-        }
+#[tauri::command]
+pub async fn cancel_attachment_stage(
+    state: State<'_, Arc<AppState>>,
+    token: String,
+) -> AppResult<Value> {
+    let st = Arc::clone(&state);
+    let removed = tokio::task::spawn_blocking(move || st.cancel_attachment_staging(&token))
+        .await
+        .unwrap_or(false);
+    Ok(json!({ "cancelled": removed }))
+}
+
+#[derive(Deserialize)]
+pub struct SendStagedAttachmentArgs {
+    pub dest_hash: String,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub delivery_method: Option<String>,
+    pub staging_token: String,
+    #[serde(default)]
+    pub client_msg_id: Option<String>,
+}
+
+#[tauri::command]
+pub async fn send_lxmf_with_staged_attachment(
+    state: State<'_, Arc<AppState>>,
+    args: SendStagedAttachmentArgs,
+) -> AppResult<Value> {
+    let dest_hash = sanitize_text(&args.dest_hash, 128);
+    let content = sanitize_message_content(args.content.as_deref().unwrap_or(""))?;
+    let delivery_pref = parse_delivery_preference(args.delivery_method.as_deref());
+    let client_msg_id = normalize_lxmf_client_msg_id(args.client_msg_id.as_deref())?;
+    if !validate_hex(&dest_hash, 16, 64) {
+        return Err(AppError::new(
+            "invalid_destination",
+            "Invalid identity hash",
+        ));
     }
+    validate_delivery_preference(&state, delivery_pref)?;
+
+    let staged = state
+        .take_completed_attachment_staging(&args.staging_token)
+        .ok_or_else(|| AppError::bad_request("Attachment staging is incomplete or expired"))?;
+    if staged.is_image && inspect_inline_image(&staged.path).await.is_none() {
+        let _ = tokio::fs::remove_file(&staged.path).await;
+        return Err(AppError::new(
+            "attachment_image_unsafe",
+            "Image dimensions or format are not safe for inline display",
+        ));
+    }
+    let file_bytes = match tokio::fs::read(&staged.path).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&staged.path).await;
+            tracing::warn!(
+                error_kind = ?error.kind(),
+                "failed to read private attachment staging file"
+            );
+            return Err(AppError::new(
+                "attachment_storage_failed",
+                "Could not read staged attachment",
+            ));
+        }
+    };
+    if file_bytes.len() != staged.declared_size {
+        return Err(AppError::new(
+            "attachment_storage_failed",
+            "Staged attachment length changed",
+        ));
+    }
+    let file_name = staged.file_name.clone();
+    let image_mime = if staged.is_image {
+        staged.mime.clone()
+    } else {
+        String::new()
+    };
+    let is_image = staged.is_image;
+    queue_prepared_attachment(
+        Arc::clone(&state),
+        dest_hash,
+        content,
+        delivery_pref,
+        client_msg_id,
+        file_name,
+        file_bytes,
+        is_image,
+        image_mime,
+        AttachmentLeaseOwner::Staged { staged },
+    )
+    .await
 }
 
 fn resolve_lxmf_message_id_for_cancel(
@@ -1000,24 +1628,14 @@ fn resolve_lxmf_message_id_for_cancel(
     })
 }
 
-#[tauri::command]
-pub async fn cancel_lxmf_message(
-    state: State<'_, Arc<AppState>>,
-    args: CancelLxmfMessageArgs,
-) -> AppResult<Value> {
-    let requested_msg_id = sanitize_text(&args.msg_id, 128);
-    let Some((msg_id, client_msg_id)) =
-        resolve_lxmf_message_id_for_cancel(&state, &requested_msg_id)
-    else {
-        return Ok(json!({
-            "ok": true,
-            "cancelled": false,
-            "msg_id": requested_msg_id,
-        }));
-    };
-
-    let st: Arc<AppState> = Arc::clone(&state);
-    let msg_id_for_cancel = msg_id.clone();
+async fn cancel_canonical_lxmf_message(
+    state: &Arc<AppState>,
+    msg_id: &str,
+    client_msg_id: Option<&str>,
+) -> AppResult<bool> {
+    let activity_fence = state.activity_request_fence();
+    let st = Arc::clone(state);
+    let msg_id_for_cancel = msg_id.to_string();
     let transport_cancelled = tokio::task::spawn_blocking(move || {
         st.lxmf
             .lock()
@@ -1031,8 +1649,8 @@ pub async fn cancel_lxmf_message(
     .await
     .map_err(|_| AppError::internal("cancel_lxmf_message task panicked"))?;
 
-    let msg_id_for_db = msg_id.clone();
-    let identity_for_db = active_identity_id(&state);
+    let msg_id_for_db = msg_id.to_string();
+    let identity_for_db = active_identity_id(state);
     let (db_cancelled, method) = db::spawn_db(state.db.clone(), move |p| {
         let db_cancelled = db::cancel_outbound_message_state(&p, &msg_id_for_db, &identity_for_db);
         let method = db::get_message_delivery_method(&p, &msg_id_for_db, &identity_for_db);
@@ -1043,24 +1661,105 @@ pub async fn cancel_lxmf_message(
 
     let cancelled = transport_cancelled || db_cancelled;
     if cancelled {
+        state.release_attachment_delivery_lease(msg_id);
         if let Ok(mut times) = state.message_send_times.lock() {
-            times.remove(&msg_id);
+            times.remove(msg_id);
         }
         if let Ok(mut map) = state.msg_id_map.lock() {
-            map.remove(&msg_id);
+            map.remove(msg_id);
         }
         state.emit_to_all(
             "lxmf_step",
             json!({
                 "step": "cancelled",
-                "msg_id": msg_id.clone(),
-                "client_msg_id": client_msg_id.clone(),
-                "method": method,
+                "msg_id": msg_id,
+                "client_msg_id": client_msg_id,
+                "method": method.clone(),
             }),
         );
-        broadcast_conversations(Arc::clone(&state));
+        state.activity.record_event_fenced(
+            || state.is_current_activity_origin_fence(activity_fence),
+            || {
+                let message = producer::MessageId::from_hex(msg_id)?;
+                let method = method
+                    .as_deref()
+                    .and_then(producer::LxmfDeliveryMethod::from_code);
+                Ok(producer::lxmf_delivery_state_changed(
+                    producer::LxmfDeliveryStateChanged {
+                        message,
+                        state: producer::LxmfDeliveryState::Cancelled,
+                        method,
+                        rtt_ms: None,
+                        failure_reason: None,
+                    },
+                ))
+            },
+        );
+        broadcast_conversations(Arc::clone(state));
         state.lxmf_notify.notify_one();
     }
+    Ok(cancelled)
+}
+
+async fn finalize_lxmf_client_send(
+    state: &Arc<AppState>,
+    guard: Option<&LxmfClientSendGuard>,
+    canonical_msg_id: &str,
+) -> AppResult<bool> {
+    let Some(guard) = guard else {
+        return Ok(false);
+    };
+    if let Ok(mut map) = state.msg_id_map.lock() {
+        map.insert(
+            canonical_msg_id.to_string(),
+            guard.client_msg_id().to_string(),
+        );
+    }
+    if !guard.publish_canonical(canonical_msg_id) {
+        return Ok(false);
+    }
+
+    let cancelled =
+        cancel_canonical_lxmf_message(state, canonical_msg_id, Some(guard.client_msg_id())).await?;
+    if !cancelled {
+        return Err(AppError::internal(
+            "Queued message could not be cancelled before delivery",
+        ));
+    }
+    Ok(true)
+}
+
+#[tauri::command]
+pub async fn cancel_lxmf_message(
+    state: State<'_, Arc<AppState>>,
+    args: CancelLxmfMessageArgs,
+) -> AppResult<Value> {
+    let requested_msg_id = sanitize_text(&args.msg_id, 128);
+    if requested_msg_id.is_empty() {
+        return Err(AppError::bad_request("Missing message ID"));
+    }
+
+    let (msg_id, client_msg_id) = match state.cancel_lxmf_client_send(&requested_msg_id) {
+        LxmfClientSendCancellation::Preparing => {
+            return Ok(emit_prequeue_lxmf_cancellation(&state, &requested_msg_id));
+        }
+        LxmfClientSendCancellation::Queued { canonical_msg_id } => {
+            (canonical_msg_id, Some(requested_msg_id.clone()))
+        }
+        LxmfClientSendCancellation::NotFound => {
+            let Some(resolved) = resolve_lxmf_message_id_for_cancel(&state, &requested_msg_id)
+            else {
+                return Ok(json!({
+                    "ok": true,
+                    "cancelled": false,
+                    "msg_id": requested_msg_id,
+                }));
+            };
+            resolved
+        }
+    };
+    let cancelled =
+        cancel_canonical_lxmf_message(&state, &msg_id, client_msg_id.as_deref()).await?;
 
     Ok(json!({
         "ok": true,
@@ -1142,11 +1841,11 @@ pub async fn hide_conversation(state: State<'_, Arc<AppState>>, hash: String) ->
             Ok(c) => c,
             Err(_) => return 0i64,
         };
-        if let Err(e) = conn.execute(
+        if conn.execute(
             "INSERT OR REPLACE INTO hidden_conversations (dest_hash, identity_id) VALUES (?1, ?2)",
             rusqlite::params![dh, id_c],
-        ) {
-            tracing::warn!(error = %e, "hide_conversation insert failed");
+        ).is_err() {
+            tracing::warn!(reason = "insert_failed", "hide_conversation insert failed");
         }
         let counts = db::get_all_unread_counts_conn(&conn, &id_c);
         counts.values().sum::<i64>()
@@ -1238,7 +1937,7 @@ pub async fn api_lxmf_limits(state: State<'_, Arc<AppState>>) -> AppResult<Value
             .and_then(|n| n.get("transfer_limit_kb").and_then(|v| v.as_f64()))
     });
     Ok(json!({
-        "max_attachment_bytes": rns_protocol::resource::MAX_RESOURCE_SIZE,
+        "max_attachment_bytes": ratspeak_runtime::state::LXMF_DELIVERY_LIMIT_MAX_BYTES,
         "max_message_bytes": MAX_LXMF_MESSAGE_BYTES,
         "efficient_resource_bytes": rns_protocol::resource::MAX_EFFICIENT_SIZE,
         "default_propagation_limit_kb": lxmf_core::constants::PROPAGATION_LIMIT,
@@ -1247,47 +1946,240 @@ pub async fn api_lxmf_limits(state: State<'_, Arc<AppState>>) -> AppResult<Value
 }
 
 #[derive(Serialize)]
-pub struct FileDownload {
+pub struct FileMetadata {
     pub mime: String,
     pub filename: String,
-    /// Base64 (Tauri JSON IPC encodes Vec<u8> as number array; 6× the wire).
-    pub data_base64: String,
+    pub size: u64,
+    pub chunk_bytes: usize,
+    pub inline_image: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_height: Option<u32>,
 }
 
-#[tauri::command]
-pub async fn api_file_download(
-    state: State<'_, Arc<AppState>>,
-    stored_name: String,
-) -> AppResult<FileDownload> {
-    // get_received_file applies the shared stored-filename sanitizer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InlineImageInfo {
+    width: u32,
+    height: u32,
+    mime: &'static str,
+}
+
+fn bounded_inline_image_info(data: &[u8]) -> Option<InlineImageInfo> {
+    let dimensions = if data.len() >= 24 && &data[..8] == b"\x89PNG\r\n\x1a\n" {
+        Some((
+            u32::from_be_bytes(data[16..20].try_into().ok()?),
+            u32::from_be_bytes(data[20..24].try_into().ok()?),
+            "image/png",
+        ))
+    } else if data.len() >= 10 && matches!(&data[..6], b"GIF87a" | b"GIF89a") {
+        Some((
+            u16::from_le_bytes(data[6..8].try_into().ok()?) as u32,
+            u16::from_le_bytes(data[8..10].try_into().ok()?) as u32,
+            "image/gif",
+        ))
+    } else if data.len() >= 26 && &data[..2] == b"BM" {
+        let width = i32::from_le_bytes(data[18..22].try_into().ok()?).unsigned_abs();
+        let height = i32::from_le_bytes(data[22..26].try_into().ok()?).unsigned_abs();
+        Some((width, height, "image/bmp"))
+    } else if data.len() >= 30 && &data[..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        match &data[12..16] {
+            b"VP8X" => Some((
+                1 + u32::from_le_bytes([data[24], data[25], data[26], 0]),
+                1 + u32::from_le_bytes([data[27], data[28], data[29], 0]),
+                "image/webp",
+            )),
+            b"VP8L" if data.len() >= 25 && data[20] == 0x2f => Some((
+                1 + u32::from(data[21]) + ((u32::from(data[22]) & 0x3f) << 8),
+                1 + (u32::from(data[22]) >> 6)
+                    + (u32::from(data[23]) << 2)
+                    + ((u32::from(data[24]) & 0x0f) << 10),
+                "image/webp",
+            )),
+            b"VP8 " if data.len() >= 30 && data[23..26] == [0x9d, 0x01, 0x2a] => Some((
+                u32::from(u16::from_le_bytes([data[26], data[27]]) & 0x3fff),
+                u32::from(u16::from_le_bytes([data[28], data[29]]) & 0x3fff),
+                "image/webp",
+            )),
+            _ => None,
+        }
+    } else if data.len() >= 4 && data[..2] == [0xff, 0xd8] {
+        jpeg_dimensions(data).map(|(width, height)| (width, height, "image/jpeg"))
+    } else {
+        None
+    }?;
+
+    let (width, height, mime) = dimensions;
+    let pixels = u64::from(width).checked_mul(u64::from(height))?;
+    (width > 0
+        && height > 0
+        && width <= INLINE_IMAGE_MAX_DIMENSION
+        && height <= INLINE_IMAGE_MAX_DIMENSION
+        && pixels <= INLINE_IMAGE_MAX_PIXELS)
+        .then_some(InlineImageInfo {
+            width,
+            height,
+            mime,
+        })
+}
+
+fn jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
+    let mut offset = 2usize;
+    while offset.checked_add(4)? <= data.len() {
+        if data[offset] != 0xff {
+            offset += 1;
+            continue;
+        }
+        while offset < data.len() && data[offset] == 0xff {
+            offset += 1;
+        }
+        let marker = *data.get(offset)?;
+        offset += 1;
+        if matches!(marker, 0xd8 | 0xd9) || (0xd0..=0xd7).contains(&marker) {
+            continue;
+        }
+        let length = u16::from_be_bytes(data.get(offset..offset + 2)?.try_into().ok()?) as usize;
+        if length < 2 || offset.checked_add(length)? > data.len() {
+            return None;
+        }
+        if matches!(
+            marker,
+            0xc0 | 0xc1
+                | 0xc2
+                | 0xc3
+                | 0xc5
+                | 0xc6
+                | 0xc7
+                | 0xc9
+                | 0xca
+                | 0xcb
+                | 0xcd
+                | 0xce
+                | 0xcf
+        ) {
+            let height = u16::from_be_bytes(data.get(offset + 3..offset + 5)?.try_into().ok()?);
+            let width = u16::from_be_bytes(data.get(offset + 5..offset + 7)?.try_into().ok()?);
+            return Some((u32::from(width), u32::from(height)));
+        }
+        offset += length;
+    }
+    None
+}
+
+async fn inspect_inline_image(path: &std::path::Path) -> Option<InlineImageInfo> {
+    let mut file = tokio::fs::File::open(path).await.ok()?;
+    let size = file
+        .metadata()
+        .await
+        .ok()?
+        .len()
+        .min(ATTACHMENT_IPC_CHUNK_BYTES as u64) as usize;
+    let mut header = vec![0u8; size];
+    file.read_exact(&mut header).await.ok()?;
+    bounded_inline_image_info(&header)
+}
+
+fn clean_download_filename(path: &std::path::Path) -> String {
+    let filename = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "download".into());
+    filename
+        .find('_')
+        .map(|prefix| filename[prefix + 1..].to_string())
+        .unwrap_or(filename)
+}
+
+fn download_mime(path: &std::path::Path) -> String {
+    if path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("lxvm"))
+    {
+        "audio/x-lxst-voice-memo".to_string()
+    } else {
+        mime_guess::from_path(path)
+            .first_or_octet_stream()
+            .to_string()
+    }
+}
+
+fn received_file_path(state: &AppState, stored_name: &str) -> AppResult<std::path::PathBuf> {
     let file_path = if let Ok(lxmf) = state.lxmf.lock() {
         lxmf.as_ref()
-            .and_then(|mgr| mgr.get_received_file(&stored_name))
+            .and_then(|manager| manager.get_received_file(stored_name))
     } else {
         None
     };
-    let path = file_path.ok_or_else(|| AppError::not_found("File not found"))?;
-    let data = tokio::fs::read(&path).await.map_err(|e| {
-        tracing::warn!(error = %e, "file-download read failed");
-        AppError::not_found("File not found")
-    })?;
-    let mime = mime_guess::from_path(&path)
-        .first_or_octet_stream()
-        .to_string();
-    let filename = path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "download".into());
-    // Strip the `<ts>_` storage prefix.
-    let clean = filename
-        .find('_')
-        .map(|p| filename[p + 1..].to_string())
-        .unwrap_or(filename);
-    Ok(FileDownload {
-        mime,
-        filename: clean,
-        data_base64: B64.encode(&data),
+    file_path.ok_or_else(|| AppError::not_found("File not found"))
+}
+
+pub fn received_file_export(
+    state: &AppState,
+    stored_name: &str,
+) -> AppResult<(std::path::PathBuf, String, String)> {
+    let path = received_file_path(state, stored_name)?;
+    let filename = clean_download_filename(&path);
+    let mime = download_mime(&path);
+    Ok((path, filename, mime))
+}
+
+#[tauri::command]
+pub async fn api_file_metadata(
+    state: State<'_, Arc<AppState>>,
+    stored_name: String,
+) -> AppResult<FileMetadata> {
+    let path = received_file_path(&state, &stored_name)?;
+    let size = tokio::fs::metadata(&path)
+        .await
+        .map_err(|_| AppError::not_found("File not found"))?
+        .len();
+    let image = inspect_inline_image(&path).await;
+    Ok(FileMetadata {
+        mime: image.map_or_else(|| download_mime(&path), |info| info.mime.to_string()),
+        filename: clean_download_filename(&path),
+        size,
+        chunk_bytes: ATTACHMENT_IPC_CHUNK_BYTES,
+        inline_image: image.is_some(),
+        image_width: image.map(|info| info.width),
+        image_height: image.map(|info| info.height),
     })
+}
+
+/// Read one bounded raw attachment chunk. The stored-name sanitizer and exact
+/// metadata length keep the WebView from turning this into a generic file API.
+#[tauri::command]
+pub async fn api_file_read_chunk(
+    state: State<'_, Arc<AppState>>,
+    stored_name: String,
+    offset: u64,
+    length: usize,
+) -> AppResult<tauri::ipc::Response> {
+    if length == 0 || length > ATTACHMENT_IPC_CHUNK_BYTES {
+        return Err(AppError::bad_request("Invalid attachment chunk length"));
+    }
+    let path = received_file_path(&state, &stored_name)?;
+    let file_size = tokio::fs::metadata(&path)
+        .await
+        .map_err(|_| AppError::not_found("File not found"))?
+        .len();
+    let end = offset
+        .checked_add(length as u64)
+        .ok_or_else(|| AppError::bad_request("Invalid attachment chunk range"))?;
+    if offset >= file_size || end > file_size {
+        return Err(AppError::bad_request("Invalid attachment chunk range"));
+    }
+
+    let mut file = tokio::fs::File::open(&path)
+        .await
+        .map_err(|_| AppError::not_found("File not found"))?;
+    file.seek(std::io::SeekFrom::Start(offset))
+        .await
+        .map_err(|_| AppError::not_found("File not found"))?;
+    let mut bytes = vec![0u8; length];
+    file.read_exact(&mut bytes)
+        .await
+        .map_err(|_| AppError::not_found("File not found"))?;
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 #[cfg(test)]
@@ -1333,6 +2225,61 @@ mod tests {
     }
 
     #[test]
+    fn staged_outbound_attachments_enforce_the_product_limit_at_command_boundary() {
+        assert!(validate_outbound_attachment_size(1).is_ok());
+        assert!(
+            validate_outbound_attachment_size(
+                ratspeak_runtime::state::LXMF_DELIVERY_LIMIT_MAX_BYTES
+            )
+            .is_ok()
+        );
+        for invalid in [
+            0,
+            ratspeak_runtime::state::LXMF_DELIVERY_LIMIT_MAX_BYTES + 1,
+        ] {
+            assert_eq!(
+                validate_outbound_attachment_size(invalid)
+                    .expect_err("outbound attachment size must be rejected")
+                    .code,
+                "attachment_too_large"
+            );
+        }
+    }
+
+    #[test]
+    fn inline_image_header_policy_accepts_bounded_png_and_rejects_pixel_bomb() {
+        fn png_header(width: u32, height: u32) -> Vec<u8> {
+            let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+            bytes.extend_from_slice(&[0, 0, 0, 13]);
+            bytes.extend_from_slice(b"IHDR");
+            bytes.extend_from_slice(&width.to_be_bytes());
+            bytes.extend_from_slice(&height.to_be_bytes());
+            bytes
+        }
+
+        assert_eq!(
+            bounded_inline_image_info(&png_header(4000, 3000)),
+            Some(InlineImageInfo {
+                width: 4000,
+                height: 3000,
+                mime: "image/png",
+            })
+        );
+        assert_eq!(bounded_inline_image_info(&png_header(8192, 8192)), None);
+        assert_eq!(bounded_inline_image_info(&png_header(9000, 1)), None);
+    }
+
+    #[test]
+    fn inline_image_header_policy_rejects_svg_and_false_mime_content() {
+        assert_eq!(
+            bounded_inline_image_info(b"<svg width='10' height='10'></svg>"),
+            None
+        );
+        assert_eq!(bounded_inline_image_info(b"not really a png"), None);
+        assert_eq!(bounded_inline_image_info(b"\x89PNG\r\n\x1a\n"), None);
+    }
+
+    #[test]
     fn attachment_filenames_keep_or_gain_expected_extensions() {
         assert_eq!(
             ensure_filename_extension("screen", "image/png", "image"),
@@ -1350,6 +2297,24 @@ mod tests {
             ensure_filename_extension("archive", "", "attachment"),
             "archive"
         );
+    }
+
+    #[test]
+    fn optimistic_message_ids_use_the_bounded_native_namespace() {
+        let valid = format!("out_{}", "a".repeat(32));
+        assert_eq!(
+            normalize_lxmf_client_msg_id(Some(&valid)).unwrap(),
+            Some(valid)
+        );
+        assert!(normalize_lxmf_client_msg_id(None).unwrap().is_none());
+        for invalid in [
+            "",
+            "out_short",
+            "out_zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            assert!(normalize_lxmf_client_msg_id(Some(invalid)).is_err());
+        }
     }
 
     /// Catches column-name drift between inline SQL and schema in `db.rs`.

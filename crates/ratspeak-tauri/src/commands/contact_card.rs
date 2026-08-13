@@ -136,17 +136,12 @@ fn contact_card_json(card: &ContactCard, payload: Option<&str>) -> Value {
 }
 
 fn contact_card_public_key(state: &AppState, hash_hex: &str) -> AppResult<[u8; 64]> {
-    if let Ok(lxmf) = state.lxmf.lock()
-        && let Some(mgr) = lxmf.as_ref()
-        && let Some(public_key) = mgr.contact_card_public_key(hash_hex)
-    {
+    if let Some(public_key) = state.local_identity_public_key(hash_hex) {
         return Ok(public_key);
     }
 
-    let key_bytes = super::identity::export_identity_key_bytes(state, hash_hex)?;
-    let identity =
-        Identity::from_private_key(&key_bytes).map_err(|_| AppError::bad_request("Invalid key"))?;
-    Ok(identity.get_public_key())
+    crate::lxmf::contact_card_public_key_from_profile(&state.config.data_dir, hash_hex)
+        .ok_or_else(|| AppError::not_found("Identity public key not available"))
 }
 
 #[tauri::command]
@@ -248,11 +243,11 @@ pub async fn import_contact_card(
     .await
     .map_err(|_| AppError::internal("contact-card import db task panicked"))?;
 
-    if let Ok(mut lxmf) = state.lxmf.lock()
-        && let Some(mgr) = lxmf.as_mut()
-    {
-        mgr.update_remote_crypto(&dest_hash, &card.public_key, None);
-        mgr.save_crypto_state();
+    if let Ok(mut lxmf) = state.lxmf.lock() {
+        if let Some(mgr) = lxmf.as_mut() {
+            mgr.update_remote_crypto(&dest_hash, &card.public_key, None);
+            mgr.save_crypto_state();
+        }
     }
 
     state.emit_to_all("contacts_update", json!(contacts_list));

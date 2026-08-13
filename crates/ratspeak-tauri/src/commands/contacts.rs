@@ -23,8 +23,8 @@ pub async fn api_contacts(state: State<'_, Arc<AppState>>) -> AppResult<Value> {
         db::get_all_contacts(&p, &id_for_db)
     })
     .await
-    .unwrap_or_else(|e| {
-        tracing::error!(error = %e, "contacts db task panicked");
+    .unwrap_or_else(|_| {
+        tracing::error!(reason = "task_panicked", "contacts db task panicked");
         Default::default()
     });
     let result: Vec<Value> = contacts
@@ -52,8 +52,11 @@ pub async fn api_blocked_contacts(state: State<'_, Arc<AppState>>) -> AppResult<
         db::get_blocked_contacts(&p, &id_for_db)
     })
     .await
-    .unwrap_or_else(|e| {
-        tracing::error!(error = %e, "blocked-contacts db task panicked");
+    .unwrap_or_else(|_| {
+        tracing::error!(
+            reason = "task_panicked",
+            "blocked-contacts db task panicked"
+        );
         Default::default()
     });
 
@@ -312,9 +315,7 @@ pub async fn block_contact(
     // announce-handler escalate on first sighting.
     let mut blackholed = false;
     let mut blackhole_pending = false;
-    if args.escalate_to_blackhole
-        && let Some(input_bytes) = hex_to_array16(&dest_hash)
-    {
+    if let Some(input_bytes) = hex_to_array16(&dest_hash).filter(|_| args.escalate_to_blackhole) {
         use rns_transport::messages::{TransportQuery, TransportQueryResponse};
         if let Some(identity_hash) =
             resolve_contact_identity_hash(&state, &dest_hash, input_bytes).await
@@ -412,9 +413,7 @@ pub async fn unblock_contact(
 
     let mut unblackholed = false;
     let mut pending_cleared = false;
-    if args.also_remove_blackhole
-        && let Some(input_bytes) = hex_to_array16(&dest_hash)
-    {
+    if let Some(input_bytes) = hex_to_array16(&dest_hash).filter(|_| args.also_remove_blackhole) {
         use rns_transport::messages::{TransportQuery, TransportQueryResponse};
 
         // Always clear the pending row first so the announce-handler retry

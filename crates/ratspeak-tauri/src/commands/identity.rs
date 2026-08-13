@@ -22,10 +22,19 @@ use crate::helpers::{
 use crate::state::AppState;
 
 use ratspeak_core::LXMF_DELIVERY_APP_NAME as LXMF_APP_NAME;
+use ratspeak_runtime::activity::ActivityRecorderError;
 
 const IDENTITY_BACKUP_FORMAT: &str = "ratspeak.identity.v2";
 const LEGACY_IDENTITY_BACKUP_FORMAT: &str = "ratspeak.identity.v1";
 const BASE32_ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+fn identity_activity_reset_error(_error: ActivityRecorderError) -> AppError {
+    tracing::error!(
+        reason = "activity_reset_unacknowledged",
+        "identity lifecycle stopped before changing identity state"
+    );
+    AppError::service_unavailable("Identity change is temporarily unavailable")
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 struct EncryptedIdentityBackupV2 {
@@ -138,7 +147,7 @@ fn base32_encode_padded(bytes: &[u8]) -> String {
     if bits > 0 {
         out.push(BASE32_ALPHABET[((buffer << (5 - bits)) & 0x1f) as usize] as char);
     }
-    while !out.len().is_multiple_of(8) {
+    while out.len() % 8 != 0 {
         out.push('=');
     }
     out
@@ -224,8 +233,9 @@ fn parse_private_identity_bytes(
         return Err("Unsupported identity backup format".into());
     }
 
-    if let Ok(key_bytes) = hex::decode(text)
-        && key_bytes.len() == 64
+    if let Some(key_bytes) = hex::decode(text)
+        .ok()
+        .filter(|key_bytes| key_bytes.len() == 64)
     {
         return Ok(ParsedIdentityImport {
             key_bytes,
@@ -234,8 +244,10 @@ fn parse_private_identity_bytes(
         });
     }
 
-    if let Ok(key_bytes) = B64.decode(text)
-        && key_bytes.len() == 64
+    if let Some(key_bytes) = B64
+        .decode(text)
+        .ok()
+        .filter(|key_bytes| key_bytes.len() == 64)
     {
         return Ok(ParsedIdentityImport {
             key_bytes,
@@ -244,8 +256,9 @@ fn parse_private_identity_bytes(
         });
     }
 
-    if let Ok(key_bytes) = base32_decode_text(text)
-        && key_bytes.len() == 64
+    if let Some(key_bytes) = base32_decode_text(text)
+        .ok()
+        .filter(|key_bytes| key_bytes.len() == 64)
     {
         return Ok(ParsedIdentityImport {
             key_bytes,
@@ -280,8 +293,8 @@ fn identity_preview_payload(key_bytes: &[u8], format: &str) -> Result<Value, Str
 pub async fn api_identity(state: State<'_, Arc<AppState>>) -> AppResult<Value> {
     let active = db::spawn_db(state.db.clone(), |p| db::get_active_identity(&p))
         .await
-        .unwrap_or_else(|e| {
-            tracing::error!(error = %e, "db task panicked");
+        .unwrap_or_else(|_| {
+            tracing::error!(reason = "task_panicked", "db task panicked");
             Default::default()
         });
     let is_hardware = state
@@ -316,8 +329,8 @@ pub async fn api_identity(state: State<'_, Arc<AppState>>) -> AppResult<Value> {
 pub async fn api_list_identities(state: State<'_, Arc<AppState>>) -> AppResult<Value> {
     let identities = db::spawn_db(state.db.clone(), |p| db::get_all_identities(&p))
         .await
-        .unwrap_or_else(|e| {
-            tracing::error!(error = %e, "list_identities db task panicked");
+        .unwrap_or_else(|_| {
+            tracing::error!(reason = "task_panicked", "list_identities db task panicked");
             Default::default()
         });
     // Tag each row hardware-backed if its on-disk artifact is a `.hwid`, and
@@ -383,7 +396,10 @@ pub async fn api_create_identity(
     if let Some(hash) = resp.get("hash").and_then(|v| v.as_str()) {
         match ratspeak_runtime::vault::store_plaintext_seed(&identities_dir.join(hash), &mnemonic) {
             Ok(()) => {}
-            Err(e) => tracing::warn!(error = %e, "could not store recovery-phrase sidecar"),
+            Err(_) => tracing::warn!(
+                reason = "write_failed",
+                "could not store recovery-phrase sidecar"
+            ),
         }
     }
     if let Some(obj) = resp.as_object_mut() {
@@ -449,7 +465,10 @@ pub async fn restore_seed_identity(
     if let Some(hash) = resp.get("hash").and_then(|v| v.as_str()) {
         match ratspeak_runtime::vault::store_plaintext_seed(&identities_dir.join(hash), &phrase) {
             Ok(()) => {}
-            Err(e) => tracing::warn!(error = %e, "could not store recovery-phrase sidecar"),
+            Err(_) => tracing::warn!(
+                reason = "write_failed",
+                "could not store recovery-phrase sidecar"
+            ),
         }
     }
     Ok(resp)
@@ -477,6 +496,7 @@ pub async fn set_identity_passcode(
     if args.passcode.len() < 6 || args.passcode.len() > 128 {
         return Err(AppError::bad_request("PIN must be at least 6 characters"));
     }
+    let _identity_lifecycle = state.identity_switch_lock.lock().await;
     let id_dir = state.config.data_dir.join("identities").join(&args.hash);
     let (passcode, current) = (args.passcode, args.current);
     tokio::task::spawn_blocking(move || {
@@ -504,6 +524,7 @@ pub async fn remove_identity_passcode(
     if !validate_hex(&args.hash, 16, 128) {
         return Err(AppError::bad_request("Invalid hash"));
     }
+    let _identity_lifecycle = state.identity_switch_lock.lock().await;
     let id_dir = state.config.data_dir.join("identities").join(&args.hash);
     let passcode = args.passcode;
     tokio::task::spawn_blocking(move || {
@@ -596,7 +617,9 @@ pub(crate) async fn unlock_protected_identity(
         .and_then(|hash| protected_identity_kind(&state, hash));
     check_unlock_secret(kind, &secret)?;
 
-    crate::shutdown_rns_lxmf(&state).await;
+    crate::shutdown_rns_lxmf(&state)
+        .await
+        .map_err(identity_activity_reset_error)?;
     state.clear_identity_scoped_runtime_state();
     state.set_hw_last_error(None);
     state.set_pending_hw_pin(Some(secret));
@@ -708,28 +731,40 @@ async fn import_identity_shared_with_passcode(
         Ok((hash, lxmf_hash)) => {
             if let Some(phrase) = mnemonic.as_deref() {
                 let seed_dir = state.config.data_dir.join("identities").join(&hash);
-                if let Err(e) = ratspeak_runtime::vault::store_plaintext_seed(&seed_dir, phrase) {
-                    tracing::warn!(error = %e, "could not store imported recovery-phrase sidecar");
+                if ratspeak_runtime::vault::store_plaintext_seed(&seed_dir, phrase).is_err() {
+                    tracing::warn!(
+                        reason = "write_failed",
+                        "could not store imported recovery-phrase sidecar"
+                    );
                 }
             }
-            let active_missing = db::spawn_db(state.db.clone(), |p| db::get_active_identity(&p))
-                .await
-                .map_err(|_| AppError::internal("active identity db task panicked"))?
-                .is_none();
-            if active_missing {
-                let hash_for_active = hash.clone();
-                db::spawn_db(state.db.clone(), move |p| {
-                    db::set_active_identity(&p, &hash_for_active)
-                })
-                .await
-                .map_err(|_| AppError::internal("activate imported identity task panicked"))?
-                .map_err(|e| AppError::internal(format!("Failed to activate import: {e}")))?;
-            }
+            let activated = {
+                let _identity_lifecycle = state.identity_switch_lock.lock().await;
+                let active_missing =
+                    db::spawn_db(state.db.clone(), |p| db::get_active_identity(&p))
+                        .await
+                        .map_err(|_| AppError::internal("active identity db task panicked"))?
+                        .is_none();
+                if active_missing {
+                    let app_state = Arc::clone(state.inner());
+                    crate::shutdown_rns_lxmf(&app_state)
+                        .await
+                        .map_err(identity_activity_reset_error)?;
+                    let hash_for_active = hash.clone();
+                    db::spawn_db(state.db.clone(), move |p| {
+                        db::set_active_identity(&p, &hash_for_active)
+                    })
+                    .await
+                    .map_err(|_| AppError::internal("activate imported identity task panicked"))?
+                    .map_err(|e| AppError::internal(format!("Failed to activate import: {e}")))?;
+                }
+                active_missing
+            };
             Ok(json!({
                 "hash": hash,
                 "lxmf_hash": lxmf_hash,
                 "format": format,
-                "activated": active_missing,
+                "activated": activated,
             }))
         }
         Err(e) => Err(AppError::bad_request(e)),
@@ -1018,8 +1053,8 @@ pub async fn api_update_identity(
     })
     .await
     .map_err(|_| AppError::internal("update_identity db task panicked"))?;
-    result.map_err(|e| {
-        tracing::error!(error = %e, "update_identity failed");
+    result.map_err(|_| {
+        tracing::error!(reason = "update_failed", "update_identity failed");
         AppError::internal("failed to update identity")
     })?;
     Ok(json!(null))
@@ -1034,8 +1069,14 @@ pub async fn api_delete_identity(
     if !validate_hex(&hash_hex, 16, 128) {
         return Err(AppError::bad_request("Invalid hash"));
     }
+    let _identity_lifecycle = state.identity_switch_lock.lock().await;
     let active = active_identity_id(&state);
-    if active == hash_hex {
+    let runtime_identity = state
+        .lxmf
+        .lock()
+        .ok()
+        .and_then(|lxmf| lxmf.as_ref().map(|mgr| mgr.identity_hash.clone()));
+    if active == hash_hex || runtime_identity.as_deref() == Some(hash_hex.as_str()) {
         return Err(AppError::bad_request("Cannot delete active identity"));
     }
     let file_refs = if cascade.unwrap_or(false) {
@@ -1061,6 +1102,7 @@ pub async fn api_delete_identity(
     }
     crate::lxmf::LxmfManager::purge_identity_profile(&state.config.data_root, &hash_hex, cascade)
         .map_err(|e| AppError::internal(format!("Failed to remove identity files: {e}")))?;
+    state.forget_local_identity_public_key(&hash_hex);
     Ok(json!(null))
 }
 
@@ -1078,8 +1120,8 @@ async fn switch_identity_session(state: Arc<AppState>, hash_hex: String) -> AppR
         db::get_identity(&p, &hash_for_lookup)
     })
     .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "identity lookup task panicked");
+    .map_err(|_| {
+        tracing::error!(reason = "task_panicked", "identity lookup task panicked");
         AppError::internal("db task panicked")
     })?
     .ok_or_else(|| AppError::not_found("Identity not found"))?;
@@ -1124,11 +1166,13 @@ async fn switch_identity_session(state: Arc<AppState>, hash_hex: String) -> AppR
         "identity_switching",
         json!({
             "hash": hash_hex,
-            "generation": generation,
+            "generation": generation.to_string(),
         }),
     );
 
-    crate::shutdown_rns_lxmf(&state).await;
+    crate::shutdown_rns_lxmf(&state)
+        .await
+        .map_err(identity_activity_reset_error)?;
     state.clear_identity_scoped_runtime_state();
 
     let hash_for_db = hash_hex.clone();
@@ -1136,8 +1180,8 @@ async fn switch_identity_session(state: Arc<AppState>, hash_hex: String) -> AppR
         db::set_active_identity(&p, &hash_for_db)
     })
     .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "activate db task panicked");
+    .map_err(|_| {
+        tracing::error!(reason = "task_panicked", "activate db task panicked");
         AppError::internal("db task panicked")
     })?;
     if let Err(e) = set_result {
@@ -1163,9 +1207,17 @@ async fn switch_identity_session(state: Arc<AppState>, hash_hex: String) -> AppR
     if state.hw_locked_hash().as_deref() == Some(hash_hex.as_str()) {
         state.emit_to_all(
             "identity_switched",
-            json!({ "hash": hash_hex, "locked": true }),
+            json!({
+                "hash": hash_hex,
+                "locked": true,
+                "generation": generation.to_string(),
+            }),
         );
-        return Ok(json!({ "hash": hash_hex, "locked": true }));
+        return Ok(json!({
+            "hash": hash_hex,
+            "locked": true,
+            "generation": generation.to_string(),
+        }));
     }
 
     let (loaded_identity, loaded_lxmf, loaded_display, loaded_status) = {
@@ -1187,15 +1239,16 @@ async fn switch_identity_session(state: Arc<AppState>, hash_hex: String) -> AppR
     };
     if loaded_identity != hash_hex {
         tracing::error!(
-            requested = %hash_hex,
-            loaded = %loaded_identity,
             generation,
+            reason = "identity_mismatch",
             "identity switch failed to load target; rolling back"
         );
         // Target failed to load (e.g. a hardware key that was re-provisioned or
         // unplugged). Restore the previous identity + its runtime so the session
         // is not left with a dead active row and no LXMF.
-        crate::shutdown_rns_lxmf(&state).await;
+        crate::shutdown_rns_lxmf(&state)
+            .await
+            .map_err(identity_activity_reset_error)?;
         state.clear_identity_scoped_runtime_state();
         if let Some(old_hash) = previous_active.clone() {
             let old_for_db = old_hash.clone();
@@ -1223,7 +1276,7 @@ async fn switch_identity_session(state: Arc<AppState>, hash_hex: String) -> AppR
         "lxmf_hash": loaded_lxmf,
         "display_name": loaded_display,
         "status": loaded_status,
-        "generation": generation,
+        "generation": generation.to_string(),
     });
     let ifaces = crate::rns_config::get_all_interfaces(&active_rns_config_dir(&state));
     emit_hub_interfaces(&state, ifaces);
@@ -1246,6 +1299,7 @@ pub async fn api_set_display_name(
     state: State<'_, Arc<AppState>>,
     args: DisplayNameArgs,
 ) -> AppResult<Value> {
+    let activity_origin = state.activity_request_fence();
     let display_name = sanitize_announced_display_name(args.display_name.as_deref().unwrap_or(""))
         .map_err(AppError::bad_request)?;
     if display_name.is_empty() {
@@ -1274,18 +1328,31 @@ pub async fn api_set_display_name(
 
     let id = identity_id.clone();
     let dn = display_name.clone();
-    db::spawn_db(state.db.clone(), move |p| {
-        db::update_identity(&p, &id, None, Some(&dn))
+    // The rename and the saved-hub sweep commit together, so a failure leaves
+    // the old name intact everywhere and the retry re-runs the sweep.
+    let rename = db::spawn_db(state.db.clone(), move |p| {
+        db::rename_identity_and_retire_alias(&p, &id, &dn)
     })
     .await
     .map_err(|_| AppError::internal("failed to save display name"))?
-    .map_err(|e| {
-        tracing::error!(error = %e, "display_name: update_identity failed");
+    .map_err(|_| {
+        tracing::error!(reason = "update_failed", "display_name: rename failed");
         AppError::internal("failed to save display name")
     })?;
 
+    // A live channels session snapshots its nickname at connect, so without
+    // this it would keep stamping the superseded name on every outbound
+    // envelope for the rest of the session.
+    if !rename.previous_name.is_empty() && rename.previous_name != display_name {
+        if let Some(channels) = state.channels_handle() {
+            channels
+                .identity_renamed(&rename.previous_name, &display_name)
+                .await;
+        }
+    }
+
     if updated_in_memory {
-        crate::send_announce_from_state(&state).await;
+        crate::send_announce_from_origin(&state, activity_origin).await;
     }
 
     Ok(json!({ "display_name": display_name }))
@@ -1296,6 +1363,7 @@ pub async fn set_identity_status(
     state: State<'_, Arc<AppState>>,
     status: Option<String>,
 ) -> AppResult<Value> {
+    let activity_origin = state.activity_request_fence();
     let status = sanitize_announced_status(status.as_deref().unwrap_or(""))
         .map_err(AppError::bad_request)?;
     let identity_id = active_identity_id(&state);
@@ -1328,14 +1396,17 @@ pub async fn set_identity_status(
     })
     .await
     .map_err(|_| AppError::internal("failed to save status"))?
-    .map_err(|e| {
-        tracing::error!(error = %e, "status: update_identity_status failed");
+    .map_err(|_| {
+        tracing::error!(
+            reason = "update_failed",
+            "status: update_identity_status failed"
+        );
         AppError::internal("failed to save status")
     })?;
 
     if let Some(payload) = identity_payload {
         state.emit_to_all("lxmf_identity", payload);
-        crate::send_announce_from_state(&state).await;
+        crate::send_announce_from_origin(&state, activity_origin).await;
     }
 
     Ok(json!({ "status": status }))

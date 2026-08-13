@@ -6,10 +6,7 @@ use std::time::Duration;
 
 use rns_identity::destination::Destination;
 use rns_runtime::lifecycle::ShutdownSignal;
-use rns_transport::messages::{
-    AnnounceHandlerEvent, PathTableRpcEntry, TransportMessage, TransportQuery,
-    TransportQueryResponse,
-};
+use rns_transport::messages::{AnnounceHandlerEvent, PathTableRpcEntry, TransportMessage};
 use serde_json::json;
 use tokio::sync::mpsc;
 
@@ -152,11 +149,11 @@ async fn register_with_retry(
                 );
                 return true;
             }
-            Err(e) => {
+            Err(_) => {
                 tracing::warn!(
                     aspect = ?aspect_filter,
                     attempt = attempt + 1,
-                    error = %e,
+                    reason = "registration_failed",
                     "announce-handler register failed; retrying"
                 );
                 tokio::time::sleep(REGISTER_RETRY_DELAY).await;
@@ -197,32 +194,43 @@ async fn process_delivery_announce(state: &Arc<AppState>, event: AnnounceHandler
         .and_then(crate::lxmf::lxmf_compression_support_db_value_from_app_data)
         .map(str::to_string);
 
-    if let Some(bytes) = event.app_data.as_deref()
-        && let Ok(mut lxmf) = state.lxmf.lock()
-        && let Some(mgr) = lxmf.as_mut()
-    {
-        let changed = mgr.update_lxmf_announce_app_data(
-            event.destination_hash,
-            rns_identity::name_hash::name_hash(LXMF_DELIVERY_APP_NAME),
-            Some(bytes),
-        );
-        if changed {
-            mgr.save_router_state();
+    // The announce payload is already validated by Reticulum. Make its
+    // identity material available immediately; a read-only path-table
+    // observation must never delay learning the peer's public key.
+    if let Some(ref public_key) = event.public_key {
+        if let Ok(mut lxmf) = state.lxmf.lock() {
+            if let Some(mgr) = lxmf.as_mut() {
+                mgr.update_remote_crypto(&hash_hex, public_key, event.ratchet.as_ref());
+            }
+        }
+    }
+
+    if let Some(bytes) = event.app_data.as_deref() {
+        if let Ok(mut lxmf) = state.lxmf.lock() {
+            if let Some(mgr) = lxmf.as_mut() {
+                let changed = mgr.update_lxmf_announce_app_data(
+                    event.destination_hash,
+                    rns_identity::name_hash::name_hash(LXMF_DELIVERY_APP_NAME),
+                    Some(bytes),
+                );
+                if changed {
+                    mgr.save_router_state();
+                }
+            }
         }
     }
 
     let iface = refresh_lxmf_route_cache_and_lookup_iface(state, event.destination_hash).await;
 
-    let triggered = if let Ok(mut lxmf) = state.lxmf.lock()
-        && let Some(mgr) = lxmf.as_mut()
-    {
-        if let Some(ref public_key) = event.public_key {
-            mgr.update_remote_crypto(&hash_hex, public_key, event.ratchet.as_ref());
-        }
-        mgr.router
-            .trigger_outbound_for_delivery_announce(event.destination_hash)
-    } else {
-        0
+    let triggered = match state.lxmf.lock() {
+        Ok(mut lxmf) => lxmf
+            .as_mut()
+            .filter(|mgr| mgr.has_live_direct_route(event.destination_hash, now_f64()))
+            .map_or(0, |mgr| {
+                mgr.router
+                    .trigger_outbound_for_delivery_announce(event.destination_hash)
+            }),
+        Err(_) => 0,
     };
     if triggered > 0 {
         state.lxmf_notify.notify_one();
@@ -258,7 +266,7 @@ async fn process_delivery_announce(state: &Arc<AppState>, event: AnnounceHandler
         .expect("db task panicked");
     } else {
         tracing::debug!(
-            dest = %hash_hex,
+            dest = %crate::short_id(&hash_hex),
             "lxmf.delivery path response refreshed route data without touching peer last_seen"
         );
     }
@@ -286,7 +294,7 @@ async fn process_lxst_telephony_announce(state: &Arc<AppState>, event: AnnounceH
     });
     let Some(identity_hash) = identity_hash else {
         tracing::debug!(
-            dest = %hex::encode(event.destination_hash),
+            dest = %crate::short_id(&hex::encode(event.destination_hash)),
             "lxst.telephony announce dropped: no identity hash"
         );
         return;
@@ -314,8 +322,8 @@ async fn process_lxst_telephony_announce(state: &Arc<AppState>, event: AnnounceH
         .expect("db task panicked");
     } else {
         tracing::debug!(
-            dest = %hex::encode(event.destination_hash),
-            lxmf_dest = %lxmf_dest_hex,
+            dest = %crate::short_id(&hex::encode(event.destination_hash)),
+            lxmf_dest = %crate::short_id(&lxmf_dest_hex),
             "lxst.telephony path response refreshed route data without touching peer last_seen"
         );
     }
@@ -344,7 +352,7 @@ async fn process_propagation_announce(state: &Arc<AppState>, event: AnnounceHand
         None => {
             state.pn_parse_failures.fetch_add(1, Ordering::Relaxed);
             tracing::debug!(
-                dest = %hash_hex,
+                dest = %crate::short_id(&hash_hex),
                 reason = "no_app_data",
                 "lxmf.propagation announce dropped: no app_data"
             );
@@ -355,7 +363,7 @@ async fn process_propagation_announce(state: &Arc<AppState>, event: AnnounceHand
             None => {
                 state.pn_parse_failures.fetch_add(1, Ordering::Relaxed);
                 tracing::debug!(
-                    dest = %hash_hex,
+                    dest = %crate::short_id(&hash_hex),
                     reason = "parse_failed",
                     app_data_len = bytes.len(),
                     "lxmf.propagation announce dropped: app_data did not parse as PN format"
@@ -371,14 +379,19 @@ async fn process_propagation_announce(state: &Arc<AppState>, event: AnnounceHand
         .and_then(|d| lxmf_core::handlers::pn_name_from_app_data(d))
         .filter(|s| !s.is_empty());
 
-    if let Ok(mut lxmf) = state.lxmf.lock()
-        && let Some(mgr) = lxmf.as_mut()
-    {
-        if let Some(ref public_key) = event.public_key {
-            mgr.update_remote_crypto(&hash_hex, public_key, event.ratchet.as_ref());
+    if let Ok(mut lxmf) = state.lxmf.lock() {
+        if let Some(mgr) = lxmf.as_mut() {
+            if let Some(ref public_key) = event.public_key {
+                mgr.update_remote_crypto(&hash_hex, public_key, event.ratchet.as_ref());
+            }
+            if mgr.update_lxmf_announce_app_data(
+                event.destination_hash,
+                rns_identity::name_hash::name_hash(LXMF_PROPAGATION_APP_NAME),
+                event.app_data.as_deref(),
+            ) {
+                mgr.save_router_state();
+            }
         }
-        mgr.router
-            .set_stamp_cost(event.destination_hash, pn.stamp_cost);
     }
 
     let mut entry = json!({
@@ -449,14 +462,14 @@ async fn process_propagation_announce(state: &Arc<AppState>, event: AnnounceHand
         crate::propagation::mark_relay_path_success(state, event.destination_hash);
         state.trim_propagation_nodes();
         crate::propagation::maybe_reselect_on_announce(state).await;
-        let triggered = if let Some(app_data) = event.app_data.as_deref()
-            && let Ok(mut lxmf) = state.lxmf.lock()
-            && let Some(mgr) = lxmf.as_mut()
-        {
-            mgr.router
-                .trigger_outbound_for_propagation_node_announce(event.destination_hash, app_data)
-        } else {
-            0
+        let triggered = match (event.app_data.as_deref(), state.lxmf.lock()) {
+            (Some(app_data), Ok(mut lxmf)) => lxmf.as_mut().map_or(0, |mgr| {
+                mgr.router.trigger_outbound_for_propagation_node_announce(
+                    event.destination_hash,
+                    app_data,
+                )
+            }),
+            _ => 0,
         };
         if triggered > 0 {
             state.lxmf_notify.notify_one();
@@ -472,21 +485,7 @@ async fn refresh_lxmf_route_cache_and_lookup_iface(
         let rns = state.rns.read().ok()?;
         rns.as_ref().map(|mgr| mgr.handle.transport_tx.clone())?
     };
-    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-    if tx
-        .send(TransportMessage::Rpc {
-            query: TransportQuery::GetPathTable,
-            response_tx: resp_tx,
-        })
-        .await
-        .is_err()
-    {
-        return None;
-    }
-    let entries = match resp_rx.await {
-        Ok(TransportQueryResponse::PathTable(e)) => e,
-        _ => return None,
-    };
+    let entries = crate::transport_observation::local_path_table(&tx).await?;
     refresh_lxmf_route_cache_from_path_table(state, &entries);
     entries.iter().find(|e| e.hash == dest).and_then(|e| {
         if e.interface.is_empty() {
@@ -498,10 +497,10 @@ async fn refresh_lxmf_route_cache_and_lookup_iface(
 }
 
 fn refresh_lxmf_route_cache_from_path_table(state: &Arc<AppState>, entries: &[PathTableRpcEntry]) {
-    if let Ok(mut lxmf) = state.lxmf.lock()
-        && let Some(mgr) = lxmf.as_mut()
-    {
-        mgr.replace_route_hops_from_path_table(entries);
+    if let Ok(mut lxmf) = state.lxmf.lock() {
+        if let Some(mgr) = lxmf.as_mut() {
+            mgr.replace_route_hops_from_path_table(entries);
+        }
     }
 }
 

@@ -67,8 +67,8 @@ pub async fn api_startup_progress(state: State<'_, Arc<AppState>>) -> AppResult<
 pub async fn api_setup_status(state: State<'_, Arc<AppState>>) -> AppResult<Value> {
     let identities = db::spawn_db(state.db.clone(), |p| db::get_all_identities(&p))
         .await
-        .unwrap_or_else(|e| {
-            tracing::error!(error = %e, "db task panicked");
+        .unwrap_or_else(|_| {
+            tracing::error!(reason = "task_panicked", "db task panicked");
             Default::default()
         });
     Ok(json!({ "needs_setup": identities.is_empty() }))
@@ -85,6 +85,7 @@ pub async fn api_setup_complete(
     state: State<'_, Arc<AppState>>,
     args: SetupCompleteArgs,
 ) -> AppResult<Value> {
+    let _identity_lifecycle = state.identity_switch_lock.lock().await;
     let display_name = sanitize_announced_display_name(args.display_name.as_deref().unwrap_or(""))
         .map_err(AppError::bad_request)?;
 
@@ -96,11 +97,20 @@ pub async fn api_setup_complete(
     let existing = db::spawn_db(state.db.clone(), |p| db::get_active_identity(&p))
         .await
         .ok()
-        .flatten()
-        .and_then(|i| i.get("hash").and_then(|v| v.as_str()).map(str::to_string));
+        .flatten();
 
-    let (identity_hash, mnemonic) = if let Some(hash) = existing {
-        (hash, None)
+    let (identity_hash, lxmf_hash, mnemonic) = if let Some(identity) = existing {
+        let hash = identity
+            .get("hash")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AppError::internal("active identity is unavailable"))?
+            .to_string();
+        let lxmf_hash = identity
+            .get("lxmf_hash")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AppError::internal("active messaging identity is unavailable"))?
+            .to_string();
+        (hash, lxmf_hash, None)
     } else {
         let (m, key) = match ratspeak_runtime::generate_recoverable_key() {
             Ok(v) => v,
@@ -120,7 +130,7 @@ pub async fn api_setup_complete(
         })
         .await
         .map_err(|_| AppError::internal("setup write task panicked"))?;
-        let (hash, _lxmf) = match write {
+        let (hash, lxmf_hash) = match write {
             Ok(t) => t,
             Err(e) => {
                 return Ok(
@@ -128,61 +138,63 @@ pub async fn api_setup_complete(
                 );
             }
         };
+        // Persisting an identity is inactive. The acknowledged privacy/runtime
+        // boundary must complete before this first identity becomes active.
+        let app_state = Arc::clone(state.inner());
+        crate::shutdown_rns_lxmf(&app_state)
+            .await
+            .map_err(|_| AppError::internal("identity activation boundary unavailable"))?;
         let ih = hash.clone();
-        let _ = db::spawn_db(state.db.clone(), move |p| db::set_active_identity(&p, &ih)).await;
+        db::spawn_db(state.db.clone(), move |p| db::set_active_identity(&p, &ih))
+            .await
+            .map_err(|_| AppError::internal("identity activation task failed"))?
+            .map_err(AppError::internal)?;
         // Persist the phrase so the first identity can re-display it later too.
         let seed_dir = state.config.data_dir.join("identities").join(&hash);
-        if let Err(e) = ratspeak_runtime::vault::store_plaintext_seed(&seed_dir, &m) {
-            tracing::warn!(error = %e, "could not store recovery-phrase sidecar at setup");
+        if ratspeak_runtime::vault::store_plaintext_seed(&seed_dir, &m).is_err() {
+            tracing::warn!(
+                reason = "write_failed",
+                "could not store recovery-phrase sidecar at setup"
+            );
         }
-        (hash, Some(m))
+        (hash, lxmf_hash, Some(m))
     };
 
-    match crate::lxmf::LxmfManager::load_or_create(
-        &state.config.data_root,
-        Some(&identity_hash),
-        None,
-    ) {
-        Ok(mgr) => {
-            let lxmf_hash = mgr.lxmf_hash.clone();
-            let dn = if display_name.is_empty() {
-                format!("!Ratspeak.org-{}", &lxmf_hash[..6.min(lxmf_hash.len())])
-            } else {
-                display_name.clone()
-            };
-            let (ih, lh, dnc) = (identity_hash.clone(), lxmf_hash.clone(), dn.clone());
-            db::spawn_db(state.db.clone(), move |p| {
-                db::save_identity(&p, &ih, &lh, "Default", &dnc)
-            })
-            .await
-            .unwrap_or_else(|e| {
-                tracing::error!(error = %e, "setup save_identity task panicked");
-                Default::default()
-            });
-            state.set_lxmf(mgr);
-            Ok(json!({
-                "ok": true,
-                "identity_hash": identity_hash,
-                "lxmf_hash": lxmf_hash,
-                "display_name": dn,
-                "mnemonic": mnemonic,
-            }))
-        }
-        Err(e) => Ok(json!({ "ok": false, "error": format!("Failed to load identity: {e}") })),
-    }
+    let display_name = if display_name.is_empty() {
+        format!("!Ratspeak.org-{}", &lxmf_hash[..6.min(lxmf_hash.len())])
+    } else {
+        display_name
+    };
+    let (ih, lh, dn) = (
+        identity_hash.clone(),
+        lxmf_hash.clone(),
+        display_name.clone(),
+    );
+    db::spawn_db(state.db.clone(), move |p| {
+        db::save_identity(&p, &ih, &lh, "Default", &dn)
+    })
+    .await
+    .map_err(|_| AppError::internal("setup identity update task failed"))?;
+
+    Ok(json!({
+        "ok": true,
+        "identity_hash": identity_hash,
+        "lxmf_hash": lxmf_hash,
+        "display_name": display_name,
+        "mnemonic": mnemonic,
+    }))
 }
 
 #[tauri::command]
 pub async fn api_setup_restart(state: State<'_, Arc<AppState>>) -> AppResult<Value> {
-    state.set_startup_stage("checking");
-    if let Ok(mut sig) = state.session_shutdown.write() {
-        *sig = rns_runtime::lifecycle::ShutdownSignal::new();
-    }
-    let data_dir = state.config.data_root.clone();
     let st: Arc<AppState> = Arc::clone(&state);
     tokio::spawn(async move {
-        crate::init_rns_lxmf(Arc::clone(&st), data_dir).await;
-        crate::commands::ble::restore_ble_peer_if_requested(st).await;
+        match crate::restart_rns_lxmf(Arc::clone(&st)).await {
+            Ok(()) => crate::commands::ble::restore_ble_peer_if_requested(st).await,
+            Err(error) => {
+                tracing::error!(%error, "setup restart aborted at lifecycle boundary");
+            }
+        }
     });
     Ok(json!({ "message": "Initializing..." }))
 }
@@ -204,12 +216,57 @@ pub async fn api_set_foreground(
     state: State<'_, Arc<AppState>>,
     args: SetForegroundArgs,
 ) -> AppResult<Value> {
-    let fg = args.foreground.unwrap_or(true);
-    set_foreground_state(&state, fg);
-    Ok(json!({ "foreground": fg }))
+    apply_foreground_state(Arc::clone(state.inner()), args.foreground.unwrap_or(true)).await
+}
+
+/// Apply a native or IPC foreground transition through one ordered lifecycle
+/// boundary. Platform callbacks call this directly instead of depending on a
+/// running WebView JavaScript event loop.
+pub async fn apply_foreground_state(state: Arc<AppState>, fg: bool) -> AppResult<Value> {
+    let transition = state.begin_foreground_transition();
+    apply_foreground_transition(state, fg, transition).await
+}
+
+/// Apply a foreground edge whose authority was allocated synchronously when
+/// the platform event arrived. This prevents executor scheduling from
+/// reordering a fast suspend/resume pair.
+pub async fn apply_foreground_transition(
+    state: Arc<AppState>,
+    fg: bool,
+    transition: u64,
+) -> AppResult<Value> {
+    if !state.is_current_foreground_transition(transition) {
+        return Ok(json!({ "foreground": state.is_foreground() }));
+    }
+    #[cfg(all(feature = "lxst-voice", any(target_os = "android", target_os = "ios")))]
+    if !fg && crate::voice_memo::cancel_recording(&state).await.is_err() {
+        tracing::warn!(
+            reason = "mobile_background_voice_memo_cancel_failed",
+            "could not release voice memo capture while backgrounding"
+        );
+    }
+    if fg {
+        let _identity_lifecycle = state.identity_switch_lock.lock().await;
+        let _activity_control = state.activity_control_lock.lock().await;
+        state
+            .activity
+            .expire_trace_if_due()
+            .await
+            .map_err(|_| AppError::internal("activity lifecycle unavailable"))?;
+    }
+    let _ = set_foreground_state_if_current(&state, fg, transition);
+    Ok(json!({ "foreground": state.is_foreground() }))
 }
 
 pub fn set_foreground_state(state: &Arc<AppState>, fg: bool) {
+    let transition = state.begin_foreground_transition();
+    let _ = set_foreground_state_if_current(state, fg, transition);
+}
+
+pub fn set_foreground_state_if_current(state: &Arc<AppState>, fg: bool, transition: u64) -> bool {
+    if !state.is_current_foreground_transition(transition) {
+        return false;
+    }
     let was = state
         .is_foreground
         .swap(fg, std::sync::atomic::Ordering::Relaxed);
@@ -237,6 +294,7 @@ pub fn set_foreground_state(state: &Arc<AppState>, fg: bool) {
         #[cfg(all(feature = "ble", any(target_os = "ios", target_os = "macos")))]
         rns_interface::ble_central_apple_connect::on_app_will_resign_active();
     }
+    true
 }
 
 #[tauri::command]
@@ -248,8 +306,8 @@ pub async fn api_unread_count(state: State<'_, Arc<AppState>>) -> AppResult<Valu
             db::get_unread_breakdown(&p, &id_for_db)
         })
         .await
-        .unwrap_or_else(|e| {
-            tracing::error!(error = %e, "unread-count db task panicked");
+        .unwrap_or_else(|_| {
+            tracing::error!(reason = "task_panicked", "unread-count db task panicked");
             Default::default()
         });
         let total: i64 = rows.iter().map(|(_, _, c, _, _)| *c).sum();
@@ -286,8 +344,10 @@ pub async fn api_unread_count(state: State<'_, Arc<AppState>>) -> AppResult<Valu
 pub async fn api_system_restart(state: State<'_, Arc<AppState>>) -> AppResult<Value> {
     let st: Arc<AppState> = Arc::clone(&state);
     tokio::spawn(async move {
-        crate::restart_rns_lxmf(Arc::clone(&st)).await;
-        crate::commands::ble::restore_ble_peer_if_requested(st).await;
+        match crate::restart_rns_lxmf(Arc::clone(&st)).await {
+            Ok(()) => crate::commands::ble::restore_ble_peer_if_requested(st).await,
+            Err(error) => tracing::error!(%error, "system restart aborted at lifecycle boundary"),
+        }
     });
     Ok(json!({ "message": "Restarting..." }))
 }
@@ -296,7 +356,10 @@ pub async fn api_system_restart(state: State<'_, Arc<AppState>>) -> AppResult<Va
 pub async fn api_system_shutdown(state: State<'_, Arc<AppState>>) -> AppResult<Value> {
     let st: Arc<AppState> = Arc::clone(&state);
     tokio::spawn(async move {
-        crate::shutdown_rns_lxmf(&st).await;
+        let _identity_lifecycle = st.identity_switch_lock.lock().await;
+        if let Err(error) = crate::shutdown_rns_lxmf(&st).await {
+            tracing::error!(%error, "system shutdown aborted at lifecycle boundary");
+        }
     });
     Ok(json!({ "message": "Shutting down..." }))
 }
@@ -305,8 +368,8 @@ pub async fn api_system_shutdown(state: State<'_, Arc<AppState>>) -> AppResult<V
 pub async fn api_database_stats(state: State<'_, Arc<AppState>>) -> AppResult<Value> {
     let stats = db::spawn_db(state.db.clone(), |p| db::get_database_stats(&p))
         .await
-        .unwrap_or_else(|e| {
-            tracing::error!(error = %e, "database_stats db task panicked");
+        .unwrap_or_else(|_| {
+            tracing::error!(reason = "task_panicked", "database_stats db task panicked");
             Default::default()
         });
     Ok(stats)
@@ -349,12 +412,13 @@ pub async fn api_clear_paths(state: State<'_, Arc<AppState>>) -> AppResult<Value
         {
             cleared += n;
         }
-        if handle.instance_mode == rns_runtime::reticulum::InstanceMode::Client
-            && let Some(rns_transport::messages::TransportQueryResponse::IntResult(n)) = handle
+        if handle.instance_mode == rns_runtime::reticulum::InstanceMode::Client {
+            if let Some(rns_transport::messages::TransportQueryResponse::IntResult(n)) = handle
                 .query_transport(rns_transport::messages::TransportQuery::DropPathTable)
                 .await
-        {
-            cleared += n;
+            {
+                cleared += n;
+            }
         }
         if let Some(rns_transport::messages::TransportQueryResponse::PathTable(entries)) = handle
             .query_control(rns_transport::messages::TransportQuery::GetPathTable)
@@ -377,10 +441,10 @@ pub async fn api_clear_paths(state: State<'_, Arc<AppState>>) -> AppResult<Value
     state
         .path_activity_baselined
         .store(false, std::sync::atomic::Ordering::Relaxed);
-    if let Ok(mut lxmf) = state.lxmf.lock()
-        && let Some(mgr) = lxmf.as_mut()
-    {
-        mgr.replace_route_hops_from_path_table(&[]);
+    if let Ok(mut lxmf) = state.lxmf.lock() {
+        if let Some(mgr) = lxmf.as_mut() {
+            mgr.replace_route_hops_from_path_table(&[]);
+        }
     }
     clear_cached_path_stats(&state);
     state.emit_to_all("paths_cleared", json!({ "cleared": cleared }));
@@ -406,12 +470,13 @@ pub async fn api_clear_announces(state: State<'_, Arc<AppState>>) -> AppResult<V
         {
             recent_cleared += n;
         }
-        if handle.instance_mode == rns_runtime::reticulum::InstanceMode::Client
-            && let Some(rns_transport::messages::TransportQueryResponse::IntResult(n)) = handle
+        if handle.instance_mode == rns_runtime::reticulum::InstanceMode::Client {
+            if let Some(rns_transport::messages::TransportQueryResponse::IntResult(n)) = handle
                 .query_control(rns_transport::messages::TransportQuery::DropRecentAnnounces)
                 .await
-        {
-            recent_cleared += n;
+            {
+                recent_cleared += n;
+            }
         }
         let _ = handle
             .query_control(rns_transport::messages::TransportQuery::DropAnnounceQueues)
@@ -432,8 +497,8 @@ pub async fn api_clear_announces(state: State<'_, Arc<AppState>>) -> AppResult<V
         db::clear_discovered_identity_activity(&p)
     })
     .await
-    .unwrap_or_else(|e| {
-        tracing::error!(error = %e, "clear_announces db task panicked");
+    .unwrap_or_else(|_| {
+        tracing::error!(reason = "task_panicked", "clear_announces db task panicked");
         0
     });
     state.emit_to_all(
@@ -459,8 +524,8 @@ pub async fn api_clear_messages(state: State<'_, Arc<AppState>>) -> AppResult<Va
         db::clear_all_messages(&p, &id_for_db)
     })
     .await
-    .unwrap_or_else(|e| {
-        tracing::error!(error = %e, "clear_messages db task panicked");
+    .unwrap_or_else(|_| {
+        tracing::error!(reason = "task_panicked", "clear_messages db task panicked");
         Default::default()
     });
     remove_stored_file_refs(&state.config.files_dir(), file_refs);
@@ -473,15 +538,15 @@ pub async fn api_clear_contacts(state: State<'_, Arc<AppState>>) -> AppResult<Va
     let id1 = identity_id.clone();
     db::spawn_db(state.db.clone(), move |p| db::clear_all_contacts(&p, &id1))
         .await
-        .unwrap_or_else(|e| {
-            tracing::error!(error = %e, "clear_contacts db task panicked");
+        .unwrap_or_else(|_| {
+            tracing::error!(reason = "task_panicked", "clear_contacts db task panicked");
             Default::default()
         });
     let id2 = identity_id;
     db::spawn_db(state.db.clone(), move |p| db::clear_all_blocked(&p, &id2))
         .await
-        .unwrap_or_else(|e| {
-            tracing::error!(error = %e, "clear_blocked db task panicked");
+        .unwrap_or_else(|_| {
+            tracing::error!(reason = "task_panicked", "clear_blocked db task panicked");
             Default::default()
         });
     Ok(json!(null))
@@ -494,23 +559,32 @@ pub async fn api_reset_database(state: State<'_, Arc<AppState>>) -> AppResult<Va
     let id1 = identity_id.clone();
     let file_refs = db::spawn_db(state.db.clone(), move |p| db::clear_all_messages(&p, &id1))
         .await
-        .unwrap_or_else(|e| {
-            tracing::error!(error = %e, "reset_database clear_messages panicked");
+        .unwrap_or_else(|_| {
+            tracing::error!(
+                reason = "task_panicked",
+                "reset_database clear_messages panicked"
+            );
             Default::default()
         });
     remove_stored_file_refs(&state.config.files_dir(), file_refs);
     let id2 = identity_id.clone();
     db::spawn_db(state.db.clone(), move |p| db::clear_all_contacts(&p, &id2))
         .await
-        .unwrap_or_else(|e| {
-            tracing::error!(error = %e, "reset_database clear_contacts panicked");
+        .unwrap_or_else(|_| {
+            tracing::error!(
+                reason = "task_panicked",
+                "reset_database clear_contacts panicked"
+            );
             Default::default()
         });
     let id3 = identity_id;
     db::spawn_db(state.db.clone(), move |p| db::clear_all_blocked(&p, &id3))
         .await
-        .unwrap_or_else(|e| {
-            tracing::error!(error = %e, "reset_database clear_blocked panicked");
+        .unwrap_or_else(|_| {
+            tracing::error!(
+                reason = "task_panicked",
+                "reset_database clear_blocked panicked"
+            );
             Default::default()
         });
     Ok(json!(null))
@@ -519,28 +593,38 @@ pub async fn api_reset_database(state: State<'_, Arc<AppState>>) -> AppResult<Va
 #[tauri::command]
 #[tracing::instrument(level = "debug", name = "command.api_identity_reset", skip_all)]
 pub async fn api_identity_reset(state: State<'_, Arc<AppState>>) -> AppResult<Value> {
+    let _identity_lifecycle = state.identity_switch_lock.lock().await;
     let identity_id = active_identity_id(&state);
-
-    #[cfg(feature = "lxst-voice")]
-    {
-        let app_state = state.inner().clone();
-        crate::voice::shutdown_voice_service(&app_state).await;
-    }
+    let reset_data_dir = state
+        .lxmf
+        .lock()
+        .ok()
+        .and_then(|lxmf| lxmf.as_ref().map(|manager| manager.data_dir.clone()));
+    let app_state = Arc::clone(state.inner());
+    crate::shutdown_rns_lxmf(&app_state)
+        .await
+        .map_err(|_| AppError::internal("identity reset lifecycle boundary unavailable"))?;
 
     if !identity_id.is_empty() {
         let id1 = identity_id.clone();
         let file_refs = db::spawn_db(state.db.clone(), move |p| db::clear_all_messages(&p, &id1))
             .await
-            .unwrap_or_else(|e| {
-                tracing::error!(error = %e, "identity_reset clear_messages panicked");
+            .unwrap_or_else(|_| {
+                tracing::error!(
+                    reason = "task_panicked",
+                    "identity_reset clear_messages panicked"
+                );
                 Default::default()
             });
         remove_stored_file_refs(&state.config.files_dir(), file_refs);
         let id2 = identity_id.clone();
         db::spawn_db(state.db.clone(), move |p| db::clear_all_contacts(&p, &id2))
             .await
-            .unwrap_or_else(|e| {
-                tracing::error!(error = %e, "identity_reset clear_contacts panicked");
+            .unwrap_or_else(|_| {
+                tracing::error!(
+                    reason = "task_panicked",
+                    "identity_reset clear_contacts panicked"
+                );
                 Default::default()
             });
         let id3 = identity_id.clone();
@@ -548,31 +632,28 @@ pub async fn api_identity_reset(state: State<'_, Arc<AppState>>) -> AppResult<Va
             db::delete_identity(&p, &id3, true)
         })
         .await
-        .unwrap_or_else(|e| {
-            tracing::error!(error = %e, "identity_reset delete panicked");
-            Err(format!("db task panicked: {e}"))
+        .unwrap_or_else(|_| {
+            tracing::error!(reason = "task_panicked", "identity_reset delete panicked");
+            Err("db task panicked".to_string())
         });
-        if let Err(e) = del_res {
-            tracing::error!("Failed to delete identity during reset: {e}");
+        if del_res.is_err() {
+            tracing::error!(
+                reason = "delete_failed",
+                "Failed to delete identity during reset"
+            );
         }
     }
 
-    let reset_data_dir = state
-        .lxmf
-        .lock()
-        .ok()
-        .and_then(|lxmf| lxmf.as_ref().map(|m| m.data_dir.clone()));
     if let Some(data_dir) = reset_data_dir {
         let _ = tokio::task::spawn_blocking(move || {
             std::fs::remove_dir_all(data_dir.join("identities")).ok();
             std::fs::remove_dir_all(data_dir.join("ratchets")).ok();
             std::fs::remove_file(data_dir.join("identity")).ok();
+            // Hub keys are identity-scoped key material; a surviving keyfile
+            // would resurrect the hub on its old destination hash.
+            std::fs::remove_dir_all(data_dir.join("channel_hub")).ok();
         })
         .await;
-    }
-
-    if let Ok(mut lxmf) = state.lxmf.lock() {
-        *lxmf = None;
     }
 
     state.set_startup_stage("ready");
@@ -601,6 +682,7 @@ pub async fn dismiss_alert(state: State<'_, Arc<AppState>>, index: i64) -> AppRe
 #[tauri::command]
 #[tracing::instrument(level = "debug", name = "command.api_factory_reset", skip_all)]
 pub async fn api_factory_reset(state: State<'_, Arc<AppState>>) -> AppResult<Value> {
+    let _identity_lifecycle = state.identity_switch_lock.lock().await;
     // Capture config_dir before shutdown wipes RNS.
     let rns_config_dir = active_rns_config_dir(&state);
     let app_private_rns_config_dir = state
@@ -608,27 +690,10 @@ pub async fn api_factory_reset(state: State<'_, Arc<AppState>>) -> AppResult<Val
         .uses_app_private_rns_config_dir()
         .then(|| state.config.rns_config_dir.clone());
 
-    #[cfg(feature = "lxst-voice")]
-    {
-        let app_state = state.inner().clone();
-        crate::voice::shutdown_voice_service(&app_state).await;
-    }
-
-    // Drop LXMF without save_crypto_state (would rewrite the dir we delete).
-    if let Ok(mut lxmf) = state.lxmf.lock() {
-        let _ = lxmf.take();
-    }
-
-    state.emit_to_all("system_status", json!({ "status": "stopping" }));
-    if let Ok(sig) = state.session_shutdown.read() {
-        sig.trigger();
-    }
-    if let Ok(mut rns) = state.rns.write()
-        && let Some(mgr) = rns.take()
-    {
-        mgr.shutdown();
-    }
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let app_state = Arc::clone(state.inner());
+    crate::shutdown_rns_lxmf(&app_state)
+        .await
+        .map_err(|_| AppError::internal("factory reset lifecycle boundary unavailable"))?;
 
     db::spawn_db(state.db.clone(), |pool| {
         db::note_identity_tables_changed();
@@ -644,8 +709,8 @@ pub async fn api_factory_reset(state: State<'_, Arc<AppState>>) -> AppResult<Val
         }
     })
     .await
-    .unwrap_or_else(|e| {
-        tracing::error!(error = %e, "factory_reset db wipe panicked");
+    .unwrap_or_else(|_| {
+        tracing::error!(reason = "task_panicked", "factory_reset db wipe panicked");
         Default::default()
     });
 
@@ -653,47 +718,59 @@ pub async fn api_factory_reset(state: State<'_, Arc<AppState>>) -> AppResult<Val
     let data_dir = state.config.data_dir.clone();
     let _ = tokio::task::spawn_blocking(move || {
         let identities_dir = data_dir.join("identities");
-        if identities_dir.exists()
-            && let Err(e) = std::fs::remove_dir_all(&identities_dir)
-        {
-            tracing::warn!("Factory reset: failed to remove identities dir: {e}");
+        if identities_dir.exists() && std::fs::remove_dir_all(&identities_dir).is_err() {
+            tracing::warn!(
+                reason = "remove_identities_failed",
+                "Factory reset: failed to remove identities dir"
+            );
         }
         let ratchet_dir = data_dir.join("ratchets");
-        if ratchet_dir.exists()
-            && let Err(e) = std::fs::remove_dir_all(&ratchet_dir)
-        {
-            tracing::warn!("Factory reset: failed to remove ratchets dir: {e}");
+        if ratchet_dir.exists() && std::fs::remove_dir_all(&ratchet_dir).is_err() {
+            tracing::warn!(
+                reason = "remove_ratchets_failed",
+                "Factory reset: failed to remove ratchets dir"
+            );
         }
         let files_dir = data_dir.join("files");
-        if files_dir.exists()
-            && let Err(e) = std::fs::remove_dir_all(&files_dir)
-        {
-            tracing::warn!("Factory reset: failed to remove files dir: {e}");
-        }
-        if let Some(rns_dir) = app_private_rns_config_dir
-            && rns_dir.exists()
-            && let Err(e) = std::fs::remove_dir_all(&rns_dir)
-        {
+        if files_dir.exists() && std::fs::remove_dir_all(&files_dir).is_err() {
             tracing::warn!(
-                "Factory reset: failed to remove app-private Reticulum config {}: {e}",
-                rns_dir.display()
+                reason = "remove_files_failed",
+                "Factory reset: failed to remove files dir"
             );
+        }
+        let hub_dir = data_dir.join("channel_hub");
+        if hub_dir.exists() && std::fs::remove_dir_all(&hub_dir).is_err() {
+            tracing::warn!(
+                reason = "remove_channel_hub_failed",
+                "Factory reset: failed to remove channel hub keys"
+            );
+        }
+        if let Some(rns_dir) = app_private_rns_config_dir {
+            if rns_dir.exists() && std::fs::remove_dir_all(&rns_dir).is_err() {
+                tracing::warn!(
+                    reason = "remove_config_failed",
+                    "Factory reset: failed to remove app-private Reticulum config"
+                );
+            }
         }
         if let Ok(entries) = std::fs::read_dir(&data_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().is_some_and(|e| e == "key")
-                    && let Err(e) = std::fs::remove_file(&path)
+                    && std::fs::remove_file(&path).is_err()
                 {
                     tracing::warn!(
-                        "Factory reset: failed to remove key file {}: {e}",
-                        path.display()
+                        reason = "remove_key_failed",
+                        "Factory reset: failed to remove key file"
                     );
                 }
                 if path.file_name().is_some_and(|n| n == "identity")
-                    && let Err(e) = std::fs::remove_file(&path)
+                    && std::fs::remove_file(&path).is_err()
                 {
-                    tracing::warn!("Factory reset: failed to remove identity file: {e}");
+                    tracing::warn!(
+                        reason = "remove_identity_failed",
+                        "Factory reset: failed to remove identity file"
+                    );
                 }
             }
         }
@@ -701,15 +778,13 @@ pub async fn api_factory_reset(state: State<'_, Arc<AppState>>) -> AppResult<Val
     .await;
 
     let storage_dir = rns_config_dir.join("storage");
-    if storage_dir.exists()
-        && let Err(e) = std::fs::remove_dir_all(&storage_dir)
-    {
-        tracing::warn!("Factory reset: failed to remove RNS storage dir: {e}");
+    if storage_dir.exists() && std::fs::remove_dir_all(&storage_dir).is_err() {
+        tracing::warn!(
+            reason = "remove_storage_failed",
+            "Factory reset: failed to remove RNS storage dir"
+        );
     }
 
-    if let Ok(mut log) = state.event_log.lock() {
-        log.clear();
-    }
     if let Ok(mut announces) = state.announce_history.write() {
         announces.clear();
     }

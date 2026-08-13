@@ -1,6 +1,12 @@
 :root {
     color-scheme: light;
 
+    --theme-page-rgb: 250, 247, 243;
+    --theme-ink-rgb: 36, 31, 28;
+    --theme-border-rgb: 222, 212, 200;
+    --theme-strong-border-rgb: 146, 134, 124;
+    --theme-focus: #B14F24;
+
     --bg-primary:    #FAF7F3;
     --bg-secondary:  #F3EFEA;
     --bg-tertiary:   #ECE6DE;
@@ -37,6 +43,14 @@
     --status-info:   #3A76F0;
     --status-purple: #8B5CF6;
     --ble-accent:    #0E9AA7;
+    /* Status fills can stay vivid; status text needs stronger light-theme
+       contrast. Use the -fg aliases for text and icon strokes. */
+    --status-online-fg: #1F6F43;
+    --status-error-fg:  #B4232C;
+    --status-warning-fg:#765A00;
+    --status-info-fg:   #245FC4;
+    --status-purple-fg: #6E46C7;
+    --ble-accent-fg:    #08717B;
     --status-online-rgb:  46, 139, 87;
     --status-error-rgb:   207, 34, 46;
     --status-warning-rgb: 212, 167, 44;
@@ -46,6 +60,7 @@
 
     --font-mono:     'JetBrains Mono', 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
     --font-sans:     'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    --font-ui:       -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
 
     --glass-bg:      rgba(250, 247, 243, 0.86);
     --glass-border:  rgba(222, 212, 200, 0.82);
@@ -91,7 +106,7 @@
     --border-surface-soft:  var(--divider);
     --border-surface-strong: var(--divider-strong);
     --border-row:           var(--divider);
-    --border-control:       var(--border);
+    --border-control:       #92867C;
     --bg-elevated:          var(--surface-panel);
 
     --control-height-xs:    28px;
@@ -193,13 +208,15 @@
     --modal-width-md: 380px;
     --modal-width-lg: 400px;
 
-    --text-2xs: 11px;
-    --text-xs:  12px;
-    --text-sm:  13px;
-    --text-base:15px;
-    --text-lg:  17px;
-    --text-xl:  18px;
-    --text-2xl: 24px;
+    /* Text scales with the root size; geometry and touch targets stay px. */
+    --text-2xs: 0.6875rem;
+    --text-xs:  0.75rem;
+    --text-sm:  0.8125rem;
+    --text-base:0.9375rem;
+    --text-lg:  1.0625rem;
+    --text-xl:  1.125rem;
+    --text-2xl: 1.5rem;
+    --text-3xl: 1.75rem;
 
     /* iOS env() reports real insets (contentInsetAdjustmentBehavior=.never);
        Android injects --sat/--sab via evaluateJavascript; desktop falls back to 0. */
@@ -281,6 +298,12 @@
     --type-badge-weight:   var(--type-weight-semibold);
     --type-badge-tracking: var(--tracking-wide);
 
+    /* Compact machine states such as OFF / ON / AUTO. These stay distinct
+       from prose labels and mixed-value selector controls. */
+    --type-state-size:     var(--text-xs);
+    --type-state-weight:   var(--type-weight-semibold);
+    --type-state-tracking: 0.04em;
+
     --radius-3xl:  16px;
     --radius-pill: 20px;
     --radius-full: 50%;
@@ -302,13 +325,19 @@
 
 @media (min-width: 769px) {
     :root {
-        --text-2xs: 12px; --text-xs: 13px; --text-sm: 14px; --text-base: 15px;
-        --text-lg: 17px; --text-xl: 18px; --text-2xl: 24px;
+        --text-2xs: 0.75rem; --text-xs: 0.8125rem; --text-sm: 0.875rem; --text-base: 0.9375rem;
+        --text-lg: 1.0625rem; --text-xl: 1.125rem; --text-2xl: 1.5rem; --text-3xl: 1.75rem;
     }
 }
 
 [data-theme="dark"] {
     color-scheme: dark;
+
+    --theme-page-rgb: 24, 23, 26;
+    --theme-ink-rgb: 242, 238, 234;
+    --theme-border-rgb: 50, 46, 48;
+    --theme-strong-border-rgb: 116, 105, 112;
+    --theme-focus: #D2693B;
 
     --bg-primary:    #18171a;
     --bg-secondary:  #1f1d20;
@@ -326,11 +355,11 @@
     --text-disabled: #6F6661;
 
     --accent:        #D2693B;
-    --accent-dim:    #B85829;
+    --accent-dim:    #D9784B;
     --accent-dark:   #B85829;
     --accent-light:  #2a1f18;
     --accent-rgb:    210, 105, 59;
-    --on-accent:     #FFFFFF;
+    --on-accent:     #18171A;
     --accent-a05:    rgba(var(--accent-rgb), 0.05);
     --accent-a12:    rgba(var(--accent-rgb), 0.12);
     --accent-a15:    rgba(var(--accent-rgb), 0.15);
@@ -346,6 +375,12 @@
     --status-info:   #5b93f5;
     --status-purple: #a78bfa;
     --ble-accent:    #22D3EE;
+    --status-online-fg: var(--status-online);
+    --status-error-fg:  var(--status-error);
+    --status-warning-fg:var(--status-warning);
+    --status-info-fg:   var(--status-info);
+    --status-purple-fg: var(--status-purple);
+    --ble-accent-fg:    var(--ble-accent);
     --status-online-rgb:  74, 222, 128;
     --status-error-rgb:   229, 83, 75;
     --status-warning-rgb: 224, 184, 62;
@@ -390,7 +425,7 @@
     --border-surface-soft:  var(--divider);
     --border-surface-strong: var(--divider-strong);
     --border-row:           var(--divider);
-    --border-control:       var(--border);
+    --border-control:       #746970;
     --bg-elevated:          var(--surface-panel);
 
     --divider:             rgba(50, 46, 48, 0.82);
@@ -479,6 +514,12 @@
     :root:not([data-theme]) {
         color-scheme: dark;
 
+        --theme-page-rgb: 24, 23, 26;
+        --theme-ink-rgb: 242, 238, 234;
+        --theme-border-rgb: 50, 46, 48;
+        --theme-strong-border-rgb: 116, 105, 112;
+        --theme-focus: #D2693B;
+
         --bg-primary:    #18171a;
         --bg-secondary:  #1f1d20;
         --bg-tertiary:   #26242a;
@@ -495,11 +536,11 @@
         --text-disabled: #6F6661;
 
         --accent:        #D2693B;
-        --accent-dim:    #B85829;
+        --accent-dim:    #D9784B;
         --accent-dark:   #B85829;
         --accent-light:  #2a1f18;
         --accent-rgb:    210, 105, 59;
-        --on-accent:     #FFFFFF;
+        --on-accent:     #18171A;
         --accent-a05:    rgba(var(--accent-rgb), 0.05);
         --accent-a12:    rgba(var(--accent-rgb), 0.12);
         --accent-a15:    rgba(var(--accent-rgb), 0.15);
@@ -515,6 +556,12 @@
         --status-info:   #5b93f5;
         --status-purple: #a78bfa;
         --ble-accent:    #22D3EE;
+        --status-online-fg: var(--status-online);
+        --status-error-fg:  var(--status-error);
+        --status-warning-fg:var(--status-warning);
+        --status-info-fg:   var(--status-info);
+        --status-purple-fg: var(--status-purple);
+        --ble-accent-fg:    var(--ble-accent);
         --status-online-rgb:  74, 222, 128;
         --status-error-rgb:   229, 83, 75;
         --status-warning-rgb: 224, 184, 62;
@@ -559,7 +606,7 @@
         --border-surface-soft:  var(--divider);
         --border-surface-strong: var(--divider-strong);
         --border-row:           var(--divider);
-        --border-control:       var(--border);
+        --border-control:       #746970;
         --bg-elevated:          var(--surface-panel);
 
         --divider:             rgba(50, 46, 48, 0.82);

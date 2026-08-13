@@ -20,3 +20,166 @@ pub fn bluetooth_authorization() -> &'static str {
         _ => "unknown",
     }
 }
+
+/// Process-local ownership of the iOS audio session used by LXST calls and
+/// voice memos. CPAL configures the RemoteIO audio unit, but deliberately does
+/// not configure AVAudioSession; iOS' default session is playback-only.
+pub struct VoiceAudioSessionGuard;
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Memo playback is driven by WKWebView, while calls and recording are driven
+/// by the native audio stack. Track only the playback lease here so a delayed
+/// WebView cleanup cannot deactivate a newer call/recording session.
+static VOICE_MEMO_PLAYBACK_SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+impl VoiceAudioSessionGuard {
+    pub fn activate() -> Result<Self, String> {
+        configure_voice_audio_session()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for VoiceAudioSessionGuard {
+    fn drop(&mut self) {
+        deactivate_voice_audio_session();
+    }
+}
+
+#[link(name = "AVFAudio", kind = "framework")]
+unsafe extern "C" {}
+
+fn configure_voice_audio_session() -> Result<(), String> {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject, Bool};
+
+    // A capture/call session supersedes memo playback. Clear its lease before
+    // reconfiguring so a late playback stop cannot deactivate this session.
+    VOICE_MEMO_PLAYBACK_SESSION_ACTIVE.store(false, Ordering::Release);
+
+    unsafe {
+        let session_class = AnyClass::get(c"AVAudioSession")
+            .ok_or_else(|| "AVAudioSession is unavailable".to_string())?;
+        let string_class =
+            AnyClass::get(c"NSString").ok_or_else(|| "NSString is unavailable".to_string())?;
+        let session: *mut AnyObject = msg_send![session_class, sharedInstance];
+        if session.is_null() {
+            return Err("AVAudioSession could not be opened".to_string());
+        }
+        let category: *mut AnyObject = msg_send![
+            string_class,
+            stringWithUTF8String: c"AVAudioSessionCategoryPlayAndRecord".as_ptr()
+        ];
+        let mode: *mut AnyObject = msg_send![
+            string_class,
+            stringWithUTF8String: c"AVAudioSessionModeVoiceChat".as_ptr()
+        ];
+        if category.is_null() || mode.is_null() {
+            return Err("AVAudioSession voice configuration is unavailable".to_string());
+        }
+
+        let mut error: *mut AnyObject = std::ptr::null_mut();
+        let configured: Bool = msg_send![
+            session,
+            setCategory: category,
+            mode: mode,
+            options: 0usize,
+            error: &mut error
+        ];
+        if !configured.as_bool() {
+            return Err("iOS could not configure the voice audio session".to_string());
+        }
+
+        error = std::ptr::null_mut();
+        let active: Bool = msg_send![session, setActive: true, error: &mut error];
+        if !active.as_bool() {
+            return Err("iOS could not activate the voice audio session".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Give an explicitly played voice memo an audible, playback-only route.
+///
+/// `PlayAndRecord` + `VoiceChat` is intentionally limited to calls/capture and
+/// may prefer the receiver route. Recorded messages are ordinary media: the
+/// playback category follows the selected speaker/headset route and continues
+/// to work when the Ring/Silent switch is enabled.
+pub fn activate_voice_memo_playback_session() -> Result<(), String> {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject, Bool};
+
+    unsafe {
+        let session_class = AnyClass::get(c"AVAudioSession")
+            .ok_or_else(|| "AVAudioSession is unavailable".to_string())?;
+        let string_class =
+            AnyClass::get(c"NSString").ok_or_else(|| "NSString is unavailable".to_string())?;
+        let session: *mut AnyObject = msg_send![session_class, sharedInstance];
+        if session.is_null() {
+            return Err("AVAudioSession could not be opened".to_string());
+        }
+        let category: *mut AnyObject = msg_send![
+            string_class,
+            stringWithUTF8String: c"AVAudioSessionCategoryPlayback".as_ptr()
+        ];
+        let mode: *mut AnyObject = msg_send![
+            string_class,
+            stringWithUTF8String: c"AVAudioSessionModeDefault".as_ptr()
+        ];
+        if category.is_null() || mode.is_null() {
+            return Err("AVAudioSession playback configuration is unavailable".to_string());
+        }
+
+        let mut error: *mut AnyObject = std::ptr::null_mut();
+        let configured: Bool = msg_send![
+            session,
+            setCategory: category,
+            mode: mode,
+            options: 0usize,
+            error: &mut error
+        ];
+        if !configured.as_bool() {
+            return Err("iOS could not configure voice message playback".to_string());
+        }
+
+        error = std::ptr::null_mut();
+        let active: Bool = msg_send![session, setActive: true, error: &mut error];
+        if !active.as_bool() {
+            return Err("iOS could not activate voice message playback".to_string());
+        }
+    }
+    VOICE_MEMO_PLAYBACK_SESSION_ACTIVE.store(true, Ordering::Release);
+    Ok(())
+}
+
+/// Release playback only when this process still owns the playback lease.
+/// Calls and capture clear the lease before replacing the AVAudioSession.
+pub fn deactivate_voice_memo_playback_session() {
+    if VOICE_MEMO_PLAYBACK_SESSION_ACTIVE.swap(false, Ordering::AcqRel) {
+        deactivate_voice_audio_session();
+    }
+}
+
+fn deactivate_voice_audio_session() {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject, Bool};
+
+    unsafe {
+        let Some(session_class) = AnyClass::get(c"AVAudioSession") else {
+            return;
+        };
+        let session: *mut AnyObject = msg_send![session_class, sharedInstance];
+        if session.is_null() {
+            return;
+        }
+        let mut error: *mut AnyObject = std::ptr::null_mut();
+        // Notify other audio apps that they may resume after Ratspeak releases
+        // the microphone (AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation).
+        let _: Bool = msg_send![
+            session,
+            setActive: false,
+            withOptions: 1usize,
+            error: &mut error
+        ];
+    }
+}

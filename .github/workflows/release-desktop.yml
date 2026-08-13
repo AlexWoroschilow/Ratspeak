@@ -15,20 +15,30 @@ on:
         description: "Release tag to publish when manually dispatching."
         required: false
         type: string
+      prerelease:
+        description: "Mark the GitHub Release as a prerelease."
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
-  RATSPEAK_RSRETICULUM_REF: ratspeak-v1.0.25
-  RATSPEAK_RSLXMF_REF: ratspeak-v1.0.25
-  RATSPEAK_RSLXST_REF: ratspeak-v1.0.25
-  RATSPEAK_LRGP_REF: ratspeak-v1.0.25
+  RATSPEAK_RSRETICULUM_REF: ratspeak-v1.0.26d
+  RATSPEAK_RSLXMF_REF: ratspeak-v1.0.26d
+  RATSPEAK_RSLXST_REF: ratspeak-v1.0.26d
+  RATSPEAK_LRGP_REF: ratspeak-v1.0.26d
 
 jobs:
   build:
     name: Linux ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
@@ -93,6 +103,7 @@ jobs:
           workspaces: |
             Ratspeak
             Ratspeak/src-tauri
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install Linux system deps
         shell: bash
@@ -193,12 +204,11 @@ jobs:
           fi
 
           if [ -n "$RPM_NAME" ]; then
-            mapfile -t rpms < <(find src-tauri/target/release/bundle/rpm -maxdepth 1 -type f -name '*.rpm' | sort || true)
+            mapfile -t rpms < <(find src-tauri/target/release/bundle/rpm -maxdepth 1 -type f -name '*.rpm' | sort)
             rpm="${rpms[0]:-}"
-            if [ -n "$rpm" ]; then
-              rpm_artifact="Ratspeak-${release_version}-${RPM_NAME}"
-              cp "$rpm" "$out_dir/$rpm_artifact"
-            fi
+            test -n "$rpm"
+            rpm_artifact="Ratspeak-${release_version}-${RPM_NAME}"
+            cp "$rpm" "$out_dir/$rpm_artifact"
           fi
 
       - name: Upload artifacts
@@ -208,12 +218,13 @@ jobs:
           path: |
             Ratspeak/dist/linux/*
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 1
 
   package:
     name: Linux package
     needs: build
     runs-on: ubuntu-22.04
+    timeout-minutes: 20
     steps:
       - name: Download Linux artifacts
         uses: actions/download-artifact@v7
@@ -245,12 +256,18 @@ jobs:
 
           amd64_deb="Ratspeak/dist/linux/Ratspeak-${release_version}-linux-amd64.deb"
           arm64_deb="Ratspeak/dist/linux/Ratspeak-${release_version}-linux-arm64.deb"
+          appimage="Ratspeak/dist/linux/Ratspeak-${release_version}-linux-x86_64.AppImage"
+          rpm="Ratspeak/dist/linux/Ratspeak-${release_version}-linux-x86_64.rpm"
           test -f "$amd64_deb"
           test -f "$arm64_deb"
+          test -f "$appimage"
+          test -f "$rpm"
           amd64_arch="$(dpkg-deb --field "$amd64_deb" Architecture)"
           arm64_arch="$(dpkg-deb --field "$arm64_deb" Architecture)"
           test "$amd64_arch" = "amd64"
           test "$arm64_arch" = "arm64"
+          artifact_count="$(find Ratspeak/dist/linux -maxdepth 1 -type f | wc -l | tr -d ' ')"
+          test "$artifact_count" = "4"
           find Ratspeak/dist/linux -maxdepth 1 -type f -print | sort
 
       - name: Write Linux checksums
@@ -263,7 +280,8 @@ jobs:
           find dist/linux -type f -print0 |
             sort -z |
             while IFS= read -r -d '' artifact; do
-              sha256sum "$artifact" >> "$checksum_file"
+              hash="$(sha256sum "$artifact" | cut -d ' ' -f 1)"
+              printf '%s  %s\n' "$hash" "$(basename "$artifact")" >> "$checksum_file"
             done
           test -s "$checksum_file"
 
@@ -275,20 +293,20 @@ jobs:
             Ratspeak/dist/linux/*
             Ratspeak/checksums-linux.txt
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 7
 
       - name: Publish GitHub Release
         if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_github_release) }}
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
-          prerelease: ${{ contains(github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name, '-') }}
+          prerelease: ${{ github.event_name == 'push' || inputs.prerelease }}
           body: |
-            - Protocol refresh: byte-exact parity with Reticulum 1.3.8 and LXMF 1.0.1
-            - Fix unbounded announce-cache growth on long-running nodes (Android storage)
-            - Standardized reply and reaction interop with other LXMF clients
-            - Linux: WebView rendering fixes and a window-decorations setting
-            - Interface settings edits preserve manually configured keys and modes
+            - Public Channels beta: connect, discover, share, and join live RRC hubs with local history, unread counts, mentions, presence, and identity avatars
+            - Bidirectional RRC messages and actions with authenticated reconnect/rejoin and safer malformed-peer handling
+            - Opt-in hub hosting with graphical room, access, moderation, and discovery controls
+            - Mobile Channels polish for keyboard resizing, safe areas, Back navigation, sheets, and partial member lists
+            - Privacy-bounded Activity diagnostics plus broader Reticulum, LXMF, and LXST reliability fixes
           files: |
             Ratspeak/dist/linux/*
             Ratspeak/checksums-linux.txt

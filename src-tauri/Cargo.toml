@@ -1,12 +1,14 @@
 [package]
 name = "ratspeak"
-version = "1.0.25"
+version = "1.0.26"
 description = "Ratspeak: An all-in-one Reticulum & LXMF client in Rust."
 authors = ["Ratspeak Contributors"]
 license = "AGPL-3.0-or-later"
 homepage = "https://github.com/ratspeak/Ratspeak"
 repository = "https://github.com/ratspeak/Ratspeak"
 edition = "2021"
+rust-version = "1.85"
+resolver = "3"
 
 [lib]
 name = "ratspeak_lib"
@@ -20,7 +22,8 @@ lxst-voice = ["ratspeak-tauri/lxst-voice"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "devtools"] }
+tauri = { version = "2", features = [] }
+tauri-plugin-deep-link = "2.4.9"
 tauri-plugin-notification = "2"
 url = "2"
 serde = { version = "1", features = ["derive"] }
@@ -35,9 +38,9 @@ tauri-plugin-fs = "2.5.1"
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 ratspeak-tauri = { path = "../crates/ratspeak-tauri", features = ["ble", "hardware"] }
 rfd = "0.15"
-tracing-appender = "0.2"
 dirs = "6"
-tauri-plugin-single-instance = "2"
+tauri = { version = "2", features = ["tray-icon", "devtools"] }
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 
 [target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
 ratspeak-tauri = { path = "../crates/ratspeak-tauri", default-features = false, features = ["ble", "rnode-tcp", "mobile-throttle", "seed"] }
@@ -66,4 +69,7 @@ strip = "debuginfo"
 strip = true
 lto = true
 codegen-units = 1
-panic = "abort"
+# The Activity worker is an isolation boundary and deliberately recovers from
+# an unwinding worker panic after purging its session. Abort mode would make
+# that production recovery path unreachable.
+panic = "unwind"

@@ -1,6 +1,6 @@
 name: ratspeak
 options:
-  bundleIdPrefix: org.ratspeak.ios
+  bundleIdPrefix: org.ratspeak.apple
   deploymentTarget:
     iOS: 14.0
 fileGroups: [../../src]
@@ -11,7 +11,8 @@ settingGroups:
   app:
     base:
       PRODUCT_NAME: Ratspeak
-      PRODUCT_BUNDLE_IDENTIFIER: org.ratspeak.ios
+      PRODUCT_BUNDLE_IDENTIFIER: org.ratspeak.apple
+      DEVELOPMENT_TEAM: X92A7KF9SP
 targetTemplates:
   app:
     type: application
@@ -32,29 +33,45 @@ targets:
       - path: Assets.xcassets
       - path: Externals
       - path: ratspeak_iOS
+      - path: ratspeak_iOS/PrivacyInfo.xcprivacy
+        buildPhase: resources
       - path: assets
         buildPhase: resources
         type: folder
       - path: LaunchScreen.storyboard
+    # Keep App Store permission, background, and URL declarations in the generated
+    # static Info.plist. Build-time plist rewriting can race Xcode signing and
+    # invalidate an otherwise valid app.
     info:
       path: ratspeak_iOS/Info.plist
       properties:
+        CFBundleURLTypes:
+          - CFBundleURLName: ratspeak
+            CFBundleURLSchemes:
+              - ratspeak
         LSRequiresIPhoneOS: true
+        NSBluetoothAlwaysUsageDescription: Ratspeak uses Bluetooth to connect to hardware nodes and other Bluetooth peers when enabled.
+        NSBluetoothPeripheralUsageDescription: Ratspeak uses Bluetooth to connect to hardware nodes and other Bluetooth peers when enabled.
+        NSBonjourServices:
+          - _reticulum._udp
+        NSCameraUsageDescription: Ratspeak accesses your camera so you can take photos or videos to send in a message.
+        NSLocalNetworkUsageDescription: Required when you enable a TCP, Local, or Bluetooth Peer interface in Network settings so Ratspeak can reach other nodes on your local network.
+        NSMicrophoneUsageDescription: Ratspeak uses your microphone for voice calls, voice messages, and videos you choose to record.
+        NSPhotoLibraryAddUsageDescription: Ratspeak saves received images to your photo library when you choose Save to Photos.
+        NSPhotoLibraryUsageDescription: Ratspeak accesses your photo library so you can attach existing photos or videos to a message.
+        UIBackgroundModes:
+          - audio
+          - bluetooth-central
+          - bluetooth-peripheral
         UILaunchStoryboardName: LaunchScreen
         UIRequiredDeviceCapabilities: [arm64, metal]
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
-          - UIInterfaceOrientationLandscapeLeft
-          - UIInterfaceOrientationLandscapeRight
         UISupportedInterfaceOrientations~ipad:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationPortraitUpsideDown
-          - UIInterfaceOrientationLandscapeLeft
-          - UIInterfaceOrientationLandscapeRight
-        CFBundleShortVersionString: 1.0.25
-        CFBundleVersion: "1.0.25"
-    entitlements:
-      path: ratspeak_iOS/ratspeak_iOS.entitlements
+        CFBundleShortVersionString: 1.0.26
+        CFBundleVersion: "1.0.26"
     scheme:
       environmentVariables:
         RUST_BACKTRACE: full
@@ -63,6 +80,10 @@ targets:
       base:
         ENABLE_BITCODE: false
         ARCHS: [arm64]
+        # One universal iOS target supports both iPhone and iPad. Keep this in
+        # the XcodeGen source so project regeneration cannot become
+        # accidentally iPhone-only.
+        TARGETED_DEVICE_FAMILY: "1,2"
         VALID_ARCHS: arm64 
         LIBRARY_SEARCH_PATHS[arch=x86_64]: $(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)
         LIBRARY_SEARCH_PATHS[arch=arm64]: $(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)

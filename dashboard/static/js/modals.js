@@ -107,7 +107,10 @@ function _trapFocus(modalEl) {
     var focusable = modalEl.querySelectorAll(
         'button, [href], input:not([type="hidden"]), select, textarea, [tabindex]:not([tabindex="-1"])'
     );
-    if (focusable.length > 0) {
+    var wantsKeyboardFocus = window.RS && RS.ui && typeof RS.ui.prefersKeyboardFocus === 'function'
+        ? RS.ui.prefersKeyboardFocus()
+        : !isMobile();
+    if (focusable.length > 0 && wantsKeyboardFocus) {
         var first = focusable[0];
         if (!isMobile() || (first.tagName !== 'INPUT' && first.tagName !== 'TEXTAREA' && first.tagName !== 'SELECT')) {
             first.focus();
@@ -138,10 +141,15 @@ function _releaseFocus(modalEl) {
         modalEl.removeEventListener('keydown', modalEl._focusTrapHandler);
         delete modalEl._focusTrapHandler;
     }
-    if (_modalPreviousFocus && _modalPreviousFocus.focus) {
+    var restoreFocus = window.RS && RS.ui && typeof RS.ui.prefersKeyboardFocus === 'function'
+        ? RS.ui.prefersKeyboardFocus()
+        : !isMobile();
+    if (restoreFocus && _modalPreviousFocus && _modalPreviousFocus.focus) {
         _modalPreviousFocus.focus();
-        _modalPreviousFocus = null;
+    } else if (modalEl.contains(document.activeElement) && document.activeElement.blur) {
+        document.activeElement.blur();
     }
+    _modalPreviousFocus = null;
 }
 
 var currentModalNode = null;
@@ -960,6 +968,8 @@ var _RNODE_INTERFACE_MODE_VALUES = {
     boundary: true,
     roaming: true,
 };
+var _RNODE_NEW_INTERFACE_MODE = 'roaming';
+var _RNODE_LEGACY_INTERFACE_MODE = 'full';
 
 function _rnodeNormaliseInterfaceMode(mode) {
     mode = String(mode || 'full').trim().toLowerCase();
@@ -977,6 +987,11 @@ function _rnodeSetInterfaceMode(mode) {
 function _rnodeReadInterfaceMode() {
     var select = document.getElementById('rnode-interface-mode');
     return _rnodeNormaliseInterfaceMode(select ? select.value : 'full');
+}
+
+function _rnodeInitialInterfaceMode(editIface) {
+    if (!editIface) return _RNODE_NEW_INTERFACE_MODE;
+    return editIface.mode || editIface.interface_mode || _RNODE_LEGACY_INTERFACE_MODE;
 }
 
 function _rnodeDeveloperModeEnabled() {
@@ -1030,7 +1045,7 @@ function openRnodeModal(mode, editIface) {
     var catalogReady = loadRnodePresetCatalog();
     _rnodeApplyDefaultRadioControls();
     _rnodeSetAirtimeLimits(null, null);
-    _rnodeSetInterfaceMode('full');
+    _rnodeSetInterfaceMode(_rnodeInitialInterfaceMode(editIface));
     _rnodeSyncInterfaceModeVisibility();
     _rnodeResetPublicMap();
     _bleSelectedDevice = null;
@@ -1062,7 +1077,6 @@ function openRnodeModal(mode, editIface) {
     if (editIface) {
         var port = _ifaceString(editIface, 'port', '');
         _rnodeEditContext = { oldName: editIface.name || '', port: port };
-        _rnodeSetInterfaceMode(editIface.mode || editIface.interface_mode || 'full');
         if (port.indexOf('ble://') === 0) {
             var addr = port.substring(6);
             _bleSelectedDevice = { name: editIface.name || 'LoRa Radio', address: addr };
@@ -1186,6 +1200,8 @@ function updateRnodeHandoffHints() {
     var hasBle = false, hasUsb = false;
     for (var i = 0; i < rnodes.length; i++) {
         var p = rnodes[i].port || '';
+        var live = getInterfaceLiveStatus(rnodes[i].name || '');
+        if (!live || live.online === false) continue;
         if (p.indexOf('ble://') === 0) hasBle = true;
         else if (p.indexOf('androidusb://') === 0) hasUsb = true;
     }
@@ -1707,8 +1723,9 @@ function submitRnodeInterface() {
                 message: isEdit ? 'Restarting BLE LoRa radio...' : 'Connecting BLE LoRa radio...',
                 operation: isEdit ? 'update_lora' : 'add_lora',
                 onCancel: function() {
-                    // Drop half-written config so the list has no orphan.
-                    if (!isEdit) RS.invoke('cancel_ble_connect', { name: bleName }).catch(function() {});
+                    // Rust only rolls back config created by a fresh add; edits
+                    // still need their active native/runtime connect cancelled.
+                    RS.invoke('cancel_ble_connect', { name: bleName }).catch(function() {});
                     window._activeProgressDialog = null;
                 },
             });
@@ -2752,7 +2769,7 @@ function toggleBlePeer() {
                         { label: '10 minutes', value: '600' },
                         { label: '30 minutes', value: '1800' },
                         { label: '60 minutes', value: '3600' },
-                        { label: 'Always On', value: '0' }
+                        { label: 'Always on', value: '0' }
                     ]
                 }).then(function(duration) {
                     if (duration === null) return;
