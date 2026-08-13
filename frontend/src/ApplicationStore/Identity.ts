@@ -76,6 +76,20 @@ export interface IdentityInfo {
 }
 
 
+export interface IdentityImportError {
+    code: string;
+    message: string;
+}
+
+export interface IdentityImportPreview {
+    activatable: boolean;
+    format: "ratspeak.identity.v1" | "ratspeak.identity.v2";
+    identity_hash: string;
+    kind: string;
+    lxmf_hash: string;
+
+}
+
 export interface IdentityExport {
     bytes: Uint8Array;
     base64: string;
@@ -168,11 +182,45 @@ export class Identity {
         // return data;
     }
 
+    bytesToBase64(bytes: Uint8Array) {
+        var binary = '';
+        for (var i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+        return btoa(binary);
+    }
+
+
     base64ToBytes(b64: string) {
         var raw = atob(b64);
         var arr = new Uint8Array(raw.length);
         for (var i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
         return arr;
+    }
+
+
+    async importIdentityBase64(content: Uint8Array, passcode: string = "", nickname: string = ""): Promise<any> {
+        return new Promise((resolve: (payload: any) => void, reject) => {
+            invoke<IdentityImportPreview>('api_import_identity_base64', {
+                args: {
+                    key: this.bytesToBase64(content),
+                    nickname: nickname,
+                    passcode: passcode
+                }
+            }).then((data: any) => {
+                info(`importIdentityBase64: ${JSON.stringify(data)}\n`);
+            }).catch(reject);
+        });
+    }
+
+    async importIdentityBase64Preview(content: Uint8Array, passcode: string = "", nickname: string = ""): Promise<IdentityImportPreview> {
+        return new Promise((resolve: (payload: IdentityImportPreview) => void, reject: (reason: IdentityImportError) => void) => {
+            invoke<IdentityImportPreview>('api_preview_identity_import_base64', {
+                args: {
+                    key: this.bytesToBase64(content),
+                    nickname: nickname,
+                    passcode: passcode
+                }
+            }).then(resolve).catch(reject);
+        });
     }
 
 
@@ -304,7 +352,7 @@ export class Identity {
 
     async deleteIdentity(identity: IdentityInfo): Promise<void> {
         return new Promise((resolve: (value: void) => void, reject) => {
-            invoke<void>('api_delete_identity', {hashHex: identity.hash})
+            invoke<void>('api_delete_identity', {hashHex: identity.hash, cascade: true})
                 .then((data: any) => {
                     this.fetchIdentities()
                         .then((identities: IdentityInfo[]) => {

@@ -70,7 +70,15 @@ export class Export extends React.PureComponent<ExportProps, ExportState> {
                         message: `Exported to: ${filePath}`,
                         passcodeConfirm: "",
                         passcode: "",
-                    })
+                    });
+
+                    let interval = setInterval(() => {
+                        clearInterval(interval);
+                        this.setState({
+                            message: undefined,
+                            error: undefined
+                        });
+                    }, 5000);
                 });
         });
     }
@@ -118,6 +126,13 @@ export class Export extends React.PureComponent<ExportProps, ExportState> {
         } = this.state;
 
         return <div className={"Export"}>
+
+            {(message != undefined) && <>
+                <div className="modal-message">
+                    {message}
+                </div>
+            </>}
+
             {(error != undefined) && <>
                 <div className="modal-error">
                     {error}

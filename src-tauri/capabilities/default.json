@@ -23,6 +23,7 @@
     "log:default",
     "dialog:default",
     "fs:default",
-    "fs:allow-write-file"
+    "fs:allow-write-file",
+    "fs:allow-read-file"
   ]
 }
