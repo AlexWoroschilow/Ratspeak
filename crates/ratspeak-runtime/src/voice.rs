@@ -22,11 +22,21 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use crate::activity::producer::{
+    self, IdentityHash as ActivityIdentityHash, LinkId as ActivityLinkId, LxstCallReason,
+    LxstTransition,
+};
 use crate::db;
-use crate::state::AppState;
+use crate::state::{ActivityRequestFence, AppState};
 
 const AUDIO_FRAME_CHANNEL_DEPTH: usize = 8;
 const AUDIO_SPEAKER_CHANNEL_DEPTH: usize = 32;
+const MICROPHONE_CAPTURE_RETRY_DELAYS: [Duration; 3] = [
+    Duration::ZERO,
+    Duration::from_millis(150),
+    Duration::from_millis(400),
+];
+const MICROPHONE_DEVICE_ATTEMPT_LIMIT: usize = 16;
 const VOICE_AGC_TARGET_RMS: f32 = 0.14125375;
 const VOICE_AGC_MIN_GAIN: f32 = 0.35;
 const VOICE_AGC_MAX_GAIN: f32 = 3.0;
@@ -136,6 +146,7 @@ pub async fn start_voice_service(state: &Arc<AppState>) -> VoiceResult<()> {
     if voice_control_tx(state).is_some() {
         return Ok(());
     }
+    let activity_origin = state.activity_request_fence();
 
     let (transport_tx, identity) = voice_runtime_inputs(state)?;
     let endpoint = TelephonyRnsEndpoint::register(transport_tx, &identity)
@@ -184,11 +195,12 @@ pub async fn start_voice_service(state: &Arc<AppState>) -> VoiceResult<()> {
             "running": true,
         }),
     );
-    emit_lxst_activity(state, "LXST voice service started", "", "standard");
+    record_lxst_activity(state, activity_origin, LxstTransition::ServiceStarted);
     Ok(())
 }
 
 pub async fn shutdown_voice_service(state: &Arc<AppState>) {
+    let activity_origin = state.activity_request_fence();
     let handle = state
         .lxst_voice
         .lock()
@@ -198,6 +210,7 @@ pub async fn shutdown_voice_service(state: &Arc<AppState>) {
     if let Some(handle) = handle {
         handle.shutdown().await;
     }
+    release_call_audio(state);
     VOICE_MICROPHONE_MUTED.store(false, Ordering::Relaxed);
 
     state.emit_to_all(
@@ -208,7 +221,7 @@ pub async fn shutdown_voice_service(state: &Arc<AppState>) {
             "running": false,
         }),
     );
-    emit_lxst_activity(state, "LXST voice service stopped", "", "standard");
+    record_lxst_activity(state, activity_origin, LxstTransition::ServiceStopped);
 }
 
 pub fn voice_status(state: &AppState) -> Value {
@@ -222,6 +235,25 @@ pub fn voice_status(state: &AppState) -> Value {
         "running": running,
         "microphone_muted": microphone_muted(),
     })
+}
+
+/// The call and memo surfaces share one platform microphone. This reservation
+/// begins before signalling so capture cannot race an outgoing request or an
+/// accepted incoming call, and ends only on a terminal call transition.
+pub fn call_audio_reserved(state: &AppState) -> bool {
+    state.voice_call_audio_reserved.load(Ordering::Acquire)
+}
+
+pub fn reserve_call_audio(state: &AppState) {
+    state
+        .voice_call_audio_reserved
+        .store(true, Ordering::Release);
+}
+
+pub fn release_call_audio(state: &AppState) {
+    state
+        .voice_call_audio_reserved
+        .store(false, Ordering::Release);
 }
 
 pub fn set_microphone_muted(state: &AppState, muted: bool) -> VoiceResult<Value> {
@@ -281,6 +313,7 @@ pub async fn answer(state: &Arc<AppState>) -> VoiceResult<Value> {
 
 pub async fn hangup(state: &Arc<AppState>) -> VoiceResult<Value> {
     if voice_control_tx(state).is_none() {
+        release_call_audio(state);
         return Ok(json!({ "ok": true, "running": false }));
     }
     send_control(
@@ -290,6 +323,9 @@ pub async fn hangup(state: &Arc<AppState>) -> VoiceResult<Value> {
         },
     )
     .await?;
+    // Keep the shared microphone reserved until LXST reports the terminal
+    // transition. Sending Hangup only starts teardown; capture and the
+    // platform audio session may still be active until CallTerminated.
     Ok(json!({ "ok": true }))
 }
 
@@ -629,8 +665,8 @@ fn spawn_contacts_only_notice(
             .unwrap_or(false);
         if !sent {
             tracing::debug!(
-                remote_identity = %hex::encode(remote_identity),
-                remote_lxmf_destination = %remote_lxmf_destination,
+                remote_identity = %crate::short_id(&hex::encode(remote_identity)),
+                remote_lxmf_destination = %crate::short_id(&remote_lxmf_destination),
                 "could not queue LXMF contacts-only call notice"
             );
         }
@@ -649,10 +685,10 @@ fn request_lxmf_path(state: &AppState, remote_lxmf_destination: &str) {
 }
 
 fn cache_remote_lxmf_crypto(state: &AppState, remote_lxmf_destination: &str, public_key: [u8; 64]) {
-    if let Ok(mut lxmf) = state.lxmf.lock()
-        && let Some(mgr) = lxmf.as_mut()
-    {
-        mgr.update_remote_crypto(remote_lxmf_destination, &public_key, None);
+    if let Ok(mut lxmf) = state.lxmf.lock() {
+        if let Some(mgr) = lxmf.as_mut() {
+            mgr.update_remote_crypto(remote_lxmf_destination, &public_key, None);
+        }
     }
 }
 
@@ -771,6 +807,10 @@ async fn drive_voice_events(
         let Some(event) = event else {
             break;
         };
+        // Voice service tasks are long-lived across Activity capture resets.
+        // Fence each received event, rather than pinning the task to the
+        // generation in which the service originally started.
+        let activity_origin = state.activity_request_fence();
         match event {
             TelephonyServiceEvent::IncomingCall {
                 link_id,
@@ -780,8 +820,8 @@ async fn drive_voice_events(
                 if !policy.allowed {
                     suppressed_call_links.insert(link_id);
                     tracing::info!(
-                        link_id = %hex::encode(link_id),
-                        remote_identity = %hex::encode(remote_identity),
+                        link_id = %crate::short_id(&hex::encode(link_id)),
+                        remote_identity = %crate::short_id(&hex::encode(remote_identity)),
                         reason = policy.reason,
                         rejected_attempts = policy.rejected_attempts,
                         "silently rejecting LXST incoming call"
@@ -794,14 +834,15 @@ async fn drive_voice_events(
                             policy.remote_public_key,
                         );
                     }
-                    if let Err(err) = control_tx
+                    if control_tx
                         .send(TelephonyControl::Hangup {
                             ring_timeout: false,
                         })
                         .await
+                        .is_err()
                     {
                         tracing::warn!(
-                            error = %err,
+                            reason = "hangup_failed",
                             "failed to hang up rejected LXST incoming call"
                         );
                     }
@@ -820,6 +861,16 @@ async fn drive_voice_events(
                     continue;
                 }
 
+                // Reserve capture before stopping a memo. start_recording()
+                // checks the flag both outside and inside its lifecycle lock,
+                // so an incoming call cannot race a second microphone stream.
+                reserve_call_audio(&state);
+                if crate::voice_memo::cancel_recording(&state).await.is_err() {
+                    tracing::warn!(
+                        reason = "voice_memo_handoff_failed",
+                        "could not stop voice memo before incoming call"
+                    );
+                }
                 let remote_lxmf_destination = policy.remote_lxmf_destination.clone();
                 let payload = json!({
                     "type": "incoming",
@@ -830,11 +881,13 @@ async fn drive_voice_events(
                 notify_incoming_call_if_background(&state, &remote_lxmf_destination, link_id);
                 state.emit_to_all("voice_incoming_call", payload.clone());
                 state.emit_to_all("voice_call_update", payload);
-                emit_lxst_activity(
+                record_lxst_activity(
                     &state,
-                    "Incoming LXST call",
-                    &voice_remote_detail(remote_identity, Some(link_id)),
-                    "standard",
+                    activity_origin,
+                    LxstTransition::IncomingRinging {
+                        peer: ActivityIdentityHash::new(remote_identity),
+                        link: ActivityLinkId::new(link_id),
+                    },
                 );
             }
             TelephonyServiceEvent::OutgoingCallPending { remote_identity } => {
@@ -846,11 +899,12 @@ async fn drive_voice_events(
                         "remote_lxmf_destination": lxmf_destination_for_identity(remote_identity),
                     }),
                 );
-                emit_lxst_activity(
+                record_lxst_activity(
                     &state,
-                    "Resolving LXST call path",
-                    &voice_remote_detail(remote_identity, None),
-                    "standard",
+                    activity_origin,
+                    LxstTransition::PathPending {
+                        peer: ActivityIdentityHash::new(remote_identity),
+                    },
                 );
             }
             TelephonyServiceEvent::OutgoingCallStarted {
@@ -866,17 +920,20 @@ async fn drive_voice_events(
                         "remote_lxmf_destination": lxmf_destination_for_identity(remote_identity),
                     }),
                 );
-                emit_lxst_activity(
+                record_lxst_activity(
                     &state,
-                    "LXST call link requested",
-                    &voice_remote_detail(remote_identity, Some(link_id)),
-                    "standard",
+                    activity_origin,
+                    LxstTransition::LinkRequested {
+                        peer: ActivityIdentityHash::new(remote_identity),
+                        link: ActivityLinkId::new(link_id),
+                    },
                 );
             }
             TelephonyServiceEvent::OutgoingCallFailed {
                 remote_identity,
                 message,
             } => {
+                release_call_audio(&state);
                 state.emit_to_all(
                     "voice_call_update",
                     json!({
@@ -886,17 +943,25 @@ async fn drive_voice_events(
                         "message": message.clone(),
                     }),
                 );
-                emit_lxst_activity(
+                record_lxst_activity(
                     &state,
-                    "LXST call failed",
-                    &format!("{} {}", voice_remote_detail(remote_identity, None), message),
-                    "standard",
+                    activity_origin,
+                    LxstTransition::Failed {
+                        peer: Some(ActivityIdentityHash::new(remote_identity)),
+                        link: None,
+                        // The upstream event deliberately carries only prose,
+                        // and can represent cancellation, discovery, or link
+                        // setup failures. Do not infer a specific cause from
+                        // that human-authored text.
+                        reason: LxstCallReason::ServiceError,
+                    },
                 );
             }
             TelephonyServiceEvent::CallTerminated { link_id, reason } => {
                 if suppressed_call_links.remove(&link_id) {
                     continue;
                 }
+                release_call_audio(&state);
                 stop_audio_session(audio_session.take(), &control_tx).await;
                 audio_failure = None;
                 profile_adaptation.reset();
@@ -909,16 +974,8 @@ async fn drive_voice_events(
                         "reason": reason.map(status_key),
                     }),
                 );
-                emit_lxst_activity(
-                    &state,
-                    "LXST call ended",
-                    &format!(
-                        "link={} reason={}",
-                        hex::encode(link_id),
-                        reason.map(status_key).unwrap_or("none")
-                    ),
-                    "standard",
-                );
+                let transition = lxst_call_termination_transition(link_id, reason);
+                record_lxst_activity(&state, activity_origin, transition);
             }
             TelephonyServiceEvent::Snapshot(snapshot) => {
                 if snapshot
@@ -1014,7 +1071,13 @@ async fn drive_voice_events(
                         "message": message.clone(),
                     }),
                 );
-                emit_lxst_activity(&state, "LXST voice error", &message, "standard");
+                record_lxst_activity(
+                    &state,
+                    activity_origin,
+                    LxstTransition::ServiceFailed {
+                        reason: LxstCallReason::ServiceError,
+                    },
+                );
             }
             TelephonyServiceEvent::MediaSent { .. } => {
                 if let Some(snapshot) = latest_snapshot.as_ref() {
@@ -1028,6 +1091,7 @@ async fn drive_voice_events(
                 }
             }
             TelephonyServiceEvent::Stopped => {
+                release_call_audio(&state);
                 stop_audio_session(audio_session.take(), &control_tx).await;
                 profile_adaptation.reset();
                 state.emit_to_all(
@@ -1046,6 +1110,7 @@ async fn drive_voice_events(
         }
     }
 
+    release_call_audio(&state);
     stop_audio_session(audio_session.take(), &control_tx).await;
 }
 
@@ -1174,7 +1239,7 @@ async fn reconcile_audio_session(
             let speaker = session.speaker;
             let warnings = session.warnings.clone();
             tracing::info!(
-                link_id = %hex::encode(active.link_id),
+                link_id = %crate::short_id(&hex::encode(active.link_id)),
                 profile = profile_key(profile),
                 microphone,
                 speaker,
@@ -1240,7 +1305,7 @@ async fn maybe_adapt_voice_profile(
         .is_ok()
     {
         tracing::info!(
-            link_id = %hex::encode(active.link_id),
+            link_id = %crate::short_id(&hex::encode(active.link_id)),
             from = profile_key(current),
             to = profile_key(next),
             "switching LXST voice profile"
@@ -1343,21 +1408,43 @@ fn active_call_payload(active: &ActiveCallSnapshot) -> Value {
     })
 }
 
-fn emit_lxst_activity(state: &AppState, message: &str, detail: &str, level: &str) {
-    state.emit_network_event("lxst", message, detail, level);
+fn record_lxst_activity(
+    state: &AppState,
+    origin: ActivityRequestFence,
+    transition: LxstTransition,
+) {
+    let _ = state.activity.record_event_fenced(
+        || state.is_current_activity_origin_fence(origin),
+        || Ok(producer::lxst_activity(transition)),
+    );
 }
 
-fn voice_remote_detail(remote_identity: [u8; 16], link_id: Option<[u8; 16]>) -> String {
-    let mut detail = format!(
-        "identity={} lxmf={}",
-        hex::encode(remote_identity),
-        lxmf_destination_for_identity(remote_identity)
-    );
-    if let Some(link_id) = link_id {
-        detail.push_str(" link=");
-        detail.push_str(&hex::encode(link_id));
+fn activity_call_reason(status: SignallingStatus) -> LxstCallReason {
+    match status {
+        SignallingStatus::Busy => LxstCallReason::Busy,
+        SignallingStatus::Rejected => LxstCallReason::Rejected,
+        SignallingStatus::Calling => LxstCallReason::Calling,
+        SignallingStatus::Available => LxstCallReason::Available,
+        SignallingStatus::Ringing => LxstCallReason::Ringing,
+        SignallingStatus::Connecting => LxstCallReason::Connecting,
+        SignallingStatus::Established => LxstCallReason::Established,
     }
-    detail
+}
+
+fn lxst_call_termination_transition(
+    link_id: [u8; 16],
+    reason: Option<SignallingStatus>,
+) -> LxstTransition {
+    let link = ActivityLinkId::new(link_id);
+    match reason {
+        None => LxstTransition::Ended { link },
+        Some(SignallingStatus::Rejected) => LxstTransition::Rejected { link },
+        Some(status) => LxstTransition::Failed {
+            peer: None,
+            link: Some(link),
+            reason: activity_call_reason(status),
+        },
+    }
 }
 
 fn lxmf_destination_for_identity(identity_hash: [u8; 16]) -> String {
@@ -1450,13 +1537,13 @@ impl VoiceProfileAdaptation {
         }
 
         let now = Instant::now();
-        if self.link_id == Some(link_id)
-            && let Some(requested) = self.requested_profile
-        {
-            if current == requested {
-                self.requested_profile = None;
-            } else {
-                return None;
+        if self.link_id == Some(link_id) {
+            if let Some(requested) = self.requested_profile {
+                if current == requested {
+                    self.requested_profile = None;
+                } else {
+                    return None;
+                }
             }
         }
 
@@ -1464,13 +1551,14 @@ impl VoiceProfileAdaptation {
 
         if self.dropped_since_switch >= VOICE_PROFILE_DROPPED_FRAME_THRESHOLD
             && self.can_switch(now, VOICE_PROFILE_DOWNGRADE_COOLDOWN)
-            && let Some(profile) = lower_quality_profile(current)
         {
-            self.upgrade_blocked_until = Some(
-                now.checked_add(VOICE_PROFILE_UPGRADE_LOCKOUT_AFTER_DOWNGRADE)
-                    .unwrap_or(now),
-            );
-            return Some(profile);
+            if let Some(profile) = lower_quality_profile(current) {
+                self.upgrade_blocked_until = Some(
+                    now.checked_add(VOICE_PROFILE_UPGRADE_LOCKOUT_AFTER_DOWNGRADE)
+                        .unwrap_or(now),
+                );
+                return Some(profile);
+            }
         }
 
         if self.dropped_since_switch > 0
@@ -1592,6 +1680,52 @@ struct VoiceAudioSession {
     _input_stream: Option<cpal::Stream>,
     _output_stream: Option<VoiceOutputStream>,
     sink_task: Option<JoinHandle<()>>,
+    // Call routing/focus lifetime is owned by the exact Rust LXST session.
+    // Android microphone-FGS promotion is tracked separately on this guard so
+    // denied capture never prevents receive-only call audio.
+    call_audio_session: PlatformCallAudioSession,
+    // Declared after the streams so iOS deactivates AVAudioSession only after
+    // RemoteIO input/output have been dropped.
+    _platform_audio_session: PlatformVoiceAudioSession,
+}
+
+#[cfg(target_os = "ios")]
+pub(crate) type PlatformVoiceAudioSession = crate::platform_ios::VoiceAudioSessionGuard;
+
+#[cfg(not(target_os = "ios"))]
+pub(crate) struct PlatformVoiceAudioSession;
+
+pub(crate) fn start_platform_voice_audio_session() -> VoiceResult<PlatformVoiceAudioSession> {
+    #[cfg(target_os = "ios")]
+    {
+        crate::platform_ios::VoiceAudioSessionGuard::activate()
+    }
+
+    #[cfg(not(target_os = "ios"))]
+    {
+        Ok(PlatformVoiceAudioSession)
+    }
+}
+
+#[cfg(target_os = "android")]
+type PlatformCallAudioSession = android_voice_audio::CallAudioSessionGuard;
+
+#[cfg(not(target_os = "android"))]
+struct PlatformCallAudioSession;
+
+#[cfg(not(target_os = "android"))]
+impl PlatformCallAudioSession {
+    fn start(_link_id: [u8; 16]) -> VoiceResult<Self> {
+        Ok(Self)
+    }
+
+    fn promote_capture(&mut self) -> VoiceResult<()> {
+        Ok(())
+    }
+
+    fn demote_capture(&mut self) -> bool {
+        true
+    }
 }
 
 #[cfg(target_os = "android")]
@@ -1654,22 +1788,17 @@ impl VoiceAudioSession {
                 .is_some_and(|retry_at| now >= retry_at)
         {
             let host = cpal::default_host();
-            let target_channels = usize::from(self.profile.channels());
-            let target_sample_rate = self.profile.sample_rate_hz();
-            let target_frames = self.profile.sample_frames_per_packet();
             match start_microphone_side(
                 &host,
                 self.profile,
                 control_tx.clone(),
-                target_channels,
-                target_sample_rate,
-                target_frames,
+                &mut self.call_audio_session,
             )
             .await
             {
                 Ok(stream) => {
                     tracing::info!(
-                        link_id = %hex::encode(self.link_id),
+                        link_id = %crate::short_id(&hex::encode(self.link_id)),
                         profile = profile_key(self.profile),
                         "recovered LXST microphone stream"
                     );
@@ -1679,11 +1808,11 @@ impl VoiceAudioSession {
                     self.next_microphone_retry_at = None;
                     recovered = true;
                 }
-                Err(message) => {
+                Err(_) => {
                     tracing::warn!(
-                        link_id = %hex::encode(self.link_id),
+                        link_id = %crate::short_id(&hex::encode(self.link_id)),
                         profile = profile_key(self.profile),
-                        error = %message,
+                        reason = "stream_start_failed",
                         "LXST microphone recovery failed"
                     );
                     self.schedule_microphone_retry();
@@ -1700,7 +1829,7 @@ impl VoiceAudioSession {
             match start_speaker_side(&host, control_tx, self.profile.sample_rate_hz()).await {
                 Ok((stream, sink_task)) => {
                     tracing::info!(
-                        link_id = %hex::encode(self.link_id),
+                        link_id = %crate::short_id(&hex::encode(self.link_id)),
                         profile = profile_key(self.profile),
                         "recovered LXST speaker stream"
                     );
@@ -1711,11 +1840,11 @@ impl VoiceAudioSession {
                     self.next_speaker_retry_at = None;
                     recovered = true;
                 }
-                Err(message) => {
+                Err(_) => {
                     tracing::warn!(
-                        link_id = %hex::encode(self.link_id),
+                        link_id = %crate::short_id(&hex::encode(self.link_id)),
                         profile = profile_key(self.profile),
-                        error = %message,
+                        reason = "stream_start_failed",
                         "LXST speaker recovery failed"
                     );
                     self.schedule_speaker_retry();
@@ -1749,22 +1878,19 @@ impl VoiceAudioSession {
         }
         self._output_stream.take();
         self._input_stream.take();
+        let _ = self.call_audio_session.demote_capture();
         self.microphone = false;
         self.speaker = false;
 
         let host = cpal::default_host();
-        let target_channels = usize::from(self.profile.channels());
         let target_sample_rate = self.profile.sample_rate_hz();
-        let target_frames = self.profile.sample_frames_per_packet();
         let mut restart_warnings = Vec::new();
 
         match start_microphone_side(
             &host,
             self.profile,
             control_tx.clone(),
-            target_channels,
-            target_sample_rate,
-            target_frames,
+            &mut self.call_audio_session,
         )
         .await
         {
@@ -1814,19 +1940,17 @@ impl VoiceAudioSession {
         control_tx: mpsc::Sender<TelephonyControl>,
     ) -> VoiceResult<Self> {
         VOICE_MICROPHONE_MUTED.store(false, Ordering::Relaxed);
+        let mut call_audio_session = PlatformCallAudioSession::start(link_id)?;
+        let platform_audio_session = start_platform_voice_audio_session()?;
         let host = cpal::default_host();
-        let target_channels = usize::from(profile.channels());
         let target_sample_rate = profile.sample_rate_hz();
-        let target_frames = profile.sample_frames_per_packet();
 
         let mut warnings = Vec::new();
         let input_stream = match start_microphone_side(
             &host,
             profile,
             control_tx.clone(),
-            target_channels,
-            target_sample_rate,
-            target_frames,
+            &mut call_audio_session,
         )
         .await
         {
@@ -1868,6 +1992,8 @@ impl VoiceAudioSession {
             _input_stream: input_stream,
             _output_stream: output_stream,
             sink_task,
+            call_audio_session,
+            _platform_audio_session: platform_audio_session,
         };
         if !session.microphone {
             session.schedule_microphone_retry();
@@ -1883,27 +2009,16 @@ async fn start_microphone_side(
     host: &cpal::Host,
     profile: Profile,
     control_tx: mpsc::Sender<TelephonyControl>,
-    target_channels: usize,
-    target_sample_rate: u32,
-    target_frames: usize,
+    call_audio_session: &mut PlatformCallAudioSession,
 ) -> VoiceResult<cpal::Stream> {
-    let input_device = host
-        .default_input_device()
-        .ok_or_else(|| "No default microphone is available".to_string())?;
-    let input_config = select_input_config(&input_device, target_sample_rate)?;
-    let (capture_tx, capture_rx) = mpsc::channel::<RawAudioFrame>(AUDIO_FRAME_CHANNEL_DEPTH);
-    let input_builder = Arc::new(Mutex::new(InputFrameBuilder::new(
-        usize::from(input_config.channels()),
-        input_config.sample_rate().0,
-        target_channels,
-        target_sample_rate,
-        target_frames,
-    )));
-    let input_stream = build_input_stream(&input_device, &input_config, input_builder, capture_tx)?;
-
-    input_stream
-        .play()
-        .map_err(|e| format!("Failed to start microphone stream: {e}"))?;
+    call_audio_session.promote_capture()?;
+    let (input_stream, capture_rx) = match open_microphone_capture(host, profile) {
+        Ok(capture) => capture,
+        Err(error) => {
+            let _ = call_audio_session.demote_capture();
+            return Err(error);
+        }
+    };
 
     if let Err(e) = control_tx
         .send(TelephonyControl::StartOpusStream {
@@ -1912,10 +2027,96 @@ async fn start_microphone_side(
         })
         .await
     {
+        let _ = call_audio_session.demote_capture();
         return Err(format!("Failed to start LXST microphone stream: {e}"));
     }
 
     Ok(input_stream)
+}
+
+/// Open the platform microphone and normalize it into the exact frame shape
+/// used by an LXST profile without starting a live telephony stream. Voice
+/// memos use this bridge so calls and asynchronous recordings share one audio
+/// capture/resampling path instead of drifting into platform-specific codecs.
+pub(crate) fn start_microphone_capture(
+    profile: Profile,
+) -> VoiceResult<(
+    PlatformVoiceAudioSession,
+    cpal::Stream,
+    mpsc::Receiver<RawAudioFrame>,
+)> {
+    let platform_audio_session = start_platform_voice_audio_session()?;
+    let mut last_error = "No microphone is available".to_string();
+    for delay in MICROPHONE_CAPTURE_RETRY_DELAYS {
+        if !delay.is_zero() {
+            std::thread::sleep(delay);
+        }
+        let host = cpal::default_host();
+        match open_microphone_capture(&host, profile) {
+            Ok((stream, capture_rx)) => {
+                return Ok((platform_audio_session, stream, capture_rx));
+            }
+            Err(error) => last_error = error,
+        }
+    }
+    Err(format!(
+        "Microphone capture remained unavailable after {} attempts: {last_error}",
+        MICROPHONE_CAPTURE_RETRY_DELAYS.len()
+    ))
+}
+
+fn open_microphone_capture(
+    host: &cpal::Host,
+    profile: Profile,
+) -> VoiceResult<(cpal::Stream, mpsc::Receiver<RawAudioFrame>)> {
+    let mut last_error = "No default microphone is available".to_string();
+    if let Some(device) = host.default_input_device() {
+        match open_microphone_device(&device, profile) {
+            Ok(capture) => return Ok(capture),
+            Err(error) => last_error = format!("Default microphone failed: {error}"),
+        }
+    }
+
+    match host.input_devices() {
+        Ok(devices) => {
+            for (index, device) in devices.take(MICROPHONE_DEVICE_ATTEMPT_LIMIT).enumerate() {
+                match open_microphone_device(&device, profile) {
+                    Ok(capture) => return Ok(capture),
+                    Err(error) => {
+                        last_error = format!("Input device {} failed: {error}", index + 1);
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            last_error = format!("{last_error}; microphone enumeration failed: {error}");
+        }
+    }
+
+    Err(last_error)
+}
+
+fn open_microphone_device(
+    input_device: &cpal::Device,
+    profile: Profile,
+) -> VoiceResult<(cpal::Stream, mpsc::Receiver<RawAudioFrame>)> {
+    let target_channels = usize::from(profile.channels());
+    let target_sample_rate = profile.sample_rate_hz();
+    let target_frames = profile.sample_frames_per_packet();
+    let input_config = select_input_config(input_device, target_sample_rate)?;
+    let (capture_tx, capture_rx) = mpsc::channel::<RawAudioFrame>(AUDIO_FRAME_CHANNEL_DEPTH);
+    let input_builder = Arc::new(Mutex::new(InputFrameBuilder::new(
+        usize::from(input_config.channels()),
+        input_config.sample_rate().0,
+        target_channels,
+        target_sample_rate,
+        target_frames,
+    )));
+    let input_stream = build_input_stream(input_device, &input_config, input_builder, capture_tx)?;
+    input_stream
+        .play()
+        .map_err(|e| format!("Failed to start microphone stream: {e}"))?;
+    Ok((input_stream, capture_rx))
 }
 
 async fn start_speaker_side(
@@ -2017,8 +2218,11 @@ async fn start_android_speaker_side(
                 fade_samples_total,
             );
             apply_voice_output_leveling(&mut converted);
-            if let Err(err) = write_android_voice_samples(&converted) {
-                tracing::warn!(error = %err, "LXST Android voice output write failed");
+            if write_android_voice_samples(&converted).is_err() {
+                tracing::warn!(
+                    reason = "write_failed",
+                    "LXST Android voice output write failed"
+                );
                 if android_voice_audio::start(ANDROID_OUTPUT_SAMPLE_RATE, ANDROID_OUTPUT_CHANNELS)
                     .is_ok()
                 {
@@ -2747,13 +2951,13 @@ fn channel_sample(source: &[f32], target_channel: usize, target_channels: usize)
     source.get(target_channel).copied().unwrap_or(0.0)
 }
 
-fn log_input_stream_error(err: cpal::StreamError) {
-    tracing::warn!(error = %err, "LXST microphone stream error");
+fn log_input_stream_error(_err: cpal::StreamError) {
+    tracing::warn!(reason = "stream_error", "LXST microphone stream error");
 }
 
 #[cfg_attr(target_os = "android", allow(dead_code))]
-fn log_output_stream_error(err: cpal::StreamError) {
-    tracing::warn!(error = %err, "LXST speaker stream error");
+fn log_output_stream_error(_err: cpal::StreamError) {
+    tracing::warn!(reason = "stream_error", "LXST speaker stream error");
 }
 
 #[cfg(target_os = "android")]
@@ -2765,7 +2969,124 @@ mod android_voice_audio {
     use super::VoiceResult;
 
     const CLASS_NAME: &str = "org.ratspeak.android.RatspeakVoiceAudio";
+    const CALL_CLASS_NAME: &str = "org.ratspeak.android.RatspeakCallAudio";
     static APP_CLASS_LOADER: OnceLock<GlobalRef> = OnceLock::new();
+
+    pub struct CallAudioSessionGuard {
+        token: String,
+        capture_promoted: bool,
+    }
+
+    impl Drop for CallAudioSessionGuard {
+        fn drop(&mut self) {
+            let token = self.token.clone();
+            let _ = with_env(|env| {
+                let class = find_app_class(env, CALL_CLASS_NAME)?;
+                let context = get_app_context(env)?;
+                let token = env
+                    .new_string(token)
+                    .map_err(|e| format!("call session token: {e}"))?;
+                env.call_static_method(
+                    class,
+                    "stopForSession",
+                    "(Landroid/content/Context;Ljava/lang/String;)Z",
+                    &[JValue::Object(context), JValue::Object(token.into())],
+                )
+                .map_err(|e| {
+                    clear_exception(env);
+                    format!("RatspeakCallAudio.stopForSession: {e}")
+                })?;
+                Ok(())
+            });
+        }
+    }
+
+    impl CallAudioSessionGuard {
+        pub fn start(link_id: [u8; 16]) -> VoiceResult<Self> {
+            let token = hex::encode(link_id);
+            with_env(|env| {
+                let class = find_app_class(env, CALL_CLASS_NAME)?;
+                let context = get_app_context(env)?;
+                let native_token = env
+                    .new_string(&token)
+                    .map_err(|e| format!("call session token: {e}"))?;
+                let route = env
+                    .new_string("earpiece")
+                    .map_err(|e| format!("call initial route: {e}"))?;
+                let started = env
+                    .call_static_method(
+                        class,
+                        "startForSession",
+                        "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)Z",
+                        &[
+                            JValue::Object(context),
+                            JValue::Object(native_token.into()),
+                            JValue::Object(route.into()),
+                        ],
+                    )
+                    .map_err(|e| {
+                        clear_exception(env);
+                        format!("RatspeakCallAudio.startForSession: {e}")
+                    })?
+                    .z()
+                    .map_err(|e| format!("RatspeakCallAudio.startForSession result: {e}"))?;
+                if started {
+                    Ok(Self {
+                        token,
+                        capture_promoted: false,
+                    })
+                } else {
+                    Err("Android call audio session could not start".to_string())
+                }
+            })
+        }
+
+        pub fn promote_capture(&mut self) -> VoiceResult<()> {
+            // Always reassert the exact native owner. A previous JNI demotion
+            // can fail and later succeed asynchronously; the Rust cleanup bit
+            // intentionally stays true until the direct call succeeds.
+            let promoted = call_capture_method(&self.token, "promoteCaptureForSession")?;
+            if !promoted {
+                return Err("Android microphone capture is unavailable".to_string());
+            }
+            self.capture_promoted = true;
+            Ok(())
+        }
+
+        pub fn demote_capture(&mut self) -> bool {
+            if !self.capture_promoted {
+                return true;
+            }
+            let demoted =
+                call_capture_method(&self.token, "demoteCaptureForSession").unwrap_or(false);
+            if demoted {
+                self.capture_promoted = false;
+            }
+            demoted
+        }
+    }
+
+    fn call_capture_method(token: &str, method: &str) -> VoiceResult<bool> {
+        with_env(|env| {
+            let class = find_app_class(env, CALL_CLASS_NAME)?;
+            let context = get_app_context(env)?;
+            let token = env
+                .new_string(token)
+                .map_err(|e| format!("call session token: {e}"))?;
+            env.call_static_method(
+                class,
+                method,
+                "(Landroid/content/Context;Ljava/lang/String;)Z",
+                &[JValue::Object(context), JValue::Object(token.into())],
+            )
+            .map_err(|e| {
+                clear_exception(env);
+                format!("RatspeakCallAudio.{method}: {e}")
+            })?
+            .z()
+            .map_err(|e| format!("RatspeakCallAudio.{method} result: {e}"))
+        })
+    }
 
     pub fn start(sample_rate_hz: u32, channels: usize) -> VoiceResult<()> {
         with_env(|env| {
@@ -2957,10 +3278,56 @@ mod android_voice_audio {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn microphone_capture_retries_are_short_and_bounded() {
+        assert_eq!(MICROPHONE_CAPTURE_RETRY_DELAYS.len(), 3);
+        assert_eq!(MICROPHONE_CAPTURE_RETRY_DELAYS[0], Duration::ZERO);
+        assert!(
+            MICROPHONE_CAPTURE_RETRY_DELAYS
+                .windows(2)
+                .all(|delays| delays[0] < delays[1])
+        );
+        assert!(
+            MICROPHONE_CAPTURE_RETRY_DELAYS
+                .iter()
+                .copied()
+                .sum::<Duration>()
+                <= Duration::from_millis(750)
+        );
+    }
     use crate::config::DashboardConfig;
     use r2d2_sqlite::SqliteConnectionManager;
     use ratspeak_core::{NativeNotification, NativeNotificationKind, NativeNotifier};
     use std::sync::Mutex as StdMutex;
+
+    #[test]
+    fn lxst_termination_adapter_never_reports_non_success_as_clean_end() {
+        assert!(matches!(
+            lxst_call_termination_transition([1; 16], None),
+            LxstTransition::Ended { .. }
+        ));
+        assert!(matches!(
+            lxst_call_termination_transition([2; 16], Some(SignallingStatus::Rejected)),
+            LxstTransition::Rejected { .. }
+        ));
+        assert!(matches!(
+            lxst_call_termination_transition([3; 16], Some(SignallingStatus::Busy)),
+            LxstTransition::Failed {
+                peer: None,
+                link: Some(_),
+                reason: LxstCallReason::Busy,
+            }
+        ));
+        assert!(matches!(
+            lxst_call_termination_transition([4; 16], Some(SignallingStatus::Established)),
+            LxstTransition::Failed {
+                peer: None,
+                link: Some(_),
+                reason: LxstCallReason::Established,
+            }
+        ));
+    }
 
     #[derive(Default)]
     struct RecordingNotifier {

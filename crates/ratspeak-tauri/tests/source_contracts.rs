@@ -51,12 +51,1084 @@ fn rust_struct_literal_blocks<'a>(source: &'a str, marker: &str) -> Vec<&'a str>
         .collect()
 }
 
+fn rust_call_blocks<'a>(source: &'a str, call_path: &str) -> Vec<&'a str> {
+    let marker = format!("{call_path}(");
+    source
+        .match_indices(&marker)
+        .map(|(idx, _)| {
+            let tail = &source[idx..];
+            let start = call_path.len();
+            let mut depth = 0usize;
+            for (offset, ch) in tail[start..].char_indices() {
+                match ch {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            return &tail[..start + offset + 1];
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            panic!("unterminated function call for {call_path}");
+        })
+        .collect()
+}
+
+fn rust_function_block<'a>(source: &'a str, function_name: &str) -> &'a str {
+    let marker = format!("fn {function_name}(");
+    let index = source
+        .find(&marker)
+        .unwrap_or_else(|| panic!("missing function {function_name}"));
+    let tail = &source[index..];
+    let start = tail.find('{').expect("function body start");
+    let mut depth = 0usize;
+    for (offset, ch) in tail[start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return &tail[..start + offset + 1];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unterminated function {function_name}");
+}
+
+#[test]
+fn channels_keep_hubs_live_only_and_wire_bounded_local_history_across_the_product() {
+    let root = repo_root();
+    let index = read_source(root.join("dashboard/index.html")).expect("dashboard index");
+    let channels_js =
+        read_source(root.join("dashboard/static/js/channels.js")).expect("channels js");
+    let channels_css =
+        read_source(root.join("dashboard/static/css/09-channels.css")).expect("channels css");
+    let responsive_css =
+        read_source(root.join("dashboard/static/css/13-responsive.css")).expect("responsive css");
+    let nav_js = read_source(root.join("dashboard/static/js/nav.js")).expect("nav js");
+    let build_css = read_source(root.join("dashboard/build-css.sh")).expect("css build script");
+    let runtime = read_source(root.join("crates/ratspeak-runtime/src/channels.rs"))
+        .expect("channels runtime");
+    let channel_hub = read_source(root.join("crates/ratspeak-runtime/src/channel_hub.rs"))
+        .expect("channel hub runtime");
+    let commands = read_source(root.join("crates/ratspeak-tauri/src/commands/channels.rs"))
+        .expect("channels commands");
+    let snapshot_order_test =
+        read_source(root.join("dashboard/scripts/test_channels_snapshot_order.js"))
+            .expect("channels snapshot ordering test");
+    let history_test = read_source(root.join("dashboard/scripts/test_channels_history.js"))
+        .expect("channels history test");
+    let unread_test = read_source(root.join("dashboard/scripts/test_channels_unread.js"))
+        .expect("channels unread test");
+    let notification_route_test =
+        read_source(root.join("dashboard/scripts/test_channels_notification_route.js"))
+            .expect("channels notification route test");
+    let share_test = read_source(root.join("dashboard/scripts/test_channels_share.js"))
+        .expect("channels share test");
+    let hub_switcher_test =
+        read_source(root.join("dashboard/scripts/test_channels_hub_switcher.js"))
+            .expect("channels hub switcher test");
+    let hub_profile_test = read_source(root.join("dashboard/scripts/test_channels_hub_profile.js"))
+        .expect("channels hub profile test");
+    let tauri_events =
+        read_source(root.join("dashboard/static/js/tauri_events.js")).expect("tauri event bridge");
+    let tauri_lib = read_source(root.join("src-tauri/src/lib.rs")).expect("tauri lib");
+    let tauri_build = read_source(root.join("src-tauri/build.rs")).expect("tauri build script");
+    let db = read_source(root.join("crates/ratspeak-db/src/db.rs")).expect("database source");
+
+    assert!(index.contains("data-view=\"channels\""));
+    assert!(index.contains("id=\"view-channels\""));
+    assert!(index.contains("/static/js/channels.js"));
+    assert!(index.contains("id=\"channel-message-input\""));
+    assert!(!index.contains("Group conversations"));
+    assert!(!index.contains("channels-sidebar-subtitle"));
+    assert!(index.contains("Available hubs"));
+    assert!(index.contains("id=\"channel-hub-summary\""));
+    assert!(index.contains("data-channel-action=\"hub-actions\""));
+    assert!(index.contains("id=\"channel-hub-menu-btn\" type=\"button\" title=\"Manage Hub\""));
+    assert!(!index.contains("channel-hub-add-btn"));
+    assert!(!index.contains("channel-hub-switcher-chevron"));
+    assert!(!index.contains("channel-live-beacon"));
+    assert!(index.contains("id=\"channel-owned-hub\""));
+    assert!(index.contains("id=\"channel-owned-hub-manage\""));
+    assert!(!index.contains("channels-refresh-btn"));
+    assert!(index.contains("id=\"channel-members-back\""));
+    assert!(!index.contains("Messages are not saved and disappear when this session ends."));
+    assert!(!index.contains("id=\"channel-session-banner\""));
+    assert_eq!(
+        channels_js
+            .matches("hub relays and can read channel messages")
+            .count(),
+        1,
+        "hub-readability disclosure belongs in the one-time consent, not repeated channel chrome"
+    );
+    assert!(channels_js.contains("Ratspeak saves only identity-sealed ciphertext"));
+    assert!(channels_js.contains("only after the hub confirms membership"));
+    assert!(channels_js.contains("has_stored_join_key"));
+    assert!(channels_js.contains("remember_key: !!key && rememberKey.checked"));
+    assert!(channels_js.contains("keyInput.value = '';"));
+    assert!(channels_js.contains("RS.listen('channels_snapshot'"));
+    assert!(channels_js.contains("function _channelsSnapshotIsNewer"));
+    assert!(channels_js.contains("incoming.generation > existing.generation"));
+    assert!(channels_js.contains("incoming.revision > existing.revision"));
+    assert!(channels_js.contains("RS.listen('announce_received'"));
+    assert!(channels_js.contains("function _channelsBuildHubMark"));
+    assert!(channels_js.contains("function _channelsHubDistance"));
+    assert!(channels_js.contains("function channelsConnectToHub"));
+    assert!(channels_js.contains("function _channelsHubSwitcherModel"));
+    assert!(channels_js.contains("function _channelsHubConnectMode"));
+    assert!(channels_js.contains("function channelsOpenHubSwitcher"));
+    assert!(channels_js.contains("action === 'add' || action === 'manage-hub'"));
+    assert!(channels_js.contains("action === 'hub-actions'"));
+    assert!(channels_js.contains("channelsOpenHubOptions(actionEl)"));
+    assert!(
+        !channels_js.contains("hubSwitcher.addEventListener('click', channelsOpenHubSwitcher)")
+    );
+    assert!(channels_js.contains("One hub can be live at a time"));
+    assert!(channels_js.contains("history stays on this device"));
+    assert!(channels_js.contains("list.setAttribute('aria-live', 'polite')"));
+    assert!(channels_js.contains("list.setAttribute('aria-busy', 'true')"));
+    assert!(channels_js.contains("? 'Switch hub'"));
+    assert!(channels_js.contains(": 'Choose a hub'"));
+    assert!(channels_js.contains("switching: connectMode.kind === 'switch'"));
+    assert!(channels_js.contains("'Could not switch channel hubs.'"));
+    assert!(channels_js.contains("openedEpoch === _channelsHistoryEpoch"));
+    assert!(
+        channels_js.contains("openedGeneration === (Number(channelsSnapshot.generation) || 0)")
+    );
+    assert!(channels_js.contains("dismissHubSwitcher()"));
+    assert!(channels_js.contains("channelHubOwnDestinationHash"));
+    assert!(!channels_js.contains("hub.nearby ? 'Nearby' : 'Recent'"));
+    assert!(channels_js.contains("TextEncoder"));
+    assert!(channels_js.contains("channel-transition-card"));
+    assert!(channels_js.contains("Messages unlock when the hub confirms your membership."));
+    assert!(channels_js.contains("dataset.channelAction = 'retry-room'"));
+    assert!(channels_js.contains("case 'joined': return 'Live';"));
+    assert!(channels_js.contains("case 'reconnecting': return 'Reconnecting';"));
+    assert_eq!(channels_js.matches("return 'Live'").count(), 1);
+    assert!(channels_js.contains("function _channelsIdentityTone"));
+    assert!(!channels_js.contains("function _channelsInitials"));
+    assert!(channels_css.contains(".channel-hub-row-mark"));
+    assert!(channels_css.contains(".channel-hub-row-distance"));
+    assert!(channels_css.contains(".channel-hub-summary"));
+    assert!(channels_css.contains(".channel-directory-section .channels-list-section-action"));
+    assert!(channels_css.contains("@keyframes channelHubSignalLap"));
+    assert!(channels_css.contains(".channel-hub-strip.link-arrived::before"));
+    assert!(channels_css.contains(".channel-hub-switcher-list .channel-hub-row.current"));
+    assert!(channels_css.contains(".channel-hub-switch-impact"));
+    assert!(!channels_css.contains(".channel-connection-trust"));
+    assert!(channels_js.contains("function _channelsBuildHubNotice"));
+    assert!(channels_js.contains("function _channelsBuildHubGreeting"));
+    assert!(channels_js.contains("function _channelsIsRemotePresenceItem"));
+    assert!(channels_js.contains("if (_channelsIsRemotePresenceItem(item)) return;"));
+    assert!(channels_js.contains("function _channelsGroupConsecutiveMessages"));
+    assert!(channels_js.contains("function _channelsLoadHistory"));
+    assert!(channels_js.contains("RS.invoke('api_channel_history'"));
+    assert!(channels_js.contains("RS.invoke('api_channel_participants'"));
+    assert!(channels_js.contains("function _channelsMemberRosterModel"));
+    assert!(channels_js.contains("'Recently visible'"));
+    assert!(channels_js.contains("'Seen here'"));
+    assert!(!channels_js.contains("'Offline'"));
+    assert!(channels_js.contains("before: older ? entry.next_before : null"));
+    assert!(channels_js.contains("function _channelsSyncHistory"));
+    assert!(channels_js.contains("after: after"));
+    assert!(channels_js.contains("function _channelsTimelineEntries"));
+    assert!(channels_js.contains("function _channelsRememberedRoomTopic"));
+    assert!(!channels_js.contains("Saved locally \\u00b7 open"));
+    assert!(!channels_js.contains("\\u00b7 stored on this device"));
+    assert!(channels_js.contains("_channelsListSection('History'"));
+    assert!(channels_js.contains("_channelsActiveEmpty('No currently active channels')"));
+    assert!(channels_css.contains(".channel-active-empty"));
+    assert!(channels_js.contains("function channelsSelectHistoryRoom"));
+    assert!(channels_js.contains("function channelsApplyUnread"));
+    assert!(channels_js.contains("RS.invoke('api_channel_unread')"));
+    assert!(channels_js.contains("RS.invoke('mark_channel_room_read'"));
+    assert!(channels_js.contains("RS.invoke('set_channel_room_notification_level'"));
+    assert!(channels_js.contains("function channelsPrepareVisibleRead"));
+    assert!(channels_js.contains("function _channelsInsertQuote"));
+    assert!(channels_js.contains("function _channelsInsertMemberMention"));
+    assert!(channels_js.contains("function channelsOpenNotificationRoute"));
+    assert!(channels_js.contains("api_channel_room_index"));
+    assert!(channels_js.contains("latest_recorded_at_ms"));
+    assert!(!channels_js.contains("Local timeline"));
+    assert!(channels_js.contains("Load earlier"));
+    assert!(!channels_js.contains("localStorage.setItem"));
+    assert!(channels_js.contains("function _channelsRenderMemberDetail"));
+    assert!(channels_js.contains("function _channelsApplyComposerTypingPolicy"));
+    assert!(channels_js.contains("function _channelsHandleComposerBeforeInput"));
+    assert!(channels_js.contains("event.inputType !== 'insertReplacementText'"));
+    assert!(
+        channels_js.contains("_channelsApplyComposerTypingPolicy(input, useMobileTypingDefaults)")
+    );
+    assert!(channels_js.contains("PeersCache.enriched()"));
+    assert!(channels_js.contains("services.indexOf('lxmf.delivery')"));
+    assert!(channels_js.contains("disableAutoCorrect(roomInput)"));
+    assert!(channels_js.contains("You\\u2019re already in "));
+    assert!(channels_js.contains("result.local_command"));
+    assert!(responsive_css.contains(".channels-layout.view-channel-detail"));
+    assert!(responsive_css.contains("body.view-channel-detail .bottom-bar"));
+    assert!(responsive_css.contains("calc(64px + var(--sat))"));
+    assert!(responsive_css.contains("body.view-channel-detail .main-content"));
+    assert!(responsive_css.contains(".channels-layout.room-live.members-open"));
+    assert!(responsive_css.contains("max(var(--space-4), var(--sab))"));
+    assert!(responsive_css.contains("calc(var(--space-4) + var(--sar))"));
+    assert!(responsive_css.contains("calc(var(--space-4) + var(--sal))"));
+    assert!(responsive_css.contains("calc(var(--space-5) + var(--sar))"));
+    assert!(responsive_css.contains("calc(var(--space-5) + var(--sal))"));
+    assert!(responsive_css.contains("width: var(--touch-target);"));
+    assert!(responsive_css.contains(
+        ".channel-room-row-title,\n    .channel-hub-row-title {\n        font-size: var(--mobile-list-title-size);"
+    ));
+    assert!(responsive_css.contains(
+        ".channel-event-text {\n        color: var(--text-primary);\n        font-size: 1rem;"
+    ));
+    assert!(responsive_css.contains(".channel-system-event {\n        margin: var(--space-6) 0;"));
+    assert!(channels_css.contains(".channel-members-scrim"));
+    assert!(channels_css.contains(".channels-layout:not(.room-live)"));
+    assert!(channels_css.contains(".channel-transition-rail"));
+    assert!(channels_css.contains(".channel-hub-greeting"));
+    assert!(channels_css.contains(".channel-hub-home"));
+    assert!(channels_css.contains(".channel-hub-profile-capabilities"));
+    assert!(!channels_css.contains(".channel-hub-greeting-delivery"));
+    assert!(channels_css.contains(".channel-event.message-group-start"));
+    assert!(channels_css.contains(".channel-event.message-group-middle"));
+    assert!(channels_css.contains(".channel-event.message-group-end"));
+    assert!(!channels_css.contains(".channel-presence-event"));
+    assert!(!channels_css.contains(".channel-presence-summary"));
+    assert!(channels_css.contains(".channel-history-rail"));
+    assert!(channels_css.contains(".channel-day-separator"));
+    assert!(channels_css.contains(".channel-member-detail-fields"));
+    assert!(channels_css.contains(".channel-unread-badge"));
+    assert!(channels_css.contains(".channel-event.mentioned"));
+    assert!(channels_css.contains(".channel-quote-button"));
+    assert!(channels_js.contains("layout.classList.remove('members-open')"));
+    assert!(build_css.contains("09-channels.css"));
+    assert!(tauri_build.contains(r#""09-channels.css""#));
+
+    assert!(nav_js.contains("var MOBILE_TAB_SLOTS = ['peers', 'message', 'channels', 'more'];"));
+    assert!(
+        nav_js
+            .contains("var MORE_VIEWS = ['contacts', 'identity', 'network', 'games', 'settings'];")
+    );
+    assert!(!nav_js.contains("if (viewId === 'channels') return 'message';"));
+    assert!(nav_js.contains("function setMessageUnreadSource"));
+    assert!(nav_js.contains("var _messageUnreadSources = { direct: 0, channels: 0 };"));
+    assert!(
+        index.contains(
+            "<button class=\"bottom-bar-item\" type=\"button\" data-view=\"channels\" aria-label=\"Channels\">"
+        )
+    );
+    assert!(index.contains("id=\"bb-channels-unread\""));
+    assert!(
+        index.contains(
+            "<button class=\"bottom-sheet-item\" type=\"button\" data-view=\"contacts\">"
+        )
+    );
+    assert!(!index.contains("data-message-mode="));
+    assert!(nav_js.contains("item.setAttribute('aria-current', 'page')"));
+    assert!(nav_js.contains("'Channels' + (_messageUnreadSources.channels > 0"));
+    let keyboard_detection = nav_js
+        .split("function initKeyboardDetection()")
+        .nth(1)
+        .and_then(|tail| tail.split("function initTextareaAutoGrow()").next())
+        .expect("keyboard detection function");
+    assert!(keyboard_detection.contains("'view-chat-detail'"));
+    assert!(keyboard_detection.contains("'view-channel-detail'"));
+    assert!(keyboard_detection.contains("keyboardOpen && inConversationDetail"));
+    assert!(tauri_events.contains("function _decodeChannelNotificationRoute"));
+    assert!(tauri_events.contains("window.channelsOpenNotificationRoute"));
+
+    assert!(runtime.contains("Observed room membership remains session-scoped"));
+    assert!(runtime.contains("bounded client-local append log"));
+    assert!(runtime.contains("never routed through the"));
+    assert!(runtime.contains("LXMF conversation store"));
+    assert!(runtime.contains("TRANSCRIPT_LIMIT"));
+    assert!(runtime.contains("pub struct ChannelsHistorySnapshot"));
+    assert!(runtime.contains("HISTORY_COMMAND_BUFFER"));
+    assert!(runtime.contains("ChannelHistoryCommand::Barrier"));
+    assert!(runtime.contains("pub async fn flush_history"));
+    assert!(runtime.contains("command_tx.try_send"));
+    assert!(runtime.contains("db::append_channel_history_events"));
+    assert!(runtime.contains("fn contains_exact_mention"));
+    assert!(runtime.contains("fn channel_text_mentions"));
+    assert!(runtime.contains("NativeNotification::channel"));
+    assert!(runtime.contains("4_000_000"));
+    assert!(runtime.contains("JOIN_CONFIRM_TIMEOUT"));
+    assert!(runtime.contains("apply_rrcd_room_status_notice"));
+    assert!(runtime.contains("parse_rrcd_room_status"));
+    assert!(runtime.contains("hub-attested observation of its source"));
+    assert!(runtime.contains("room.members_complete = false"));
+    assert!(runtime.contains("pub struct ChannelHubGreetingSnapshot"));
+    assert!(runtime.contains("pub hub_greeting: Option<ChannelHubGreetingSnapshot>"));
+    assert!(runtime.contains("pub greeting: Option<ChannelHubGreetingSnapshot>"));
+    assert!(runtime.contains("HUB_GREETING_RESOURCE_MAX_BYTES: usize = 16 * 1024"));
+    assert!(runtime.contains("handle_hub_greeting_resource_offer"));
+    assert!(runtime.contains("apply_hub_greeting_resource_completion"));
+    assert!(runtime.contains("offer.total_segments() == 1"));
+    assert!(runtime.contains("pub generation: u64"));
+    assert!(runtime.contains("pub revision: u64"));
+    assert!(runtime.contains("pub const CHANNELS_CONNECTION_BUDGET: usize = 1"));
+    assert!(runtime.contains("pub service_model_version: u16"));
+    assert!(runtime.contains("pub selected_hub_destination: Option<String>"));
+    assert!(runtime.contains("pub struct ChannelHubDesiredSnapshot"));
+    assert!(runtime.contains("pub struct ChannelHubObservedSnapshot"));
+    assert!(runtime.contains("pub struct ChannelHubDurableSnapshot"));
+    assert!(runtime.contains("pub struct ChannelHubRecoverySnapshot"));
+    assert!(runtime.contains("RECONNECT_MAX_DELAY"));
+    assert!(runtime.contains("RECONNECT_STABLE_RESET"));
+    assert!(runtime.contains("prepare_auto_rejoin"));
+    assert!(!runtime.contains("\"Reconnected to hub\""));
+    assert!(runtime.contains("nickname_only_join"));
+    assert!(channels_js.contains("function _channelsIsConnectionLifecycleItem"));
+    assert!(channels_js.contains("item.text === 'Reconnected to hub'"));
+    assert!(runtime.contains("ROOM_SECRET_SEAL_SCHEME"));
+    assert!(runtime.contains(".encrypt(&plaintext, None)"));
+    assert!(runtime.contains("complete_pending_join_secret"));
+    assert!(runtime.contains("SAVED_ROOM_KEY_REJECTED"));
+    assert!(runtime.contains("ROOM_KEY_REQUIRED"));
+    assert!(runtime.contains("pub has_stored_join_key: bool"));
+    assert!(runtime.contains("pub join_key_required: bool"));
+    assert!(runtime.contains("db::set_channel_hub_desired"));
+    assert!(runtime.contains("db::set_channel_room_desired"));
+    assert!(runtime.contains("snapshot.revision = revision.saturating_add(1)"));
+    assert!(runtime.contains("WELCOME source does not match the authenticated hub"));
+    assert!(commands.contains("fn parse_local_composer_command"));
+    assert!(runtime.contains("pub async fn connect_known"));
+    assert!(runtime.contains("channel hub identity does not match its destination"));
+    assert!(channel_hub.contains("public identity data and is never serialized"));
+    assert!(channel_hub.contains("pub fn public_key(&self) -> [u8; 64]"));
+    assert!(commands.contains("Identity::from_file(&identity_path)"));
+    assert!(commands.contains(".connect_known("));
+    assert!(commands.contains("LocalComposerCommand::Join"));
+    assert!(commands.contains("LocalComposerCommand::Part"));
+    assert!(commands.contains("pub remember_key: bool"));
+    assert!(commands.contains(".join_with_key_policy("));
+    assert!(commands.contains("\"/list\""));
+    assert!(
+        commands
+            .matches("\"snapshot\": channels.snapshot()")
+            .count()
+            >= 4
+    );
+    assert!(commands.matches("\"snapshot\": snapshot").count() >= 2);
+    assert!(
+        snapshot_order_test.contains("a delayed API batch must not overwrite a newer live event")
+    );
+    assert!(snapshot_order_test.contains("an older manager generation can never supersede"));
+    assert!(
+        snapshot_order_test.contains("direct joins must not start the stale multi-query reload")
+    );
+    assert!(history_test.contains("the opaque 64-bit cursor must remain a string"));
+    assert!(history_test.contains("receive sequence, not peer timestamps"));
+    assert!(history_test.contains("forward catch-up closes the gap"));
+    assert!(history_test.contains("previous identity epoch must be discarded"));
+    assert!(unread_test.contains("background rooms must never be marked read"));
+    assert!(unread_test.contains("dedicated mobile Channels badge"));
+    assert!(notification_route_test.contains("invalid UTF-8 must never reach navigation"));
+    assert!(notification_route_test.contains("must never reconnect or carry a room key"));
+    for command in [
+        "api_channels",
+        "api_channel_history",
+        "api_channel_participants",
+        "api_channel_unread",
+        "mark_channel_room_read",
+        "set_channel_room_notification_level",
+        "discover_channel_hubs",
+        "refresh_channel_directory",
+        "api_channel_share",
+        "api_preview_channel_share",
+        "connect_channel_hub",
+        "disconnect_channel_hub",
+        "join_channel",
+        "part_channel",
+        "send_channel_message",
+        "api_saved_channel_hubs",
+        "api_saved_channel_rooms",
+        "api_channel_room_index",
+    ] {
+        assert!(commands.contains(&format!("fn {command}")));
+        assert!(tauri_lib.contains(command));
+    }
+
+    let channel_schema = db
+        .split("CREATE TABLE IF NOT EXISTS channel_hubs")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("CREATE INDEX IF NOT EXISTS idx_channel_rooms")
+                .next()
+        })
+        .expect("channel bookmark schema");
+    assert!(!channel_schema.contains("message_body"));
+    assert!(!channel_schema.contains("transcript"));
+    assert!(!channel_schema.contains("member_hash"));
+    assert!(channel_schema.contains("desired_connected"));
+    assert!(channel_schema.contains("desired_joined"));
+    assert!(channel_schema.contains("join_key_required"));
+    assert!(channel_schema.contains("CREATE TABLE IF NOT EXISTS channel_room_secrets"));
+    assert!(channel_schema.contains("ciphertext           BLOB NOT NULL"));
+    assert!(channel_schema.contains("idx_channel_hubs_identity_desired"));
+    assert!(db.contains("CREATE TABLE IF NOT EXISTS channel_history"));
+    assert!(db.contains("recorded_at_ms"));
+    assert!(db.contains("idx_channel_history_room_sequence"));
+    assert!(db.contains("idx_channel_history_identity_sequence"));
+    assert!(db.contains("CHANNEL_HISTORY_MAX_EVENTS_PER_ROOM"));
+    assert!(db.contains("CHANNEL_HISTORY_MAX_EVENTS_PER_IDENTITY"));
+    assert!(db.contains("CHANNEL_HISTORY_MAX_EVENTS_GLOBAL"));
+    assert!(db.contains("CHANNEL_HISTORY_MAX_PAYLOAD_BYTES_PER_ROOM"));
+    assert!(db.contains("CHANNEL_HISTORY_MAX_PAYLOAD_BYTES_PER_IDENTITY"));
+    assert!(db.contains("CHANNEL_HISTORY_MAX_PAYLOAD_BYTES_GLOBAL"));
+    assert!(db.contains("CREATE TABLE IF NOT EXISTS channel_history_room_usage"));
+    assert!(db.contains("channel_history_usage_after_insert"));
+    assert!(db.contains("channel_history_usage_after_delete"));
+    assert!(db.contains("pub struct ChannelHistoryPage"));
+    assert!(db.contains("pub fn list_channel_history_after"));
+    assert!(db.contains("pub next_after: Option<String>"));
+    assert!(db.contains("pub struct ChannelRoomIndexEntry"));
+    assert!(db.contains("pub fn list_channel_room_index"));
+    assert!(db.contains("pub topic: Option<String>"));
+    assert!(db.contains("mentioned             INTEGER NOT NULL DEFAULT 0"));
+    assert!(db.contains("CREATE TABLE IF NOT EXISTS channel_room_state"));
+    assert!(db.contains("pub struct ChannelUnreadSummary"));
+    assert!(db.contains("pub fn mark_channel_room_read"));
+    assert!(db.contains("pub fn set_channel_room_notification_level"));
+    assert!(db.contains("pub fn get_channel_unread_summary"));
+    assert!(channels_js.contains("service_model_version: 3"));
+    assert!(channels_js.contains("connection_budget: 1"));
+    assert!(channels_js.contains("selected_hub_destination: null"));
+    assert!(channels_js.contains("durability: {"));
+    assert!(channels_js.contains("directory: {"));
+    assert!(channels_js.contains("RS.invoke('refresh_channel_directory')"));
+    assert!(commands.contains(r#"CHANNEL_SHARE_SCHEME: &str = "ratspeak""#));
+    assert!(commands.contains(r#"CHANNEL_SHARE_HOST: &str = "channel""#));
+    assert!(commands.contains("CHANNEL_SHARE_MAX_BYTES: usize = 230"));
+    assert!(commands.contains("Channel share contains an unsupported field"));
+    assert!(commands.contains("target.payload != payload"));
+    assert!(channels_js.contains("RS.invoke('api_channel_share'"));
+    assert!(channels_js.contains("RS.invoke('api_preview_channel_share'"));
+    assert!(channels_js.contains("previewCommand: 'api_preview_channel_share'"));
+    assert!(channels_js.contains("preserve_pending_share: true"));
+    assert!(channels_css.contains(".channel-share-qr-shell"));
+    assert!(channels_css.contains(".channel-share-input"));
+    assert!(share_test.contains("channel share tests passed"));
+    assert!(hub_switcher_test.contains("channel hub switcher tests passed"));
+    assert!(hub_profile_test.contains("channel hub profile tests passed"));
+}
+
+#[test]
+fn native_channel_share_lifecycle_uses_rust_inbox_and_requires_preview() {
+    let root = repo_root();
+    let index = read_source(root.join("dashboard/index.html")).expect("dashboard index");
+    let channels =
+        read_source(root.join("dashboard/static/js/channels.js")).expect("channels frontend");
+    let bridge = read_source(root.join("dashboard/static/js/native_channel_share.js"))
+        .expect("native channel-share bridge");
+    let bridge_test = read_source(root.join("dashboard/scripts/test_channels_native_link.js"))
+        .expect("native channel-share test");
+    let native =
+        read_source(root.join("src-tauri/src/channel_deep_link.rs")).expect("native Rust bridge");
+    let lib = read_source(root.join("src-tauri/src/lib.rs")).expect("Tauri entry point");
+    let cargo = read_source(root.join("src-tauri/Cargo.toml")).expect("Tauri manifest");
+    let base_config: serde_json::Value = serde_json::from_str(
+        &read_source(root.join("src-tauri/tauri.conf.json")).expect("base Tauri config"),
+    )
+    .expect("valid base Tauri config");
+    let android_config: serde_json::Value = serde_json::from_str(
+        &read_source(root.join("src-tauri/tauri.android.conf.json")).expect("Android Tauri config"),
+    )
+    .expect("valid Android Tauri config");
+    let ios_config: serde_json::Value = serde_json::from_str(
+        &read_source(root.join("src-tauri/tauri.ios.conf.json")).expect("iOS Tauri config"),
+    )
+    .expect("valid iOS Tauri config");
+    assert!(base_config["plugins"]["deep-link"].is_null());
+    assert!(android_config["plugins"]["deep-link"].is_null());
+    assert!(ios_config["plugins"]["deep-link"].is_null());
+    for platform in ["linux", "macos", "windows"] {
+        let config: serde_json::Value = serde_json::from_str(
+            &read_source(
+                root.join("src-tauri")
+                    .join(format!("tauri.{platform}.conf.json")),
+            )
+            .expect("desktop Tauri config"),
+        )
+        .expect("valid desktop Tauri config");
+        assert_eq!(
+            config["plugins"]["deep-link"]["desktop"]["schemes"],
+            serde_json::json!(["ratspeak"])
+        );
+        assert!(config["plugins"]["deep-link"]["mobile"].is_null());
+    }
+
+    let android_manifest =
+        read_source(root.join("src-tauri/gen/android/app/src/main/AndroidManifest.xml"))
+            .expect("Android manifest");
+    let ios_info = read_source(root.join("src-tauri/gen/apple/ratspeak_iOS/Info.plist"))
+        .expect("iOS Info.plist");
+    let ios_entitlements =
+        read_source(root.join("src-tauri/gen/apple/ratspeak_iOS/ratspeak_iOS.entitlements"))
+            .expect("iOS entitlements");
+    assert!(android_manifest.contains(r#"android:scheme="ratspeak""#));
+    assert!(android_manifest.contains(r#"android:host="channel""#));
+    assert!(android_manifest.contains("android.intent.category.BROWSABLE"));
+    assert!(ios_info.contains("<key>CFBundleURLTypes</key>"));
+    assert!(ios_info.contains("<string>ratspeak</string>"));
+    assert!(ios_entitlements.contains("Multicast Networking entitlement"));
+    assert!(!ios_entitlements.contains("com.apple.developer.associated-domains"));
+    assert!(cargo.contains(r#"tauri-plugin-deep-link = "2.4.9""#));
+    assert!(
+        cargo.contains(
+            r#"tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }"#
+        )
+    );
+
+    let single_instance = lib
+        .find(".plugin(tauri_plugin_single_instance::init")
+        .expect("single-instance plugin");
+    let deep_link = lib
+        .find(".plugin(tauri_plugin_deep_link::init())")
+        .expect("deep-link plugin");
+    let notification = lib
+        .find(".plugin(tauri_plugin_notification::init())")
+        .expect("notification plugin");
+    assert!(
+        single_instance < deep_link && single_instance < notification,
+        "single-instance must be the first plugin for secondary-process URLs"
+    );
+    assert!(lib.contains("channel_deep_link::NativeChannelShareInbox::default()"));
+    assert!(lib.contains("channel_deep_link::take_native_channel_share"));
+    assert!(lib.contains("channel_deep_link::install(app)"));
+
+    assert!(native.contains("Mutex<Option<ChannelShareTarget>>"));
+    assert!(native.contains("parse_channel_share_target(payload)"));
+    assert!(native.contains("app.emit(NATIVE_CHANNEL_SHARE_AVAILABLE, ())"));
+    assert!(native.contains("app.deep_link().on_open_url"));
+    assert!(native.contains("app.deep_link().get_current()"));
+    assert!(!native.contains("std::fs"));
+    assert!(!native.contains("localStorage"));
+
+    let mut capability_files = Vec::new();
+    collect_files(&root.join("src-tauri/capabilities"), &mut capability_files);
+    let capabilities = capability_files
+        .iter()
+        .map(|path| read_source(path).expect("capability source"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !capabilities.contains("deep-link:"),
+        "the deep-link plugin command API must not be callable from JavaScript"
+    );
+
+    let channels_pos = index
+        .find("/static/js/channels.js")
+        .expect("channels script");
+    let bridge_pos = index
+        .find("/static/js/native_channel_share.js")
+        .expect("native channel-share bridge");
+    let events_pos = index
+        .find("/static/js/tauri_events.js")
+        .expect("general Tauri event bridge");
+    assert!(channels_pos < bridge_pos && bridge_pos < events_pos);
+    assert!(channels.contains("function channelsOpenNativeSharedChannel(target)"));
+    assert!(channels.contains("_channelsPresentSharedTarget(target);"));
+    assert!(channels.contains("hasOwnProperty.call(target, 'key')"));
+    assert!(channels.contains("hasOwnProperty.call(target, 'join_key')"));
+
+    assert!(bridge.contains("RS.invoke('take_native_channel_share')"));
+    assert!(bridge.contains("'native_channel_share_available'"));
+    assert!(bridge.contains("_isSetupActive()"));
+    assert!(bridge.contains(".bottom-sheet.open"));
+    assert!(bridge.contains(".modal-overlay.active"));
+    assert!(bridge.contains(".game-modal-overlay"));
+    assert!(bridge.contains(".block-list-overlay"));
+    assert!(bridge.contains("#rs-image-viewer.open"));
+    assert!(bridge.contains(".action-popover.open"));
+    assert!(bridge.contains("MutationObserver"));
+    assert!(!bridge.contains("deep-link://new-url"));
+    assert!(!bridge.contains("localStorage"));
+    assert!(!bridge.contains("connect_channel_hub"));
+    assert!(!bridge.contains("join_channel"));
+    assert!(bridge_test.contains("native channel link tests passed"));
+}
+
+/// The hub persists operator policy and nothing else, creates rooms only for
+/// the operator, and never stores a join key. Each assertion below stands for
+/// a deliberate divergence from rrcd recorded in the fix registry; losing one
+/// silently would be a privacy or availability regression, not a style change.
+#[test]
+fn channel_hub_persists_policy_only_and_gates_room_creation() {
+    let root = repo_root();
+    let hub = read_source(root.join("crates/ratspeak-runtime/src/channel_hub.rs"))
+        .expect("channel hub runtime");
+    let runtime =
+        read_source(root.join("crates/ratspeak-runtime/src/lib.rs")).expect("runtime lifecycle");
+    let state =
+        read_source(root.join("crates/ratspeak-runtime/src/state.rs")).expect("runtime state");
+    let commands = read_source(root.join("crates/ratspeak-tauri/src/commands/channel_hub.rs"))
+        .expect("channel hub commands");
+    let index = read_source(root.join("dashboard/index.html")).expect("dashboard index");
+    let hub_ui =
+        read_source(root.join("dashboard/static/js/channel_hub.js")).expect("channel hub frontend");
+    let channels_css =
+        read_source(root.join("dashboard/static/css/09-channels.css")).expect("channels css");
+    let responsive_css =
+        read_source(root.join("dashboard/static/css/13-responsive.css")).expect("responsive css");
+    let admin_ui_test = read_source(root.join("dashboard/scripts/test_channel_hub_admin.js"))
+        .expect("channel hub admin UI tests");
+    let db = read_source(root.join("crates/ratspeak-db/src/db.rs")).expect("database source");
+    let tauri_lib = read_source(root.join("src-tauri/src/lib.rs")).expect("tauri lib");
+
+    // The module doc is the human-readable half of the same contract.
+    assert!(hub.contains("Relay traffic is live-only"));
+    assert!(hub.contains("never reach the Ratspeak database"));
+
+    // Durable hub state is policy. No traffic, no rosters, no nicknames.
+    let hub_schema = db
+        .split("CREATE TABLE IF NOT EXISTS channel_hub_rooms")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("CREATE INDEX IF NOT EXISTS idx_contacts_identity")
+                .next()
+        })
+        .expect("hub registry schema");
+    for forbidden in [
+        "message_body",
+        "transcript",
+        "member_hash",
+        "nickname",
+        "members",
+        "body",
+    ] {
+        assert!(
+            !hub_schema.contains(forbidden),
+            "hub registry must not store `{forbidden}`"
+        );
+    }
+    // The join key is only ever a verifiable digest.
+    assert!(hub_schema.contains("key_mac"));
+    assert!(!hub_schema.contains("key_plain"));
+    assert!(hub.contains("fn room_key_matches"));
+    assert!(hub.contains("hmac_verify"), "key checks stay constant time");
+    assert!(
+        !hub.contains("room.key = Some(key)"),
+        "a plaintext join key must never be stored"
+    );
+
+    // Room creation is operator-only; commands look rooms up, never create.
+    assert!(hub.contains("if !self.server_ops.contains(&identity) {"));
+    assert!(
+        hub.matches("entry(room_name.clone()).or_default()").count() == 1,
+        "only the operator-gated JOIN path may create a room"
+    );
+    assert!(
+        !hub.contains("room.founder"),
+        "founder authority is not durable"
+    );
+
+    // Registry tables are wiped with the identity that owns them.
+    for table in [
+        "channel_hub_rooms",
+        "channel_hub_grants",
+        "channel_hub_klines",
+    ] {
+        assert!(
+            db.contains(&format!("DELETE FROM {table} WHERE identity_id = ?1")),
+            "{table} must cascade with its identity"
+        );
+        assert!(db.contains(&format!("\"{table}\",")), "{table} must reset");
+    }
+
+    // Every reply is measured against the packet budget rather than guessed.
+    assert!(hub.contains("fn text_body_budget"));
+    assert!(hub.contains("fn roster_chunk_len"));
+    assert!(hub.contains("fn push_notice_entries"));
+    assert!(
+        hub.contains("NoticeHeader::Every(&format!(\"members in {room_name}: \"))"),
+        "/who repeats its prefix; NomadNet parses each packet independently"
+    );
+
+    // Activity carries hub policy, never hub content. Asserted on the event
+    // declaration itself: the mapping function only ever sees minted values.
+    let hub_events = hub
+        .split("pub(crate) enum HubEvent {")
+        .nth(1)
+        .and_then(|tail| tail.split("\n}\n").next())
+        .expect("hub activity event enum");
+    for forbidden in ["String", "room_name", "topic", "nickname", "body", "text"] {
+        assert!(
+            !hub_events.contains(forbidden),
+            "hub Activity events must not be able to carry `{forbidden}`"
+        );
+    }
+    assert!(
+        hub.contains("ChannelRoomToken::random()"),
+        "room tokens are random, never derived from the room label"
+    );
+
+    // The IPC surface stays registered unconditionally.
+    for command in [
+        "channel_hub::api_channel_hub",
+        "channel_hub::api_channel_hub_admin",
+        "channel_hub::channel_hub_admin_mutate",
+        "channel_hub::channel_hub_start",
+        "channel_hub::channel_hub_stop",
+        "channel_hub::set_channel_hosting_enabled",
+        "channel_hub::channel_hub_set_config",
+    ] {
+        assert!(
+            tauri_lib.contains(command),
+            "{command} must stay registered"
+        );
+    }
+
+    // Hosting is a desktop capability even though status IPC remains
+    // available everywhere for one stable frontend contract.
+    assert!(hub.contains("pub const fn channel_hub_hosting_supported()"));
+    assert!(hub.contains("target_os = \"android\", target_os = \"ios\""));
+    assert_eq!(
+        commands.matches("ensure_supported()?;").count(),
+        6,
+        "every hosting-specific hub command must reject mobile hosting"
+    );
+    assert!(runtime.contains("channel_hub_hosting_supported()"));
+
+    // Desktop hosting becomes discoverable from the Channels add action after
+    // explicit Settings opt-in, stays separate from client session state, and
+    // obeys backend support.
+    assert!(index.contains("/static/js/channel_hub.js"));
+    assert!(hub_ui.contains("RS.invoke('api_channel_hub')"));
+    assert!(hub_ui.contains("RS.invoke('api_channel_hub_admin')"));
+    assert!(hub_ui.contains("RS.invoke('channel_hub_start')"));
+    assert!(hub_ui.contains("RS.invoke('channel_hub_stop')"));
+    assert!(hub_ui.contains("RS.invoke('channel_hub_set_config'"));
+    assert!(hub_ui.contains("RS.listen('channel_hub_snapshot'"));
+    assert!(hub_ui.contains("function channelHubRenderHome"));
+    assert!(hub_ui.contains("overview.supported && _channelHubHostingEnabled(overview)"));
+    assert!(hub_ui.contains(
+        "return !!(overview && overview.supported && _channelHubHostingEnabled(overview));"
+    ));
+    assert!(hub_ui.contains("function channelHubOpenOwnHub"));
+    assert!(hub_ui.contains("overview.created"));
+    assert!(hub_ui.contains("Some channel changes are still waiting to be saved."));
+    assert!(hub_ui.contains("copyAddress.hidden = !destination"));
+    assert!(channels_css.contains(".channel-host-admin-sheet"));
+    assert!(channels_css.contains(".channel-host-admin-tabs"));
+    assert!(channels_css.contains(".channel-host-admin-timeline"));
+    assert!(channels_css.contains(".channel-host-admin-edit-sheet"));
+    assert!(channels_css.contains(".channel-host-admin-editor-section"));
+    assert!(channels_css.contains("unicode-bidi: plaintext"));
+    assert!(responsive_css.contains(".channel-host-admin-metrics"));
+    assert!(responsive_css.contains(".channel-host-admin-edit-sheet"));
+    assert!(channels_css.contains(".channel-host-registry-warning"));
+    assert!(channels_css.contains(".channel-host-copy-btn[hidden]"));
+    assert!(channels_css.contains(".channel-owned-hub-card"));
+
+    // Owner projections are pull-only, identity-fenced, and rendered as text.
+    // No hub-provided nickname, topic, or excerpt may become HTML or browser
+    // persistence, and evidence does not poll in the background.
+    let admin_renderers = hub_ui
+        .split("function _channelHubAdminNode")
+        .nth(1)
+        .and_then(|tail| tail.split("\nfunction channelHubOpenManager").next())
+        .expect("Admin Center renderers");
+    for forbidden in ["innerHTML", "localStorage", "sessionStorage", "setInterval"] {
+        assert!(
+            !admin_renderers.contains(forbidden),
+            "Admin Center renderers must not contain `{forbidden}`"
+        );
+    }
+    let admin_manager = hub_ui
+        .split("function channelHubOpenManager")
+        .nth(1)
+        .and_then(|tail| tail.split("\nfunction channelHubOpenOwnHub").next())
+        .expect("Admin Center manager");
+    assert!(admin_manager.contains("Number(nextAdmin.model_version) !== 1"));
+    assert!(admin_manager.contains("nextAdmin.evidence_policy.persistent !== false"));
+    assert!(admin_manager.contains("request !== adminRequest"));
+    assert!(admin_manager.contains("_channelHubManagerSequence !== sequence"));
+    assert!(admin_manager.contains("_channelHubIdentityGeneration === identityGeneration"));
+    assert!(admin_manager.contains("RS.invoke('channel_hub_admin_mutate', { args: args })"));
+    assert!(admin_manager.contains("mutationError.code === 'registry_unavailable'"));
+    assert!(admin_manager.contains("adminMutationBusy"));
+    assert!(!admin_manager.contains("setInterval"));
+    assert!(!admin_manager.contains("localStorage"));
+    for action in [
+        "create_channel",
+        "update_channel",
+        "unregister_channel",
+        "set_room_role",
+        "set_room_ban",
+        "set_invitation",
+        "kick",
+        "set_hub_ban",
+    ] {
+        assert!(
+            admin_renderers.contains(&format!("'{action}'")),
+            "Admin Center must project typed `{action}` intents"
+        );
+    }
+    assert!(admin_renderers.contains("secretMutation.join_key = '';"));
+    assert!(admin_renderers.contains("mutation.join_key = '';"));
+    assert!(admin_renderers.contains("autocomplete = 'new-password'"));
+    assert!(admin_renderers.contains("fixedLiveName && keyConfigured"));
+    assert!(admin_renderers.contains("!!modes.join_key_configured"));
+    assert!(admin_renderers.contains("roomInput.value.trim().toLowerCase();"));
+    assert!(admin_renderers.contains("cancel.textContent = 'Close and review'"));
+    assert!(!admin_renderers.contains("action: '/"));
+    assert!(!hub_ui.contains("Recent context, not a transcript"));
+    assert!(!hub_ui.contains("Memory-only and incomplete"));
+    assert!(!hub_ui.contains("Policy is durable. Conversation traffic is not."));
+    assert!(hub_ui.contains("Recent activity is off"));
+    assert!(hub_ui.contains("recent_activity_retention_secs"));
+    assert!(hub_ui.contains("[86400, '24 hours']"));
+    assert!(hub_ui.contains("At startup and on this schedule, so nearby people can find it"));
+    for interval in [
+        "[900, 'Every 15 minutes']",
+        "[1800, 'Every 30 minutes']",
+        "[3600, 'Every hour']",
+        "[43200, 'Every 12 hours']",
+        "[86400, 'Every 24 hours']",
+    ] {
+        assert!(hub_ui.contains(interval));
+    }
+    for removed in [
+        "Operating limits",
+        "Large welcome messages",
+        "Large room notices",
+        "[0, 'When started']",
+        "[300, 'Every 5 min']",
+        "[21600, 'Every 6 hours']",
+    ] {
+        assert!(!hub_ui.contains(removed));
+    }
+    assert!(hub_ui.contains("var _channelHubIdentityGeneration = 0;"));
+    assert!(hub_ui.contains("identityGeneration !== _channelHubIdentityGeneration"));
+    assert!(hub_ui.contains("_channelHubIdentityGeneration += 1;"));
+    assert!(hub_ui.contains("dismissManager();"));
+    assert!(hub_ui.contains("_channelHubAdminDismissChildren();"));
+    assert!(admin_ui_test.contains("channel hub Admin Center tests passed"));
+
+    // Configuration reads independently of live state, writes as one SQLite
+    // transaction, and serializes every lifecycle mutation.
+    assert!(commands.contains("pub struct ChannelHubOverview"));
+    assert!(commands.contains("pub created: bool"));
+    assert!(commands.contains("pub destination_hash: Option<String>"));
+    assert!(runtime.contains("channel_hub::hub_identity_path"));
+    assert!(commands.contains("ChannelHubSettings::load"));
+    assert!(commands.contains("valid_channel_hub_announce_interval_secs"));
+    assert!(commands.contains("try_set_settings"));
+    assert!(commands.contains("hub.status()"));
+    assert!(commands.contains("hub.admin_snapshot()"));
+    assert!(commands.contains("HubStore::new"));
+    assert!(commands.contains("let status = current_snapshot(state).await"));
+    assert!(commands.contains("existing_hub_destination_hash(&identity_path)"));
+    assert!(db.contains("pub fn try_set_settings"));
+    assert!(db.contains("let transaction = conn.transaction()"));
+    assert!(state.contains("pub channel_hub_control_lock: tokio::sync::Mutex<()>"));
+    for command in [
+        "pub async fn api_channel_hub_admin",
+        "pub async fn channel_hub_admin_mutate",
+        "pub async fn channel_hub_start",
+        "pub async fn channel_hub_stop",
+        "pub async fn set_channel_hosting_enabled",
+        "pub async fn channel_hub_set_config",
+    ] {
+        let body = commands
+            .split(command)
+            .nth(1)
+            .expect("hub lifecycle command");
+        assert!(body.contains("channel_hub_control_lock.lock().await"));
+    }
+
+    // Owner evidence is an explicit pull through the actor, bounded in live
+    // memory, and kept off the content-free Activity/event path.
+    assert!(hub.contains("HubCommand::AdminSnapshot"));
+    assert!(hub.contains("result_tx.send(core.admin_snapshot())"));
+    assert!(hub.contains("CHANNEL_HUB_EVIDENCE_RETENTION_DEFAULT_SECS: u64 = 0"));
+    assert!(hub.contains("valid_evidence_retention_secs"));
+    assert!(hub.contains("CHANNEL_HUB_EVIDENCE_MAX_EVENTS"));
+    assert!(hub.contains("CHANNEL_HUB_EVIDENCE_MAX_BYTES"));
+    assert!(hub.contains("persistent: false"));
+    assert!(hub.contains("struct HubEvidenceRecord"));
+    assert!(hub.contains("Do not derive"));
+}
+
+#[test]
+fn channel_hub_admin_mutations_are_actor_owned_and_durable_before_ack() {
+    let root = repo_root();
+    let hub = read_source(root.join("crates/ratspeak-runtime/src/channel_hub.rs"))
+        .expect("channel hub runtime");
+    let commands = read_source(root.join("crates/ratspeak-tauri/src/commands/channel_hub.rs"))
+        .expect("channel hub commands");
+
+    // Plaintext join-key input has no formatting or serialization surface and
+    // becomes a zeroizing runtime value immediately at the IPC boundary.
+    for declaration in [
+        "pub struct ChannelHubAdminSecret",
+        "pub enum ChannelHubAdminMutation",
+    ] {
+        let prefix = hub
+            .split(declaration)
+            .next()
+            .expect("sensitive runtime declaration");
+        let declaration_attributes = prefix.rsplit("\n\n").next().unwrap_or_default();
+        assert!(
+            !declaration_attributes.contains("derive("),
+            "{declaration} must not derive formatting or serialization"
+        );
+    }
+    let args_prefix = commands
+        .split("pub enum ChannelHubAdminMutationArgs")
+        .next()
+        .expect("sensitive IPC declaration");
+    let args_attributes = args_prefix.rsplit("\n\n").next().unwrap_or_default();
+    assert!(!args_attributes.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with("#[derive") && line.contains("Debug")
+    }));
+    assert!(hub.contains("pub struct ChannelHubAdminSecret(Zeroizing<String>);"));
+    assert!(commands.contains("join_key.map(ChannelHubAdminSecret::new)"));
+    assert!(commands.contains("let join_key = join_key.map(ChannelHubAdminSecret::new);"));
+
+    // The Tauri command serializes with lifecycle changes, rejects stopped
+    // mutation, requires a full identity hash, and never writes HubStore.
+    let mutation_command = commands
+        .split("pub async fn channel_hub_admin_mutate")
+        .nth(1)
+        .and_then(|tail| tail.split("\n#[tauri::command]").next())
+        .expect("admin mutation command");
+    assert!(mutation_command.contains("channel_hub_control_lock.lock().await"));
+    assert!(mutation_command.contains("active_operator_identity(&state)"));
+    assert!(mutation_command.contains("state.channel_hub_handle().ok_or_else"));
+    assert!(mutation_command.contains("hub.admin_mutate(actor_identity, mutation)"));
+    assert!(!mutation_command.contains("HubStore"));
+    assert!(commands.contains("validate_hex(value, 32, 32)"));
+
+    // Authorization and every state transition happen in HubCore. Durable
+    // access state requires a registered room; live kick remains live-only;
+    // server operators cannot be deopped, kicked, or banned.
+    assert!(hub.contains("pub(crate) fn admin_mutate("));
+    assert!(hub.contains("if !self.server_ops.contains(&actor_identity)"));
+    assert!(hub.contains("fn require_registered_admin_room("));
+    assert!(hub.contains("\"A server operator cannot be removed through a channel role\""));
+    assert!(hub.contains("\"A server operator cannot be banned from a channel\""));
+    assert!(hub.contains("\"A server operator cannot be kicked\""));
+    assert!(hub.contains("\"A server operator cannot be banned from the hub\""));
+    assert!(hub.contains("\"Invitations require an invite-only or join-key channel\""));
+
+    // Local actions write only private evidence for their moderation/trust
+    // intent; they do not fabricate a link-scoped Activity transition.
+    let local_evidence = hub
+        .split("fn note_admin_moderated")
+        .nth(1)
+        .and_then(|tail| tail.split("fn broadcast_admin_topic").next())
+        .expect("local owner evidence helpers");
+    assert!(local_evidence.contains("self.push_evidence("));
+    assert!(!local_evidence.contains("self.events.push"));
+
+    // The actor applies the intent, flushes its complete SQLite projection,
+    // publishes state, and only then acknowledges with a fresh owner model.
+    let run_hub = hub
+        .split("async fn run_hub(")
+        .nth(1)
+        .and_then(|tail| tail.split("/// Every hub event").next())
+        .expect("hub service loop");
+    let applies = run_hub
+        .find("core.admin_mutate(actor_identity, mutation, &mut out)")
+        .expect("actor applies typed mutation");
+    let flushes = run_hub
+        .find("let persisted = flush_sends")
+        .expect("actor flushes mutation");
+    let replies = run_hub
+        .find("if let Some((result_tx, result)) = admin_reply")
+        .expect("actor replies after flush");
+    let sends = run_hub
+        .find("result_tx.send(result)")
+        .expect("actor sends mutation result");
+    assert!(applies < flushes && flushes < replies && replies < sends);
+    assert!(run_hub.contains("ADMIN_ERROR_REGISTRY_UNAVAILABLE"));
+    assert!(
+        hub.contains("const ADMIN_ERROR_REGISTRY_UNAVAILABLE: &str = \"registry_unavailable\";")
+    );
+    assert!(run_hub.contains("Ok(()) => Ok(core.admin_snapshot())"));
+    assert!(hub.contains("async fn flush_sends("));
+    assert!(hub.contains(") -> bool {"));
+}
+
+#[test]
+fn channel_hub_shutdown_acknowledges_complete_teardown() {
+    let root = repo_root();
+    let hub = read_source(root.join("crates/ratspeak-runtime/src/channel_hub.rs"))
+        .expect("channel hub runtime");
+    let run_hub = hub
+        .split("async fn run_hub(")
+        .nth(1)
+        .and_then(|tail| tail.split("/// Every hub event").next())
+        .expect("hub service loop");
+
+    let captures_ack = run_hub
+        .find("shutdown_ack = Some(result_tx)")
+        .expect("shutdown request captures its acknowledgement");
+    let final_flush = run_hub
+        .find("core.flush_dirty_last_used(&mut final_out)")
+        .expect("final registry flush");
+    let closes_destination = run_hub
+        .find("registration.close().await")
+        .expect("destination teardown");
+    let sends_ack = run_hub
+        .find("if let Some(result_tx) = shutdown_ack")
+        .expect("completed teardown acknowledgement");
+
+    assert!(captures_ack < final_flush);
+    assert!(final_flush < closes_destination);
+    assert!(closes_destination < sends_ack);
+}
+
+#[test]
+fn activity_lxmf_progress_is_typed_and_content_free() {
+    let root = repo_root();
+    let runtime = read_source(root.join("crates/ratspeak-runtime/src/lib.rs"))
+        .expect("runtime Activity adapter");
+    let lxmf = read_source(root.join("crates/ratspeak-runtime/src/lxmf.rs")).expect("LXMF adapter");
+
+    let progress_adapter = runtime
+        .split("fn lxmf_progress_activity_step(")
+        .nth(1)
+        .and_then(|tail| tail.split("#[cfg(test)]").next())
+        .expect("typed LXMF Activity adapter");
+    assert!(progress_adapter.contains("update.kind"));
+    assert!(progress_adapter.contains("update.event_method"));
+    assert!(progress_adapter.contains("update.delivery_representation"));
+    assert!(!progress_adapter.contains("update.step"));
+    assert!(!progress_adapter.contains("update.reason"));
+    assert!(!progress_adapter.contains("from_code(update.method)"));
+    assert!(runtime.contains("lxmf_progress_supersedes_state"));
+    assert!(
+        runtime.contains("matches!(*new_state, \"propagating\" | \"propagated\")")
+            && runtime.contains(".then_some(\"propagated\".to_string())"),
+        "an Auto fallback must persist the observable Propagated method before UI emission"
+    );
+    assert!(runtime.contains("producer::LxmfDeliveryState::Propagating"));
+    assert!(runtime.contains("producer::LxmfDeliveryState::Propagated"));
+
+    for typed_field in [
+        "pub kind: LxmfDeliveryProgressKind",
+        "pub event_method: LxmfDeliveryProgressMethod",
+        "pub delivery_representation: LxmfDeliveryProgressRepresentation",
+    ] {
+        assert!(lxmf.contains(typed_field));
+    }
+}
+
 #[test]
 fn privacy_announce_usage_setting_is_wired() {
     let root = repo_root();
     let index = read_source(root.join("dashboard/index.html")).expect("dashboard index");
     assert!(index.contains("data-settings-title=\"Privacy\""));
-    assert!(index.contains("Privacy related preferences"));
+    assert!(index.contains("Activity identity protection and presence sharing."));
     assert!(index.contains("Announce Ratspeak usage"));
     assert!(index.contains("Let others know you support games, calls, and extra features."));
     assert!(index.contains("id=\"announce-ratspeak-usage-toggle\" checked"));
@@ -90,6 +1162,143 @@ fn privacy_announce_usage_setting_is_wired() {
 }
 
 #[test]
+fn incoming_lxmf_limit_setting_is_normal_default_on_and_backend_authoritative() {
+    let root = repo_root();
+    let index = read_source(root.join("dashboard/index.html")).expect("dashboard index");
+    assert!(index.contains("Limit incoming messages to 1 MB"));
+    assert!(index.contains("id=\"lxmf-limit-1mb-toggle\" checked"));
+
+    let settings = read_source(root.join("dashboard/static/js/settings.js")).expect("settings js");
+    assert!(settings.contains("data.lxmf_limit_1mb"));
+    assert!(settings.contains("RS.invoke('set_lxmf_limit_1mb', { enabled: enabled })"));
+
+    let interfaces = read_source(root.join("crates/ratspeak-tauri/src/commands/interfaces.rs"))
+        .expect("interfaces commands");
+    assert!(interfaces.contains("pub async fn set_lxmf_limit_1mb"));
+    assert!(interfaces.contains("db::get_setting(&p, \"lxmf_limit_1mb\")"));
+    assert!(interfaces.contains("state.set_lxmf_limit_1mb_enabled(enabled)"));
+
+    let tauri_lib = read_source(root.join("src-tauri/src/lib.rs")).expect("tauri lib");
+    assert!(tauri_lib.contains("set_lxmf_limit_1mb"));
+}
+
+#[test]
+fn activity_identity_protection_is_default_on_durable_and_event_scoped() {
+    let root = repo_root();
+    let index = read_source(root.join("dashboard/index.html")).expect("dashboard index");
+    let settings = read_source(root.join("dashboard/static/js/settings.js")).expect("settings js");
+    let activity = read_source(root.join("dashboard/static/js/activity.js")).expect("activity js");
+    let interfaces = read_source(root.join("crates/ratspeak-tauri/src/commands/interfaces.rs"))
+        .expect("interfaces commands");
+    let tauri_lib = read_source(root.join("src-tauri/src/lib.rs")).expect("tauri lib");
+
+    assert!(index.contains("Protect Activity identities"));
+    assert!(index.contains("id=\"settings-activity-identity-protection-on\" value=\"on\" checked"));
+    assert!(settings.contains("set_activity_identity_protection"));
+    assert!(settings.contains("adoptActivityIdentityProtectionFromBackend"));
+    assert!(activity.contains("function activityRevealEvent(event)"));
+    assert!(activity.contains("activityIdentityProtectionEnabled = true"));
+    assert!(!activity.contains("activityRevealField(event, 'destination');"));
+    assert!(interfaces.contains("pub async fn set_activity_identity_protection"));
+    assert!(interfaces.contains("\"activity_identity_protection\""));
+    assert!(interfaces.contains(".is_none_or(|value| value != \"false\")"));
+    assert!(tauri_lib.contains("set_activity_identity_protection"));
+}
+
+#[test]
+fn text_scale_presets_are_durable_and_backend_validated() {
+    let root = repo_root();
+    let settings = read_source(root.join("dashboard/static/js/settings.js")).expect("settings js");
+    let scale = read_source(root.join("dashboard/static/js/text_scale.js")).expect("scale js");
+    let index = read_source(root.join("dashboard/index.html")).expect("dashboard index");
+    let views_css = read_source(root.join("dashboard/static/css/10-views.css")).expect("views css");
+    let interfaces = read_source(root.join("crates/ratspeak-tauri/src/commands/interfaces.rs"))
+        .expect("interfaces commands");
+    let tauri_lib = read_source(root.join("src-tauri/src/lib.rs")).expect("tauri lib");
+
+    assert!(settings.contains("RS.invoke('set_text_scale'"));
+    assert!(settings.contains("data.text_scale_percent"));
+    assert!(scale.contains("var MAX = 140"));
+    assert!(interfaces.contains("pub async fn set_text_scale"));
+    assert!(interfaces.contains("\"text_scale_percent\""));
+    assert!(interfaces.contains("(percent.clamp(100, 140) + 5) / 10 * 10"));
+    assert!(tauri_lib.contains("set_text_scale"));
+    assert!(index.contains("/static/style.css?v=ui-20260804"));
+    assert!(views_css.contains(".settings-theme-family-row > .settings-row-info"));
+    assert!(views_css.contains("html[data-text-scale-tier=\"large\"] .settings-theme-family-row"));
+    assert!(views_css.contains("justify-content: flex-start;\n    flex-wrap: nowrap;"));
+    assert!(views_css.contains("html[data-text-scale-tier=\"xlarge\"] .settings-row"));
+    assert!(!views_css.contains("html[data-text-scale-tier=\"xlarge\"] .settings-page-shell"));
+}
+
+#[test]
+fn appearance_families_are_durable_validated_and_native_aware() {
+    let root = repo_root();
+    let index = read_source(root.join("dashboard/index.html")).expect("dashboard index");
+    let theme = read_source(root.join("dashboard/static/js/theme.js")).expect("theme js");
+    let settings = read_source(root.join("dashboard/static/js/settings.js")).expect("settings js");
+    let interfaces = read_source(root.join("crates/ratspeak-tauri/src/commands/interfaces.rs"))
+        .expect("interfaces commands");
+    let tauri_lib = read_source(root.join("src-tauri/src/lib.rs")).expect("tauri lib");
+    let android = read_source(
+        root.join("src-tauri/gen/android/app/src/main/java/org/ratspeak/android/MainActivity.kt"),
+    )
+    .expect("Android activity");
+
+    assert!(index.contains("id=\"theme-family-picker\""));
+    assert!(index.contains("id=\"theme-toggle\""));
+    for family in [
+        "ratspeak",
+        "nord",
+        "everforest",
+        "gruvbox",
+        "catppuccin",
+        "rose-pine",
+    ] {
+        assert!(theme.contains(&format!("id: '{family}'")));
+        assert!(interfaces.contains(&format!("\"{family}\" => Some(\"{family}\")")));
+    }
+    assert!(theme.contains("data-theme-family"));
+    assert!(theme.contains("data-theme-preference"));
+    assert!(theme.contains("ratspeak-theme-changed"));
+    assert!(theme.contains("'rs-theme-family'"));
+    assert!(!settings.contains("label.title = family.name"));
+    assert!(settings.contains("'Use ' + family.name + ' theme'"));
+    assert!(theme.contains("if (value === 'solarized') return 'everforest'"));
+    assert!(settings.contains("RS.invoke('set_appearance'"));
+    assert!(settings.contains("data.theme_family"));
+    assert!(settings.contains("data.theme_mode"));
+    assert!(interfaces.contains("pub async fn set_appearance"));
+    assert!(interfaces.contains("db::try_set_settings("));
+    assert!(interfaces.contains("\"solarized\" => Some(\"everforest\")"));
+    assert!(interfaces.contains("pub fn set_native_theme"));
+    assert!(tauri_lib.contains("set_appearance"));
+    assert!(tauri_lib.contains("set_native_theme"));
+    assert!(android.contains("fun setColorMode(mode: String)"));
+    assert!(android.contains("applySystemBarColorMode(mode)"));
+}
+
+#[test]
+fn mobile_shells_advertise_only_portrait_orientations() {
+    let root = repo_root();
+    let manifest = read_source(root.join("src-tauri/gen/android/app/src/main/AndroidManifest.xml"))
+        .expect("android manifest");
+    let ios_info = read_source(root.join("src-tauri/gen/apple/ratspeak_iOS/Info.plist"))
+        .expect("iOS Info.plist");
+    let ios_project =
+        read_source(root.join("src-tauri/gen/apple/project.yml")).expect("iOS project source");
+
+    assert!(manifest.contains("android:screenOrientation=\"portrait\""));
+    assert!(manifest.contains("tools:ignore=\"DiscouragedApi,LockedOrientationActivity\""));
+    assert!(ios_info.contains("UIInterfaceOrientationPortrait"));
+    assert!(!ios_info.contains("UIInterfaceOrientationLandscape"));
+    assert!(ios_project.contains("UISupportedInterfaceOrientations:"));
+    assert!(ios_project.contains("UISupportedInterfaceOrientations~ipad:"));
+    assert!(!ios_project.contains("UIInterfaceOrientationLandscape"));
+    assert!(ios_project.contains("TARGETED_DEVICE_FAMILY: \"1,2\""));
+}
+
+#[test]
 fn ble_rnode_runtime_spawns_enable_flow_control() {
     let root = repo_root();
     let ble_rs =
@@ -97,7 +1306,7 @@ fn ble_rnode_runtime_spawns_enable_flow_control() {
     let interfaces_rs = read_source(root.join("crates/ratspeak-tauri/src/commands/interfaces.rs"))
         .expect("interfaces commands");
 
-    let native_blocks = rust_struct_literal_blocks(&ble_rs, "BleRnodeRuntimeArgs");
+    let native_blocks = rust_struct_literal_blocks(&ble_rs, "BleRNodeInterfaceConfig");
     assert_eq!(
         native_blocks.len(),
         1,
@@ -125,6 +1334,262 @@ fn ble_rnode_runtime_spawns_enable_flow_control() {
 }
 
 #[test]
+fn all_rnode_creation_paths_require_strict_capability_admission() {
+    let root = repo_root();
+    let runtime_rs =
+        read_source(root.join("crates/ratspeak-runtime/src/rns.rs")).expect("RNS runtime");
+    let interfaces_rs = read_source(root.join("crates/ratspeak-tauri/src/commands/interfaces.rs"))
+        .expect("interfaces commands");
+    let ble_rs =
+        read_source(root.join("crates/ratspeak-tauri/src/commands/ble.rs")).expect("BLE commands");
+    let strict_option = "RNodeStartupOptions::require_capability_admission()";
+
+    let assert_strict_calls = |source: &str, call_path: &str, expected: usize| {
+        let calls = rust_call_blocks(source, call_path);
+        assert_eq!(
+            calls.len(),
+            expected,
+            "unexpected exact call count for {call_path}"
+        );
+        for call in calls {
+            assert!(
+                call.contains(strict_option),
+                "{call_path} must require capability admission:\n{call}"
+            );
+        }
+    };
+
+    assert_strict_calls(
+        &runtime_rs,
+        "reticulum::init_with_options_and_rnode_startup_options",
+        1,
+    );
+    let configured_startup = rust_call_blocks(
+        &runtime_rs,
+        "reticulum::init_with_options_and_rnode_startup_options",
+    );
+    assert!(configured_startup[0].contains("InitOptions::default()"));
+    assert_strict_calls(
+        &interfaces_rs,
+        "rns_runtime::reticulum::spawn_ble_rnode_runtime_observed_with_options",
+        2,
+    );
+    assert_strict_calls(
+        &interfaces_rs,
+        "rns_runtime::reticulum::spawn_android_usb_rnode_runtime_with_config_and_options",
+        2,
+    );
+    assert_strict_calls(
+        &interfaces_rs,
+        "rns_runtime::reticulum::spawn_rnode_runtime_observed_with_options",
+        2,
+    );
+    assert_strict_calls(
+        &ble_rs,
+        "rns_runtime::reticulum::spawn_ble_rnode_runtime_native_with_config_and_options",
+        1,
+    );
+
+    assert_eq!(runtime_rs.matches(strict_option).count(), 1);
+    assert_eq!(interfaces_rs.matches(strict_option).count(), 6);
+    assert_eq!(ble_rs.matches(strict_option).count(), 1);
+
+    for legacy_call in ["reticulum::init", "reticulum::init_with_options"] {
+        assert!(
+            rust_call_blocks(&runtime_rs, legacy_call).is_empty(),
+            "legacy RNode startup call remains: {legacy_call}"
+        );
+    }
+    for legacy_call in [
+        "rns_runtime::reticulum::spawn_ble_rnode_runtime_observed",
+        "rns_runtime::reticulum::spawn_android_usb_rnode_runtime_observed",
+        "rns_runtime::reticulum::spawn_rnode_runtime_observed",
+    ] {
+        assert!(
+            rust_call_blocks(&interfaces_rs, legacy_call).is_empty(),
+            "legacy RNode spawn call remains: {legacy_call}"
+        );
+    }
+    assert!(
+        rust_call_blocks(
+            &ble_rs,
+            "rns_runtime::reticulum::spawn_ble_rnode_runtime_native_observed",
+        )
+        .is_empty(),
+        "legacy native BLE RNode spawn call remains"
+    );
+}
+
+#[test]
+fn dynamic_rnode_activity_monitors_are_exact_covered_and_ownership_gated() {
+    let root = repo_root();
+    let readiness = read_source(root.join("crates/ratspeak-tauri/src/commands/rnode_readiness.rs"))
+        .expect("RNode readiness adapter");
+    let interfaces = read_source(root.join("crates/ratspeak-tauri/src/commands/interfaces.rs"))
+        .expect("interfaces commands");
+    let ble =
+        read_source(root.join("crates/ratspeak-tauri/src/commands/ble.rs")).expect("BLE commands");
+    let runtime_monitor = read_source(root.join("crates/ratspeak-runtime/src/rnode_activity.rs"))
+        .expect("RNode Activity monitor");
+    let runtime_state =
+        read_source(root.join("crates/ratspeak-runtime/src/state.rs")).expect("runtime state");
+
+    let pending_declaration = runtime_monitor
+        .find("pub struct PendingRNodeActivityMonitor")
+        .expect("single-use pending monitor seed");
+    let pending_attributes = runtime_monitor[..pending_declaration]
+        .rsplit("\n\n")
+        .next()
+        .expect("pending monitor attributes");
+    assert!(!pending_attributes.contains("#[derive"));
+    assert!(runtime_monitor.contains("origin: RNodeActivityOrigin"));
+    let runtime_activation = rust_function_block(&runtime_monitor, "activate");
+    assert!(runtime_activation.contains("self.origin"));
+    assert!(
+        runtime_state
+            .contains("monitor: Option<crate::rnode_activity::PendingRNodeActivityMonitor>")
+    );
+    assert!(!runtime_state.contains(
+        "#[derive(Clone, Copy, Debug, Eq, PartialEq)]\npub enum BleRnodeOperationResult"
+    ));
+
+    let shared_wait = rust_function_block(&readiness, "await_spawned_rnode_ready");
+    let cover = shared_wait
+        .find("state.cover_rnode_activity_interface(spawned.interface_id, origin)")
+        .expect("exact RNode poll coverage");
+    let readiness_wait = shared_wait
+        .find(".await_ready(RNODE_READINESS_TIMEOUT)")
+        .expect("exact observer readiness wait");
+    assert!(cover < readiness_wait, "coverage must precede readiness");
+    assert!(shared_wait.contains("covered.then(||"));
+    assert!(shared_wait.contains(
+        "PendingRNodeActivityMonitor::new(spawned.observer.clone(), ready_snapshot, origin)"
+    ));
+
+    let owned_wait = rust_function_block(&interfaces, "await_owned_rnode_ready");
+    assert!(owned_wait.contains("origin: RNodeActivityOrigin"));
+    assert!(owned_wait.contains("await_spawned_rnode_ready(state, spawned, origin)"));
+
+    let editable = rust_function_block(&interfaces, "spawn_editable_interface");
+    let add = rust_function_block(&interfaces, "add_lora_interface");
+    let editable_contexts =
+        rust_call_blocks(editable, "rnode_activity_runtime_context_for_identity");
+    assert_eq!(editable_contexts.len(), 1);
+    assert!(editable_contexts[0].contains("activity_fence.identity_session_generation()"));
+    assert!(editable.contains("(context.handle().clone(), context.origin())"));
+    let add_contexts = rust_call_blocks(add, "rnode_activity_runtime_context_for_identity");
+    assert_eq!(add_contexts.len(), 3);
+    for context in add_contexts {
+        assert!(context.contains("activity_fence.identity_session_generation()"));
+    }
+    for (source, expected_waits) in [(editable, 3usize), (add, 3usize)] {
+        assert_eq!(
+            source.matches("await_owned_rnode_ready(").count(),
+            expected_waits
+        );
+        for call in rust_call_blocks(source, "await_owned_rnode_ready") {
+            assert!(call.contains("rnode_activity_origin"));
+        }
+        for call_path in [
+            "rns_runtime::reticulum::spawn_ble_rnode_runtime_observed_with_options",
+            "rns_runtime::reticulum::spawn_android_usb_rnode_runtime_with_config_and_options",
+            "rns_runtime::reticulum::spawn_rnode_runtime_observed_with_options",
+        ] {
+            assert_eq!(
+                rust_call_blocks(source, call_path).len(),
+                1,
+                "{call_path} must occur exactly once in each dynamic creation matrix"
+            );
+        }
+    }
+    assert_eq!(
+        editable
+            .matches("InterfaceSpawnOutcome::started_rnode(")
+            .count(),
+        5
+    );
+    assert!(interfaces.contains("rnode_activity_monitor: Option<PendingRNodeActivityMonitor>"));
+    assert!(editable.contains("BleRnodeOperationResult::Ready {"));
+    assert!(editable.contains("interface_id,\n                            monitor,"));
+    assert!(editable.contains("InterfaceSpawnOutcome::started_rnode("));
+
+    let replace = rust_function_block(&interfaces, "finish_rnode_interface_replace");
+    assert_eq!(replace.matches(".activate(Arc::clone(&state))").count(), 2);
+    assert!(replace.matches("finish_rnode_lifecycle_operation").count() >= 2);
+    let resume = rust_function_block(&interfaces, "resume_interface");
+    assert_eq!(resume.matches(".activate(Arc::clone(&st))").count(), 1);
+    assert_eq!(add.matches(".activate(Arc::clone(&st))").count(), 3);
+    for (source, activation_marker, finish_marker) in [
+        (
+            replace,
+            ".activate(Arc::clone(&state))",
+            "finish_rnode_lifecycle_operation(&operation_lease)",
+        ),
+        (
+            resume,
+            ".activate(Arc::clone(&st))",
+            "finish_rnode_lifecycle_operation(lease)",
+        ),
+        (
+            add,
+            ".activate(Arc::clone(&st))",
+            "finish_rnode_lifecycle_operation(&operation_lease)",
+        ),
+    ] {
+        for (activation, _) in source.match_indices(activation_marker) {
+            let nearby = &source[activation.saturating_sub(240)..activation];
+            assert!(
+                nearby.contains(finish_marker),
+                "monitor activation must immediately follow lifecycle ownership"
+            );
+        }
+    }
+
+    let bridge = rust_function_block(&ble, "apply_ble_rnode_bridge_ready");
+    assert_eq!(
+        rust_call_blocks(
+            bridge,
+            "rns_runtime::reticulum::spawn_ble_rnode_runtime_native_with_config_and_options"
+        )
+        .len(),
+        1
+    );
+    let native_contexts = rust_call_blocks(bridge, "rnode_activity_runtime_context_for_identity");
+    assert_eq!(native_contexts.len(), 1);
+    assert!(native_contexts[0].contains("activity_fence.identity_session_generation()"));
+    assert!(bridge.contains("let rnode_activity_origin = rnode_context.origin()"));
+    let native_wait = rust_call_blocks(bridge, "await_spawned_rnode_ready");
+    assert_eq!(native_wait.len(), 1);
+    assert!(native_wait[0].contains("rnode_activity_origin"));
+    let ready_branch = bridge
+        .split("Some(Ok(pending_monitor)) => {")
+        .nth(1)
+        .and_then(|tail| tail.split("Some(Err(failure)) => {").next())
+        .expect("native BLE ready branch");
+    let completion_take = ready_branch
+        .find("take_initializing_ble_rnode_activity_operation_with_completion")
+        .expect("native BLE terminal ownership take");
+    let completion_branch = ready_branch
+        .split("if let Some(completion) = completion {")
+        .nth(1)
+        .and_then(|tail| tail.split("} else {").next())
+        .expect("completion-bearing native BLE path");
+    assert!(completion_branch.contains("BleRnodeOperationResult::Ready {"));
+    assert!(completion_branch.contains("monitor: pending_monitor"));
+    assert!(completion_branch.contains(".is_err()"));
+    assert!(completion_branch.contains("teardown_spawned_rnode_exact"));
+    assert!(!completion_branch.contains(".activate("));
+    let direct_branch = ready_branch
+        .split("} else {")
+        .nth(1)
+        .expect("direct native BLE terminal path");
+    let direct_activation = direct_branch
+        .find("pending_monitor.activate(Arc::clone(&state_arc))")
+        .expect("owned direct native BLE monitor activation");
+    assert!(completion_take < direct_activation);
+}
+
+#[test]
 fn android_ble_rnode_bridge_retries_writes_and_fallback_detaches() {
     let root = repo_root();
     let gatt =
@@ -142,8 +1607,12 @@ fn android_ble_rnode_bridge_retries_writes_and_fallback_detaches() {
     assert!(gatt.contains("Thread.sleep(BLE_WRITE_REJECT_RETRY_MS)"));
     assert!(gatt.contains("Thread.sleep(BLE_WRITE_PACING_MS)"));
     assert!(gatt.contains("observeRustDetachBytes(readBuf, off, end)"));
-    assert!(gatt.contains("sendRnodeDetachFallbackIfNeeded(\"TCP bridge closing\")"));
+    assert!(gatt.contains("sendRnodeDetachFallbackIfNeeded(\"explicit disconnect\")"));
     assert!(gatt.contains("if (rustDetachObserved.get()) return"));
+    assert!(gatt.contains("fun forwardClientGenerations(listener: ServerSocket)"));
+    assert!(gatt.contains("rustDetachObserved.set(false)"));
+    assert!(gatt.contains("detachFrameMatch = 0"));
+    assert!(gatt.contains("closeBridgeClient(accepted.socket)"));
 }
 
 #[test]
@@ -162,8 +1631,10 @@ fn rnode_config_edit_suppresses_next_interface_reannounce() {
     assert!(state_rs.contains("INTERFACE_REANNOUNCE_SUPPRESSION_TTL"));
 
     assert!(runtime_rs.contains("take_interface_reannounce_suppression(name)"));
-    assert!(runtime_rs.contains("!reannounce_suppressed"));
-    assert!(runtime_rs.contains("Skipped re-announce after"));
+    assert!(runtime_rs.contains("should_reannounce_for_interface_online("));
+    assert!(runtime_rs.contains("auto_announce_interval > 0"));
+    assert!(runtime_rs.contains("PollActivityObservation::AnnounceSuppressed"));
+    assert!(runtime_rs.contains("AnnounceSuppressionReason::InterfaceRestart"));
 
     assert!(interfaces_rs.contains("operation == \"update_lora\""));
     assert!(interfaces_rs.contains("matches!(&new_runtime, EditableInterfaceConfig::RNode"));
@@ -364,14 +1835,18 @@ fn frontend_shared_helpers_are_adopted() {
         }
     }
 
-    // Portable CSS minify (BSD `sed -i ''` silently no-ops on GNU sed).
+    // The shell and Cargo builders must concatenate the same ordered modules
+    // without a one-sided minification/rewrite pass.
     let build_css = read_source(root.join("dashboard/build-css.sh")).expect("build-css.sh");
-    assert!(!build_css.contains("sed -i ''"));
-    assert!(build_css.contains("perl -0777 -pi"));
+    assert!(build_css.contains("MODULES=("));
+    assert!(build_css.contains("for module in \"${MODULES[@]}\"; do"));
+    assert!(build_css.contains("printf '\\n' >> \"$OUT\""));
+    assert!(!build_css.contains("perl -0777 -pi"));
+    assert!(!build_css.contains("sed -i"));
 
-    // Peer-controlled data URL is escaped at the image render site.
+    // Every local optimistic image URL is escaped at the image render site.
     let lxmf_js = read_source(root.join("dashboard/static/js/lxmf.js")).expect("lxmf js");
-    assert!(lxmf_js.contains("escapeHtml(msg.image.data_url)"));
+    assert!(lxmf_js.contains("escapeHtml(localImageUrl)"));
 }
 
 #[test]
@@ -627,6 +2102,68 @@ fn android_service_is_not_sticky_without_runtime_ownership() {
 }
 
 #[test]
+fn android_native_release_lint_is_strict_and_api_guarded() {
+    let root = repo_root();
+    let gradle = read_source(root.join("src-tauri/gen/android/app/build.gradle.kts"))
+        .expect("Android app Gradle source");
+    let manifest = read_source(root.join("src-tauri/gen/android/app/src/main/AndroidManifest.xml"))
+        .expect("Android manifest");
+    let main_activity = read_source(
+        root.join("src-tauri/gen/android/app/src/main/java/org/ratspeak/android/MainActivity.kt"),
+    )
+    .expect("Android MainActivity");
+    let platform_supervisor = read_source(root.join(
+        "src-tauri/gen/android/app/src/main/java/org/ratspeak/android/RatspeakPlatformSupervisor.kt",
+    ))
+    .expect("Android platform supervisor");
+    let service =
+        read_source(root.join(
+            "src-tauri/gen/android/app/src/main/java/org/ratspeak/android/RatspeakService.kt",
+        ))
+        .expect("Android service");
+    let gatt =
+        read_source(root.join(
+            "src-tauri/gen/android/app/src/main/java/org/ratspeak/android/RatspeakBleGatt.kt",
+        ))
+        .expect("Android BLE GATT bridge");
+    let release = read_source(root.join(".github/workflows/release-android.yml"))
+        .expect("Android release workflow");
+
+    assert!(gradle.contains("warningsAsErrors = true"));
+    assert!(gradle.contains("abortOnError = true"));
+    assert!(!gradle.contains("baseline ="));
+    for deliberate_exclusion in [
+        "AndroidGradlePluginVersion",
+        "GradleDependency",
+        "IconDuplicates",
+    ] {
+        assert!(gradle.contains(deliberate_exclusion));
+    }
+    for unsafe_exclusion in ["MissingPermission", "NewApi", "WakelockTimeout"] {
+        assert!(!gradle.contains(unsafe_exclusion));
+    }
+    assert!(release.contains("./gradlew :app:lintArm64Release --warning-mode all"));
+
+    assert!(manifest.contains(r#"android.hardware.touchscreen"#));
+    assert!(manifest.contains(r#"android.hardware.wifi"#));
+    assert!(manifest.contains(r#"android:banner="@mipmap/ic_launcher""#));
+    assert!(manifest.contains(r#"android:roundIcon="@mipmap/ic_launcher_round""#));
+    assert!(main_activity.contains("ContextCompat.startForegroundService(this, serviceIntent)"));
+    assert!(platform_supervisor.contains("ContextCompat.registerReceiver("));
+    assert!(platform_supervisor.contains("ContextCompat.RECEIVER_NOT_EXPORTED"));
+    assert!(main_activity.contains("Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q"));
+    assert_eq!(
+        service
+            .matches("if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return")
+            .count(),
+        3
+    );
+    assert!(gatt.contains("Manifest.permission.BLUETOOTH_CONNECT"));
+    assert!(gatt.contains("ContextCompat.checkSelfPermission("));
+    assert!(gatt.contains("catch (_: SecurityException)"));
+}
+
+#[test]
 fn game_event_init_does_not_depend_on_missing_network_watcher() {
     let source =
         read_source(repo_root().join("dashboard/static/js/games_tab.js")).expect("js source");
@@ -681,7 +2218,7 @@ fn games_new_sheet_uses_shared_mobile_bottom_sheet_width() {
 
     let games_css = read_source(root.join("dashboard/static/css/11-games.css")).expect("games css");
     assert!(games_css.contains(
-        "@media (min-width: 769px) {\n    .bottom-sheet.open.games-new-dialog {\n        width: min(520px, 92vw);\n    }\n}"
+        "@media (min-width: 769px) {\n    .bottom-sheet.open.games-new-dialog {\n        width: min(640px, calc(100vw - 48px));\n    }\n}"
     ));
     assert!(!games_css.contains(".games-sheet-send-btn {\n    border: 1px solid var(--accent);"));
     assert!(
@@ -699,6 +2236,139 @@ fn games_new_sheet_uses_shared_mobile_bottom_sheet_width() {
     assert!(responsive_css.contains(
         ".bottom-sheet {\n        position: fixed;\n        bottom: 0;\n        left: 0;\n        right: 0;"
     ));
+}
+
+#[test]
+fn games_ui_uses_runtime_manifests_and_accessible_atomic_actions() {
+    let root = repo_root();
+    let games_js = read_source(root.join("dashboard/static/js/games_tab.js")).expect("games js");
+    let game_registry =
+        read_source(root.join("dashboard/static/js/game_registry.js")).expect("game registry js");
+    let index = read_source(root.join("dashboard/index.html")).expect("dashboard index");
+    let games_css = read_source(root.join("dashboard/static/css/11-games.css")).expect("games css");
+
+    assert!(games_js.contains("RS.invoke('get_available_games')"));
+    assert!(games_js.contains("var _manifestsById = {};"));
+    assert!(games_js.contains("RS.games.views.register('ttt'"));
+    assert!(games_js.contains("RS.games.views.register('chess'"));
+    assert!(games_js.contains("gameView.renderBoard(session, _gameViewContext(session, panel))"));
+    assert!(games_js.contains("gameView.bindBoard(session, _gameViewContext(session, panel))"));
+    assert!(games_js.contains("RS.games.views.supportedManifests("));
+    assert!(games_js.contains("app_id: 'four_in_a_row', display_name: 'Four in a Row'"));
+    assert!(games_js.contains("view.activeStatusText(session, _gameViewContext(session))"));
+    assert!(games_js.contains("view.detailChips(session, _gameViewContext(session))"));
+    assert!(games_js.contains("view.renderActiveControls(session)"));
+    assert!(games_js.contains("view.bindControls(session, {"));
+    assert!(!games_js.contains("if (appId === 'ttt') {\n            html += _renderTTTBoard"));
+    assert!(game_registry.contains("function register(appId, adapter)"));
+    assert!(game_registry.contains("function get(appId)"));
+    assert!(game_registry.contains("function listIds()"));
+    assert!(game_registry.contains("function supportedManifests(manifests)"));
+    let registry_script = index.find("/static/js/game_registry.js").unwrap();
+    let four_script = index.find("/static/js/four_in_a_row_view.js").unwrap();
+    let games_script = index.find("/static/js/games_tab.js").unwrap();
+    assert!(registry_script < four_script && four_script < games_script);
+    assert!(games_js.contains("function _beginSessionAction(sessionId)"));
+    assert!(games_js.contains("function _drawOfferOwner(session)"));
+    assert!(games_js.contains("function _canDeleteSession(session)"));
+    assert!(games_js.contains("function _handleGameActionFailure(data)"));
+    assert!(games_js.contains("function _activeMoveDeliveryText(state)"));
+    assert!(games_js.contains("escapeHtml(_statusText(s))"));
+    assert!(games_js.contains("escapeHtml(RS.relativeTime(s.updated_at || s.last_action_at))"));
+    assert!(games_js.contains("finishPromotion(null);"));
+    assert!(games_js.contains("_isMe(session, _drawOfferOwner(session))"));
+    assert!(games_js.contains("if (!_beginSessionAction(session.game_id)) return;"));
+    assert!(games_js.contains("if (!_beginSessionAction(sid)) return;"));
+    assert!(games_js.contains("RS.listen('game_protocol_error'"));
+    assert!(games_js.contains("role=\"gridcell\""));
+    assert!(games_js.contains("aria-label=\"Tic-Tac-Toe board\""));
+    assert!(games_js.contains("function _chessPieceName(piece)"));
+    assert!(games_css.contains(".ttt-cell:focus-visible"));
+    assert!(games_css.contains(".chess-square:focus-visible"));
+    assert!(games_css.contains(".four-lane-action:focus-visible"));
+    assert!(games_css.contains("background: var(--surface-scrim);"));
+    assert!(
+        !games_css.contains(".game-modal"),
+        "Games must use the shared bottom sheet instead of a parallel legacy modal"
+    );
+}
+
+#[test]
+fn four_in_a_row_view_is_accessible_theme_native_and_protocol_thin() {
+    let root = repo_root();
+    let games_js = read_source(root.join("dashboard/static/js/games_tab.js")).expect("games js");
+    let registry =
+        read_source(root.join("dashboard/static/js/game_registry.js")).expect("registry js");
+    let four = read_source(root.join("dashboard/static/js/four_in_a_row_view.js"))
+        .expect("four in a row view js");
+    let css = read_source(root.join("dashboard/static/css/11-games.css")).expect("games css");
+
+    assert!(four.contains("var APP_ID = 'four_in_a_row';"));
+    assert!(four.contains("RS.games.views.register(APP_ID"));
+    assert!(four.contains("var CELL_COUNT = ROWS * COLUMNS;"));
+    assert!(four.contains("role=\"grid\" aria-label=\"Four in a Row board\""));
+    assert!(four.contains("role=\"gridcell\""));
+    assert!(four.contains("aria-rowindex=\""));
+    assert!(four.contains("aria-colindex=\""));
+    assert!(four.contains("class=\"four-lane-action\""));
+    assert!(four.contains("role=\"group\" aria-label=\"Column drop controls\""));
+    assert!(four.contains("context.sendMove({ c: column }"));
+    assert!(!four.contains("payload: { board:"));
+    assert!(!four.contains("payload: { turn:"));
+    assert!(four.contains("fields: ['board', 'last_column', 'last_row', 'last_cell']"));
+    assert!(four.contains("event.key === 'ArrowLeft'"));
+    assert!(four.contains("event.key === 'ArrowRight'"));
+    assert!(four.contains("event.key === 'Home'"));
+    assert!(four.contains("event.key === 'End'"));
+    assert!(games_js.contains("function _sendGameViewMove(session, payload, optimistic)"));
+    assert!(games_js.contains("function _sessionValue(session, key, fallback)"));
+    assert!(games_js.contains("_sessionValue(session, 'move_count', '')"));
+    assert!(games_js.contains("_sessionValue(record, 'move_count', null)"));
+    assert!(games_js.contains("_sessionValue(session, 'winner', '')"));
+    assert!(games_js.contains("RS.games.optimistic.restoreFields(session, backup.adapter_fields)"));
+    assert!(registry.contains("function sessionValue(session, key, fallback)"));
+    assert!(registry.contains("RS.games.state = Object.freeze"));
+    assert!(registry.contains("function captureFields(target, fields)"));
+    assert!(registry.contains("function restoreFields(target, snapshot)"));
+    assert!(css.contains(".four-token-a"));
+    assert!(css.contains(".four-token-b"));
+    assert!(css.contains(".four-win-trace line"));
+    assert!(css.contains(".four-win-trace.animate line"));
+    assert!(css.contains("@keyframes fourSettle"));
+    assert!(css.contains("@media (prefers-reduced-motion: reduce)"));
+}
+
+#[test]
+fn games_transport_uses_native_lxmf_fields_and_a_durable_outbox() {
+    let root = repo_root();
+    let lxmf = read_source(root.join("crates/ratspeak-runtime/src/lxmf.rs")).expect("lxmf rs");
+    let games = read_source(root.join("crates/ratspeak-tauri/src/commands/games.rs"))
+        .expect("games commands");
+    let db = read_source(root.join("crates/ratspeak-db/src/db.rs")).expect("db source");
+    let runtime =
+        read_source(root.join("crates/ratspeak-runtime/src/lib.rs")).expect("runtime source");
+    let state =
+        read_source(root.join("crates/ratspeak-runtime/src/state.rs")).expect("state source");
+
+    assert!(lxmf.contains("apply_lrgp_fields_to_message"));
+    assert!(lxmf.contains(".set_msgpack_field(field_id, bytes)"));
+    assert!(games.contains("db::persist_outbound_game_action("));
+    assert!(games.contains("db::rollback_outbound_game_action("));
+    assert!(games.contains("reason = \"resend_required\";"));
+    assert!(db.contains("pub fn persist_outbound_game_action("));
+    assert!(db.contains("pub fn rollback_outbound_game_action("));
+    assert!(!db.contains("INSERT OR REPLACE INTO app_actions"));
+    assert!(runtime.contains("fn lrgp_sender_authenticated("));
+    assert!(runtime.contains(".rollback_incoming("));
+    assert!(runtime.contains(".forget_incoming_nonce("));
+    assert!(runtime.contains("fn game_delivery_state_is_in_flight(state: &str)"));
+    assert!(runtime.contains("sweep_stale_game_deliveries(&tick_state).await"));
+    assert!(runtime.contains("update_game_session_delivery_state(\n                    &state,"));
+    assert!(state.contains("LrgpRouter::with_builtin_apps()"));
+    assert!(!state.contains("register(Box::new(lrgp::apps::tictactoe"));
+    for field in ["validation", "preferred_delivery", "ttl"] {
+        assert!(games.contains(&format!("\"{field}\": manifest.{field}")));
+    }
 }
 
 #[test]
@@ -720,6 +2390,14 @@ fn games_view_uses_standard_dark_mode_surfaces() {
 #[test]
 fn process_diagnostics_are_explicit_opt_in() {
     let source = read_source(repo_root().join("src-tauri/src/lib.rs")).expect("app shell");
+    let policy = read_source(repo_root().join("crates/ratspeak-tauri/src/diagnostics.rs"))
+        .expect("diagnostics target policy");
+    let core =
+        read_source(repo_root().join("crates/ratspeak-tauri/src/lib.rs")).expect("tauri core");
+    let ble = read_source(repo_root().join("crates/ratspeak-tauri/src/commands/ble.rs"))
+        .expect("BLE commands");
+    let events = read_source(repo_root().join("dashboard/static/js/tauri_events.js"))
+        .expect("frontend event listeners");
 
     assert!(source.contains("fn diagnostics_enabled()"));
     assert!(source.contains("env_flag(\"RATSPEAK_DIAGNOSTICS\")"));
@@ -727,6 +2405,602 @@ fn process_diagnostics_are_explicit_opt_in() {
     assert!(source.contains("fn diagnostic_file_enabled()"));
     assert!(source.contains("RATSPEAK_DIAGNOSTIC_FILE"));
     assert!(!source.contains("const DEFAULT_FILTER"));
+    assert!(source.contains("fn diagnostic_metadata_allowed("));
+    assert_eq!(
+        source
+            .matches(".with(filter_fn(diagnostic_metadata_allowed))")
+            .count(),
+        6,
+        "every platform subscriber path must intersect EnvFilter with the immutable target policy"
+    );
+    assert!(policy.contains("pub fn target_allowed(target: &str) -> bool"));
+    assert!(policy.contains("pub fn metadata_allowed(metadata: &tracing::Metadata<'_>) -> bool"));
+    assert!(policy.contains("PROHIBITED_FIELD_NAMES"));
+    for denied in ["rns_interface", "lxmf_core::router", "ble_diag"] {
+        assert!(policy.contains(denied));
+    }
+    assert!(core.contains("spawn_ble_event_broadcaster(&app_state)"));
+    assert!(!core.contains("spawn_ble_diag_broadcaster"));
+    assert!(!ble.contains("subscribe_ble_diag"));
+    assert!(!events.contains("RS.listen('ble_diag'"));
+}
+
+#[test]
+fn semantic_ble_and_auto_activity_adapters_preserve_the_privacy_boundary() {
+    let root = repo_root();
+    let ble =
+        read_source(root.join("crates/ratspeak-tauri/src/commands/ble.rs")).expect("BLE commands");
+    let interfaces = read_source(root.join("crates/ratspeak-tauri/src/commands/interfaces.rs"))
+        .expect("interface commands");
+    let adapter =
+        read_source(root.join("crates/ratspeak-tauri/src/commands/interface_activity.rs"))
+            .expect("interface Activity adapter");
+    let state =
+        read_source(root.join("crates/ratspeak-runtime/src/state.rs")).expect("runtime state");
+    let events = read_source(root.join("dashboard/static/js/tauri_events.js"))
+        .expect("frontend event listeners");
+    let shell = read_source(root.join("src-tauri/src/lib.rs")).expect("command registration");
+    let mobile_native =
+        read_source(root.join("src-tauri/src/mobile_native.rs")).expect("mobile native bridge");
+
+    assert!(adapter.contains("record_event_fenced("));
+    assert!(adapter.contains("is_current_activity_origin_fence(fence)"));
+    assert!(!adapter.contains("reason: String"));
+    assert!(!adapter.contains("address"));
+    assert!(!adapter.contains("device"));
+    assert!(!adapter.contains("ifname"));
+
+    assert!(ble.contains("ble_peer_activity_transition("));
+    assert!(ble.contains("ble_rnode_activity_transition("));
+    assert!(ble.contains("InterfaceDegradationReason::PeripheralUnavailable"));
+    assert!(ble.contains("let mut peripheral_degradation_recorded = false;"));
+    assert!(ble.contains("activity_fence: ActivityRequestFence"));
+    assert!(!ble.contains("subscribe_ble_diag"));
+    assert!(!ble.contains(".record_event("));
+
+    let auto_relay = interfaces
+        .split("pub fn spawn_auto_event_broadcaster")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub async fn api_list_network_interfaces")
+                .next()
+        })
+        .expect("AutoInterface product relay");
+    assert!(auto_relay.contains("AutoInterfaceEvent::JoinFailed"));
+    assert!(auto_relay.contains("AutoInterfaceEvent::CarrierState"));
+    assert!(auto_relay.contains("emit_to_all("));
+    assert!(!auto_relay.contains("record_interface_activity"));
+    assert!(!auto_relay.contains("activity.record"));
+
+    assert!(state.contains("rns_crypto::random::random_16()"));
+    assert!(state.contains("claim_ble_rnode_activity_operation"));
+    assert!(state.contains("take_pending_ble_rnode_activity_operation"));
+    assert!(state.contains("take_initializing_ble_rnode_activity_operation"));
+    assert!(state.contains("BleRnodeActivityOperationPhase::Initializing"));
+    assert!(state.contains("BleRnodeActivityOperationPhase::Completing"));
+    assert!(state.contains("rollback_context: Option<BleRnodeRollbackContext>"));
+    assert!(state.contains("pending.take().map(|operation| {"));
+    assert!(state.contains("*pending = None;"));
+    assert!(shell.contains("mod mobile_native"));
+    assert!(mobile_native.contains("nativeBleRnodeState"));
+    assert!(mobile_native.contains("take_pending_ble_request(&activity_operation, generation)"));
+    assert!(mobile_native.contains("apply_ble_rnode_bridge_failed("));
+    assert!(mobile_native.contains("failure_code: native_ble_failure_code(&code)"));
+    assert!(!events.contains("RS.invoke('ble_rnode_bridge_failed'"));
+
+    let bridge_failure = ble
+        .split("pub async fn apply_ble_rnode_bridge_failed")
+        .nth(1)
+        .and_then(|tail| tail.split("pub async fn cancel_ble_connect").next())
+        .expect("typed native bridge failure command");
+    let token_accept = bridge_failure
+        .find("take_active_ble_rnode_activity_operation_with_completion")
+        .expect("exact operation acceptance");
+    let rollback = bridge_failure
+        .find("rollback_ble_rnode_context")
+        .expect("backend-owned failure rollback");
+    assert!(
+        token_accept < rollback,
+        "a stale rejected failure must not reach config rollback"
+    );
+
+    for product_event in [
+        "ble_peer_discovered",
+        "ble_peer_connected",
+        "ble_peer_disconnected",
+        "ble_peer_peripheral_unavailable",
+        "auto_unavailable",
+        "auto_carrier_state",
+        "ble_rnode_passkey_prompt",
+        "ble_rnode_pairing_finished",
+        "mobile_hardware_state",
+    ] {
+        assert!(
+            ble.contains(product_event)
+                || interfaces.contains(product_event)
+                || events.contains(product_event),
+            "dedicated product stream {product_event} must remain"
+        );
+    }
+}
+
+#[test]
+fn android_ble_operation_nonce_is_round_tripped_scoped_and_watchdog_owned() {
+    let root = repo_root();
+    let state =
+        read_source(root.join("crates/ratspeak-runtime/src/state.rs")).expect("runtime state");
+    let ble =
+        read_source(root.join("crates/ratspeak-tauri/src/commands/ble.rs")).expect("BLE commands");
+    let interfaces = read_source(root.join("crates/ratspeak-tauri/src/commands/interfaces.rs"))
+        .expect("interface commands");
+    let events = read_source(root.join("dashboard/static/js/tauri_events.js"))
+        .expect("frontend event listeners");
+    let main_activity = read_source(
+        root.join("src-tauri/gen/android/app/src/main/java/org/ratspeak/android/MainActivity.kt"),
+    )
+    .expect("Android MainActivity");
+    let gatt =
+        read_source(root.join(
+            "src-tauri/gen/android/app/src/main/java/org/ratspeak/android/RatspeakBleGatt.kt",
+        ))
+        .expect("Android GATT bridge");
+    let native_bridge = read_source(root.join(
+        "src-tauri/gen/android/app/src/main/java/org/ratspeak/android/RatspeakNativeBridge.kt",
+    ))
+    .expect("Android native bridge");
+    let supervisor = read_source(root.join(
+        "src-tauri/gen/android/app/src/main/java/org/ratspeak/android/RatspeakPlatformSupervisor.kt",
+    ))
+    .expect("Android platform supervisor");
+
+    assert!(
+        state.contains("BLE_RNODE_ACTIVITY_OPERATION_TTL: Duration = Duration::from_secs(240)")
+    );
+    assert!(state.contains("BleRnodeActivityOperationPhase::PendingNative"));
+    assert!(state.contains("BleRnodeActivityOperationPhase::Initializing"));
+    assert!(state.contains("BleRnodeActivityOperationPhase::Completing"));
+    assert!(state.contains("claim_ble_rnode_activity_operation"));
+    assert!(state.contains("claim_ble_rnode_activity_operation_completion"));
+    assert!(state.contains("take_pending_ble_rnode_activity_operation"));
+    assert!(state.contains("take_initializing_ble_rnode_activity_operation"));
+    assert!(state.contains("take_completing_ble_rnode_activity_operation"));
+    assert!(state.contains("rollback_context: Option<BleRnodeRollbackContext>"));
+    assert!(state.contains("lifecycle_lease: Option<RNodeLifecycleOperationLease>"));
+    assert!(state.contains("begin_ble_rnode_activity_operation_owned"));
+    assert!(state.contains("begin_ble_rnode_activity_operation_with_completion_owned"));
+    assert!(state.contains("invalidate_ble_rnode_activity_operation_if_token"));
+    assert!(state.contains("ble_completion_ownership_is_lost_when_new_operation_replaces_it"));
+    assert!(state.contains("stale_ble_failure_cannot_take_newer_rollback_context"));
+
+    assert!(ble.contains("claim_ble_rnode_activity_operation(&activity_operation)"));
+    assert!(ble.contains("take_initializing_ble_rnode_activity_operation"));
+    assert!(ble.contains("claim_ble_rnode_activity_operation_completion"));
+    assert!(ble.contains("take_completing_ble_rnode_activity_operation"));
+    assert!(ble.contains("disconnect_native_ble_rnode_operation"));
+    assert!(ble.contains("apply_ble_rnode_bridge_ready("));
+    assert_eq!(
+        rust_call_blocks(
+            &ble,
+            "rns_runtime::reticulum::spawn_ble_rnode_runtime_native_with_config_and_options",
+        )
+        .len(),
+        1
+    );
+    let readiness_calls = rust_call_blocks(&ble, "await_spawned_rnode_ready");
+    assert_eq!(readiness_calls.len(), 1);
+    assert!(readiness_calls[0].contains("rnode_activity_origin"));
+    assert!(ble.contains("teardown_spawned_rnode_exact(&rns, &spawned)"));
+    assert!(!ble.contains("online.load(std::sync::atomic::Ordering::SeqCst)"));
+
+    assert!(interfaces.contains("start_or_replace_ble_rnode(NativeBleRnodeRequest"));
+    assert!(interfaces.contains("activity_operation"));
+    assert!(interfaces.contains("native_generation: context.origin().native_generation()"));
+    assert!(!events.contains("ble_rnode_connect_native"));
+    assert!(interfaces.contains("schedule_android_ble_rnode_operation_watchdog"));
+    assert!(interfaces.contains("couple_android_ble_operation_to_rnode_lease"));
+    assert!(interfaces.contains("begin_ble_rnode_activity_operation_owned"));
+    assert!(interfaces.contains("begin_ble_rnode_activity_operation_with_completion_owned"));
+    assert!(interfaces.contains("Duration::from_secs(180)"));
+    assert!(interfaces.contains("take_pending_ble_rnode_activity_operation"));
+    assert!(interfaces.contains("rollback_fresh_lora_add_marker"));
+    assert!(interfaces.contains("RnodeActivityOutcome::SetupTimedOut"));
+    assert!(interfaces.contains("Some(\"setup_timeout\")"));
+
+    assert!(!events.contains("result.activity_operation !== activityOperation"));
+    assert!(!events.contains("_BLE_RNODE_NATIVE_TIMEOUT_MS"));
+    assert!(!events.contains("disconnectBleDeviceForOperation"));
+    assert!(events.contains("RS.listen('mobile_hardware_state'"));
+    assert!(!events.contains("ble_rnode_bridge_ready"));
+    assert!(!events.contains("ble_rnode_bridge_failed"));
+
+    let bridge_ready = ble
+        .split("pub async fn ble_rnode_bridge_ready")
+        .nth(1)
+        .and_then(|tail| tail.split("pub struct BleRnodeBridgeFailureArgs").next())
+        .expect("Android BLE bridge-ready command");
+    let readiness_failure = bridge_ready
+        .split("Some(Err(failure)) => {")
+        .nth(1)
+        .and_then(|tail| tail.split("None => {").next())
+        .expect("RNode readiness failure completion");
+    let completion_claim = readiness_failure
+        .find("claim_ble_rnode_activity_operation_completion")
+        .expect("initialization completion claim");
+    let teardown = readiness_failure
+        .find("teardown_spawned_rnode_exact")
+        .expect("exact readiness-failure teardown");
+    let completion_take = readiness_failure
+        .find("take_completing_ble_rnode_activity_operation")
+        .expect("exact completion take");
+    assert!(completion_claim < teardown && teardown < completion_take);
+    assert!(bridge_ready.contains("clear_ble_rnode_rollback_context"));
+
+    assert!(!main_activity.contains("fun connectBleDevice("));
+    assert!(!main_activity.contains("fun disconnectBleDeviceForOperation("));
+    assert!(native_bridge.contains("fun startOrReplaceBleRnode("));
+    assert!(native_bridge.contains("operationToken: String"));
+    assert!(native_bridge.contains("installedGeneration: Long"));
+    assert!(supervisor.contains("requestUsbPermissionForSelector"));
+    assert!(native_bridge.contains("nativeBleRnodeState("));
+    assert!(native_bridge.contains("operationToken"));
+    assert!(native_bridge.contains("installedGeneration"));
+    assert!(!gatt.contains("WebView"));
+    assert!(gatt.contains("const val ERR_BOND_TIMEOUT = \"ERR_BOND_TIMEOUT\""));
+    assert!(gatt.contains("$ERR_PAIRING_MODE $ERR_BOND_TIMEOUT Bonding timed out"));
+    assert!(ble.contains("enum BleRnodeNativeFailureCode"));
+    assert!(ble.contains("BondTimeout"));
+    assert!(ble.contains("SetupTimeout"));
+    assert!(!ble.contains("pub timed_out: bool"));
+}
+
+#[test]
+fn interface_command_lifecycles_use_origin_fences_truthful_terminals_and_scoped_auto_events() {
+    let root = repo_root();
+    let ble =
+        read_source(root.join("crates/ratspeak-tauri/src/commands/ble.rs")).expect("BLE commands");
+    let shared =
+        read_source(root.join("crates/ratspeak-tauri/src/commands/shared.rs")).expect("shared");
+    let interfaces = read_source(root.join("crates/ratspeak-tauri/src/commands/interfaces.rs"))
+        .expect("interface commands");
+    let rns_config =
+        read_source(root.join("crates/ratspeak-runtime/src/rns_config.rs")).expect("rns config");
+
+    let expiry = ble
+        .split("fn schedule_ble_peer_expiry")
+        .nth(1)
+        .and_then(|tail| tail.split("#[tauri::command]").next())
+        .expect("BLE Peer expiry scheduler");
+    assert!(expiry.contains("activity_fence: ActivityRequestFence"));
+    assert!(!expiry.contains("activity_request_fence()"));
+    assert!(
+        expiry
+            .contains("let changed = disable_ble_peer_inner_if_expiry(&state3, expires_at).await")
+    );
+    assert!(ble.contains("InterfaceTimeoutReason::Setup"));
+    assert!(ble.contains("if changed {\n            record_interface_activity"));
+    assert!(shared.contains("pub(crate) async fn disable_ble_peer_inner"));
+    assert!(shared.contains("pub(crate) async fn disable_ble_peer_inner_if_expiry"));
+    assert!(shared.contains("was_requested || had_live_interface"));
+    assert!(rns_config.contains("pub enum RemoveInterfaceOutcome"));
+    assert!(rns_config.contains("pub fn remove_interface_checked"));
+    assert!(rns_config.contains("if !removed {"));
+    assert!(rns_config.contains("RemoveInterfaceOutcome::NotFound"));
+
+    let cancel_ble = ble
+        .split("pub async fn cancel_ble_connect")
+        .nth(1)
+        .and_then(|tail| tail.split("pub async fn disconnect_ble_rnode").next())
+        .expect("BLE cancellation command");
+    assert!(!cancel_ble.contains("rollback_only"));
+    let cancellation_lease = cancel_ble
+        .find("state_arc.begin_ble_rnode_activity_cancellation()")
+        .expect("user cancellation lease");
+    let exact_rollback = cancel_ble
+        .find("rollback_ble_rnode_context")
+        .expect("exact Android cancellation rollback");
+    assert!(
+        !cancel_ble.contains("rollback_current_fresh_lora_add"),
+        "cancellation without an exact operation owner must not delete a same-name replacement"
+    );
+    let teardown_spawn = cancel_ble
+        .find("tokio::spawn")
+        .expect("awaited runtime teardown spawn");
+    let teardown_claim = cancel_ble
+        .find("claim_ble_rnode_activity_cancellation")
+        .expect("exact cancellation teardown claim");
+    let runtime_teardown = cancel_ble
+        .find("teardown_ble_rnode_interface")
+        .expect("exact-id runtime teardown");
+    let terminal_take = cancel_ble
+        .find("take_completing_ble_rnode_activity_cancellation")
+        .expect("post-await cancellation terminal take");
+    let terminal_status = terminal_take
+        + cancel_ble[terminal_take..]
+            .find("BLE connect for")
+            .expect("post-teardown cancellation terminal status");
+    assert!(
+        cancellation_lease < exact_rollback
+            && exact_rollback < teardown_spawn
+            && teardown_spawn < teardown_claim
+            && teardown_claim < runtime_teardown
+            && runtime_teardown < terminal_take
+            && terminal_take < terminal_status,
+        "cancellation must own exact rollback, teardown, and terminal publication"
+    );
+    assert!(shared.contains("const FRESH_LORA_ADD_TTL"));
+    assert!(shared.contains("const MAX_FRESH_LORA_ADDS"));
+    assert!(shared.contains("type FreshLoraAddKey = (PathBuf, String)"));
+    assert!(shared.contains("struct FreshLoraAddEntry"));
+    assert!(shared.contains("entry.marker == expected_marker"));
+    assert!(shared.contains("rollback_fresh_lora_add_marker"));
+    assert!(!shared.contains("rollback_current_fresh_lora_add"));
+    assert!(shared.contains("fresh_lora_success_and_edit_clear_delete_authorization"));
+    assert!(shared.contains("stale_same_name_marker_cannot_delete_replacement_config"));
+    let atomic_rollback = shared
+        .split("pub(crate) fn rollback_fresh_lora_add_marker")
+        .nth(1)
+        .and_then(|tail| tail.split("pub(crate) fn remove_stored_file_refs").next())
+        .expect("atomic versioned fresh-add rollback");
+    assert!(atomic_rollback.contains("with_rns_config_lock"));
+    assert!(atomic_rollback.contains("take_fresh_lora_add"));
+    assert!(atomic_rollback.contains("remove_interface_checked"));
+
+    let disconnect_ble = ble
+        .split("pub async fn disconnect_ble_rnode")
+        .nth(1)
+        .and_then(|tail| tail.split("#[cfg(test)]").next())
+        .expect("BLE RNode disconnect command");
+    assert!(disconnect_ble.contains("with_rns_config_lock"));
+    assert!(disconnect_ble.contains("begin_rnode_lifecycle_operation"));
+    assert!(disconnect_ble.contains("snapshot_interface_block"));
+    assert!(disconnect_ble.contains("remove_interface_block_if_revision"));
+    assert!(disconnect_ble.contains("captured_interface_id"));
+    assert!(disconnect_ble.contains("is_current_rnode_lifecycle_operation"));
+    assert!(disconnect_ble.contains("RemoveInterfaceOutcome::Removed"));
+    assert!(disconnect_ble.contains("RemoveInterfaceOutcome::NotFound"));
+    assert!(disconnect_ble.contains("RemoveInterfaceOutcome::WriteFailed"));
+
+    let add_lora = interfaces
+        .split("pub async fn add_lora_interface")
+        .nth(1)
+        .and_then(|tail| tail.split("pub struct UpdateLoraArgs").next())
+        .expect("add_lora command");
+    for outcome in [
+        "RnodeActivityOutcome::Configured",
+        "RnodeActivityOutcome::Connecting",
+        "RnodeActivityOutcome::Online",
+        "RnodeActivityOutcome::ConfigureFailed",
+        "RnodeActivityOutcome::ConnectFailed",
+        "RnodeActivityOutcome::PairingTimedOut",
+        "RnodeActivityOutcome::StartupTimedOut",
+        "RnodeActivityOutcome::RuntimeFailed",
+    ] {
+        assert!(
+            add_lora.contains(outcome),
+            "add_lora transport matrix is missing {outcome}"
+        );
+    }
+    assert_eq!(
+        rust_call_blocks(
+            add_lora,
+            "rns_runtime::reticulum::spawn_ble_rnode_runtime_observed_with_options",
+        )
+        .len(),
+        1
+    );
+    assert_eq!(
+        rust_call_blocks(
+            add_lora,
+            "rns_runtime::reticulum::spawn_rnode_runtime_observed_with_options",
+        )
+        .len(),
+        1
+    );
+    assert_eq!(
+        rust_call_blocks(
+            add_lora,
+            "rns_runtime::reticulum::spawn_android_usb_rnode_runtime_with_config_and_options",
+        )
+        .len(),
+        1
+    );
+    assert!(add_lora.contains("await_owned_rnode_ready"));
+    assert!(!add_lora.contains("online.load(std::sync::atomic::Ordering::SeqCst)"));
+    assert!(interfaces.contains("teardown_spawned_rnode_exact(handle, spawned)"));
+    let freshness_transaction = add_lora
+        .split(
+            "let (operation_lease, fresh_marker, existing_rnode_port, handoff_targets, config_written)",
+        )
+        .nth(1)
+        .and_then(|tail| tail.split("let fresh_add = fresh_marker.is_some()").next())
+        .expect("fresh BLE add config transaction");
+    assert!(freshness_transaction.contains("with_rns_config_lock"));
+    assert!(freshness_transaction.contains("begin_rnode_lifecycle_operation"));
+    let stale_clear = freshness_transaction
+        .find("mark_lora_add_freshness(&config_dir, &name, false)")
+        .expect("stale marker clear");
+    let config_write = freshness_transaction
+        .find("crate::rns_config::add_rnode_interface")
+        .expect("RNode config write");
+    let marker_install = freshness_transaction
+        .rfind("mark_lora_add_freshness(&config_dir, &name, fresh_add)")
+        .expect("versioned marker install");
+    assert!(stale_clear < config_write && config_write < marker_install);
+    assert!(add_lora.contains("clear_fresh_lora_add_marker"));
+    assert!(add_lora.contains("rollback_fresh_lora_add_marker"));
+
+    let update_lora = interfaces
+        .split("pub async fn update_lora_interface")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("async fn teardown_rnode_handoff_broadcast")
+                .next()
+        })
+        .expect("update_lora command");
+    assert!(update_lora.contains("mark_lora_add_freshness"));
+    assert!(update_lora.contains("&old_name"));
+    assert!(update_lora.contains("&name"));
+
+    let handoff = interfaces
+        .split("async fn teardown_rnode_handoff_broadcast")
+        .nth(1)
+        .and_then(|tail| tail.split("pub async fn remove_lora_interface").next())
+        .expect("Android RNode handoff");
+    assert!(handoff.contains("teardown_live_interface_by_name"));
+    assert!(handoff.contains("is_current_rnode_lifecycle_operation"));
+    assert!(handoff.contains("remove_interface_block_if_revision"));
+    assert!(handoff.contains("InterfaceBlockCasOutcome::NotFound => {}"));
+    assert!(handoff.contains("InterfaceBlockCasOutcome::WriteFailed"));
+    assert!(handoff.contains("return false;"));
+
+    let remove_lora = interfaces
+        .split("pub async fn remove_lora_interface")
+        .nth(1)
+        .and_then(|tail| tail.split("pub async fn enable_auto_interface").next())
+        .expect("RNode removal command");
+    assert!(remove_lora.contains("with_rns_config_lock"));
+    assert!(remove_lora.contains("begin_rnode_lifecycle_operation"));
+    assert!(remove_lora.contains("snapshot_interface_block"));
+    assert!(remove_lora.contains("remove_interface_block_if_revision"));
+    assert!(remove_lora.contains("teardown_live_interface_by_name"));
+    assert!(remove_lora.contains("InterfaceBlockCasOutcome::Applied"));
+    assert!(remove_lora.contains("InterfaceBlockCasOutcome::NotFound"));
+    assert!(remove_lora.contains("InterfaceBlockCasOutcome::WriteFailed"));
+
+    let enable_auto = interfaces
+        .split("pub async fn enable_auto_interface")
+        .nth(1)
+        .and_then(|tail| tail.split("pub async fn disable_auto_interface").next())
+        .expect("enable_auto command");
+    let subscribe = enable_auto
+        .find("let mut initial_auto_events = rns_interface::auto::subscribe_auto_events()")
+        .expect("command-scoped Auto subscriber");
+    let spawn = enable_auto
+        .find("spawn_auto_interface_runtime_with_config")
+        .expect("Auto spawn");
+    assert!(
+        subscribe < spawn,
+        "Auto must subscribe before its owned spawn"
+    );
+    assert!(enable_auto.contains("drain_initial_auto_join_failure"));
+    assert!(enable_auto.contains("AutoActivityOutcome::MulticastUnavailable"));
+    assert!(enable_auto.contains("AutoActivityOutcome::TimedOut"));
+}
+
+#[test]
+fn diagnostic_file_writer_is_bounded_nonblocking_and_lifetime_scoped() {
+    let root = repo_root();
+    let shell = read_source(root.join("src-tauri/src/lib.rs")).expect("app shell");
+    let writer = read_source(root.join("crates/ratspeak-tauri/src/diagnostic_writer.rs"))
+        .expect("bounded diagnostic writer");
+
+    assert!(!shell.contains("tracing_appender::rolling::daily"));
+    assert!(!shell.contains("PathBuf::from(\".\")"));
+    assert!(shell.contains("diagnostic_writer::DiagnosticFileRuntime::start("));
+    assert!(shell.contains("let mut tracing_guard = init_tracing();"));
+    assert!(
+        shell.contains("file: Option<ratspeak_tauri::diagnostic_writer::DiagnosticFileRuntime>")
+    );
+    assert!(shell.contains("app.manage(dropped);"));
+    assert!(shell.contains("tracing_guard.shutdown();"));
+
+    for contract in [
+        "pub const ACTIVE_LOG_NAME: &str = \"ratspeak.log\";",
+        "pub const ARCHIVE_COUNT: usize = 4;",
+        "pub const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;",
+        "pub const MAX_RECORD_BYTES: usize = 16 * 1024;",
+        "pub const WRITER_QUEUE_RECORDS: usize = 2_048;",
+        "mpsc::sync_channel(queue_records)",
+        "try_send(WorkerMessage::Record(record))",
+        "WorkerMessage::Shutdown",
+        "pub fn dropped_counter(&self) -> DroppedLogLines",
+        "pub fn shutdown(mut self) -> io::Result<()>",
+        "metadata.file_type().is_symlink()",
+        "metadata_is_reparse_point",
+        "options.create_new(create_new)",
+        "options.custom_flags(libc::O_NOFOLLOW)",
+        "options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)",
+    ] {
+        assert!(
+            writer.contains(contract),
+            "missing writer contract {contract:?}"
+        );
+    }
+    assert!(!writer.contains("read_dir("));
+    assert!(!writer.contains("glob("));
+}
+
+#[test]
+fn process_diagnostics_sources_do_not_reintroduce_sensitive_trace_fields() {
+    let root = repo_root();
+    let mut files = Vec::new();
+    collect_files(&root.join("crates"), &mut files);
+    collect_files(&root.join("src-tauri/src"), &mut files);
+
+    let forbidden = [
+        "app_id = %",
+        "backup = %",
+        "command = %",
+        "content = %",
+        "endpoint = %",
+        "error = %",
+        "error = ?",
+        "err = %",
+        "err = ?",
+        "event = %",
+        "fallback = %",
+        "file_name = %",
+        "greeting = %",
+        "interface = %",
+        "label = %",
+        "nickname = %",
+        "path = %",
+        "payload = %",
+        "response = ?",
+        "secret = %",
+        "session_id = %",
+        "stored = %",
+        "stored_name = %",
+        "title = %",
+        "token = %",
+        "topic = %",
+        "uri = %",
+        "url = %",
+    ];
+
+    for path in files.into_iter().filter(|path| {
+        path.extension().and_then(|extension| extension.to_str()) == Some("rs")
+            && !path
+                .components()
+                .any(|component| component.as_os_str() == "tests")
+    }) {
+        let source = read_source(&path).expect("Rust source");
+        for pattern in forbidden {
+            assert!(
+                !source.contains(pattern),
+                "{} contains prohibited diagnostics field pattern {pattern:?}",
+                path.display()
+            );
+        }
+        for shorthand in [
+            "tracing::trace!(%hash",
+            "tracing::debug!(%hash",
+            "tracing::info!(%hash",
+            "tracing::warn!(%hash",
+            "tracing::error!(%hash",
+            "tracing::trace!(%dest_hash",
+            "tracing::debug!(%dest_hash",
+            "tracing::info!(%dest_hash",
+            "tracing::warn!(%dest_hash",
+            "tracing::error!(%dest_hash",
+        ] {
+            assert!(
+                !source.contains(shorthand),
+                "{} contains unreviewed full-identifier shorthand {shorthand:?}",
+                path.display()
+            );
+        }
+    }
 }
 
 #[test]
@@ -755,14 +3029,21 @@ fn linux_wayland_webkit_startup_keeps_blank_window_workaround() {
         .find("let linux_webkit_dmabuf_workaround = apply_linux_webkit_rendering_workarounds();")
         .expect("workaround applied at process startup");
     let tracing_pos = source
-        .find("init_tracing();")
+        .find("let mut tracing_guard = init_tracing();")
         .expect("tracing initialization");
     let builder_pos = source
         .find("tauri::Builder::default()")
         .expect("tauri builder construction");
+    let build_pos = source
+        .find(".build(tauri::generate_context!())")
+        .expect("tauri app build");
+    let run_pos = source.find("app.run(").expect("tauri app run");
     assert!(
-        workaround_pos < tracing_pos && tracing_pos < builder_pos,
-        "WebKitGTK env workaround must run before Tauri constructs the webview"
+        workaround_pos < builder_pos
+            && builder_pos < build_pos
+            && build_pos < tracing_pos
+            && tracing_pos < run_pos,
+        "apply the WebKit environment workaround before build, but initialize file tracing only after single-instance build and before run"
     );
 
     // --webview-diag must exit before any webview/env mutation side effects.
@@ -955,8 +3236,12 @@ fn ble_peer_requested_state_survives_restart_when_valid() {
     assert!(ble_rs.contains("let _enable_guard = state_arc.ble_peer_enable_lock.lock().await;"));
     assert!(ble_rs.contains("async fn live_ble_peer_interface_id"));
     assert!(ble_rs.contains("Bluetooth Peer already enabled"));
-    assert!(ble_rs.contains("current_expires_at == expires_at"));
-    assert!(ble_rs.contains("spawn_enable_ble_peer_task(state, duration_secs, expires_at);"));
+    assert!(ble_rs.contains("let activity_fence = state.activity_request_fence();"));
+    assert!(
+        ble_rs.contains(
+            "spawn_enable_ble_peer_task(state, activity_fence, duration_secs, expires_at);"
+        )
+    );
     assert!(ble_rs.contains("const BLE_RECENT_DISCONNECTS_V2_SETTING"));
     assert!(ble_rs.contains("ble_recent_disconnect_seed_addresses"));
     assert!(ble_rs.contains("update_ble_recent_disconnect_records"));
@@ -971,6 +3256,8 @@ fn ble_peer_requested_state_survives_restart_when_valid() {
 
     let shared_rs = read_source(root.join("crates/ratspeak-tauri/src/commands/shared.rs"))
         .expect("shared source");
+    assert!(shared_rs.contains("current_expires_at == expected_expires_at"));
+    assert!(shared_rs.contains("ble_peer_expiry_only_disables_the_exact_requested_generation"));
     assert!(shared_rs.contains("db::set_setting(&p, \"ble_peer_expires_at\", \"0\");"));
     assert!(shared_rs.contains("\"ble_peer_status_changed\""));
 
@@ -1118,7 +3405,7 @@ fn frontend_ipc_waits_and_connect_errors_are_visible() {
 
     let network_rs = read_source(root.join("crates/ratspeak-tauri/src/commands/network.rs"))
         .expect("network command source");
-    assert!(network_rs.contains("send_manual_announce_from_state"));
+    assert!(network_rs.contains("send_manual_announce_from_origin"));
     assert!(network_rs.contains("\"not_sent\""));
 }
 
@@ -1356,6 +3643,108 @@ fn developer_mode_persists_in_sqlite_not_only_localstorage() {
 }
 
 #[test]
+fn channel_hosting_is_an_explicit_durable_settings_capability() {
+    let root = repo_root();
+    let index = read_source(root.join("dashboard/index.html")).expect("dashboard index");
+    let settings_js =
+        read_source(root.join("dashboard/static/js/settings.js")).expect("settings js");
+    let nav_js = read_source(root.join("dashboard/static/js/nav.js")).expect("navigation js");
+    let hub_ui =
+        read_source(root.join("dashboard/static/js/channel_hub.js")).expect("channel hub frontend");
+    let channels_css =
+        read_source(root.join("dashboard/static/css/09-channels.css")).expect("channels css");
+    let commands = read_source(root.join("crates/ratspeak-tauri/src/commands/channel_hub.rs"))
+        .expect("channel hub commands");
+    let interfaces = read_source(root.join("crates/ratspeak-tauri/src/commands/interfaces.rs"))
+        .expect("interfaces commands");
+    let runtime_hub = read_source(root.join("crates/ratspeak-runtime/src/channel_hub.rs"))
+        .expect("channel hub runtime");
+    let runtime =
+        read_source(root.join("crates/ratspeak-runtime/src/lib.rs")).expect("runtime lifecycle");
+    let tauri_lib = read_source(root.join("src-tauri/src/lib.rs")).expect("src-tauri lib");
+
+    let general_nav = index
+        .find(r#"data-settings-panel="panel-settings-general""#)
+        .expect("General settings navigation");
+    let channels_nav = index
+        .find(r#"data-settings-panel="panel-settings-channels""#)
+        .expect("Channels settings navigation");
+    let identity_nav = index
+        .find(r#"data-settings-panel="panel-settings-identity""#)
+        .expect("Identity settings navigation");
+    assert!(general_nav < channels_nav && channels_nav < identity_nav);
+    assert!(index.contains(r#"id="panel-settings-channels""#));
+    assert!(index.contains(r#"<html lang="en" data-channel-hosting="off">"#));
+    assert!(index.contains(r#"role="radiogroup" aria-label="Channel hosting""#));
+    assert!(index.contains(r#"id="settings-channel-hosting-desc" aria-live="polite""#));
+    assert!(index.contains(
+        r#"type="radio" name="settings-channel-hosting" id="settings-channel-hosting-off" value="off" checked"#
+    ));
+    assert!(index.contains(
+        r#"type="radio" name="settings-channel-hosting" id="settings-channel-hosting-on" value="on""#
+    ));
+
+    assert!(settings_js.contains("function initChannelHostingToggle()"));
+    assert!(settings_js.contains("RS.invoke('set_channel_hosting_enabled'"));
+    assert!(settings_js.contains("adoptChannelHostingFromBackend(data.channel_hosting_enabled)"));
+    assert!(settings_js.contains("var _settingsChannelHostingRequested = null;"));
+    assert!(settings_js.contains("Stopping your hub and hiding hosting controls…"));
+    assert!(settings_js.contains("document.documentElement.dataset.channelHosting"));
+    assert!(settings_js.contains("channelHubRenderHome(channelHubOverview)"));
+    let settings_lifecycle = nav_js
+        .split("settings: function()")
+        .nth(1)
+        .and_then(|tail| tail.split("identity: function()").next())
+        .expect("Settings view lifecycle");
+    assert!(settings_lifecycle.contains("initChannelHostingToggle()"));
+    assert!(channels_css.contains(r#"html[data-channel-hosting="off"] .channel-owned-hub"#));
+    let hosting_toggle = settings_js
+        .split("function setChannelHostingEnabled(enabled)")
+        .nth(1)
+        .and_then(|tail| tail.split("function initChannelHostingToggle").next())
+        .expect("channel hosting toggle");
+    assert!(!hosting_toggle.contains("_settingsChannelHostingEnabled = !!enabled;"));
+    assert!(hosting_toggle.contains("RS.invoke('api_channel_hub')"));
+    assert!(!settings_js.contains("ratspeak-channel-hosting"));
+    assert!(hub_ui.contains("overview.supported && _channelHubHostingEnabled(overview)"));
+    assert!(hub_ui.contains(
+        "return !!(overview && overview.supported && _channelHubHostingEnabled(overview));"
+    ));
+
+    assert!(commands.contains("pub async fn set_channel_hosting_enabled"));
+    assert!(commands.contains("CHANNEL_HOSTING_ENABLED_KEY"));
+    assert!(commands.contains("CHANNEL_HOSTING_PREFERENCE_VERSION_KEY"));
+    assert!(commands.contains("settings.enabled = false;"));
+    assert!(commands.contains("hub.shutdown().await"));
+    let preference_command = commands
+        .split("pub async fn set_channel_hosting_enabled")
+        .nth(1)
+        .and_then(|tail| tail.split("#[tauri::command]").next())
+        .expect("channel hosting preference command");
+    let teardown = preference_command
+        .find("shutdown_channel_hub(&state).await?")
+        .expect("preference Off waits for hub teardown");
+    let persist = preference_command
+        .find("crate::db::try_set_settings")
+        .expect("preference persistence");
+    assert!(teardown < persist);
+    assert!(commands.contains("ensure_hosting_enabled(&state"));
+    assert!(interfaces.contains(r#""channel_hosting_enabled": channel_hosting_enabled"#));
+    assert!(
+        runtime_hub
+            .contains("pub const CHANNEL_HOSTING_ENABLED_KEY: &str = \"channel_hosting_enabled\";")
+    );
+    assert!(runtime_hub.contains("pub const CHANNEL_HOSTING_PREFERENCE_VERSION_KEY: &str ="));
+    assert!(runtime_hub.contains("channel_hub_enabled\".to_string(), \"0\".to_string()"));
+    assert!(!runtime_hub.contains("legacy_hub_enabled"));
+    assert!(runtime.contains("channel_hub::channel_hosting_enabled("));
+    assert!(runtime.contains("reason = \"hosting_disabled\""));
+    assert!(
+        tauri_lib.contains("ratspeak_tauri::commands::channel_hub::set_channel_hosting_enabled")
+    );
+}
+
+#[test]
 fn interface_pause_resume_is_config_backed_and_visible() {
     let root = repo_root();
 
@@ -1366,11 +3755,15 @@ fn interface_pause_resume_is_config_backed_and_visible() {
     assert!(health_js.contains("pause_interface"));
     assert!(health_js.contains("resume_interface"));
     assert!(health_js.contains("conn-iface-pill-paused"));
+    assert!(health_js.contains("waitingForAndroidUsb"));
+    assert!(health_js.contains("Waiting for USB"));
+    assert!(health_js.contains("enabled && !waitingForAndroidUsb"));
     assert!(!health_js.contains("Display Name"));
     assert!(!health_js.contains("dangerDivider"));
 
     let modals_js = read_source(root.join("dashboard/static/js/modals.js")).expect("modals js");
     assert!(modals_js.contains("name: name || (host + ':' + port)"));
+    assert!(modals_js.contains("if (!live || live.online === false) continue;"));
     assert!(!modals_js.contains("'TCP to ' + host + ':' + port"));
 
     let interfaces_rs = read_source(root.join("crates/ratspeak-tauri/src/commands/interfaces.rs"))
@@ -1386,6 +3779,9 @@ fn interface_pause_resume_is_config_backed_and_visible() {
             .contains("crate::rns_config::set_interface_enabled(&config_dir, &name, true)")
     );
     assert!(interfaces_rs.contains("teardown_live_interface_by_name(&st, &iface_name"));
+    assert!(interfaces_rs.contains("resolve_android_usb_runtime_selector"));
+    assert!(interfaces_rs.contains("preflight_android_usb_selector_for_interface"));
+    assert!(interfaces_rs.contains("request_android_usb_permission"));
     assert!(!interfaces_rs.contains("format!(\"TCP to {}:{}\""));
 
     let rns_config_rs =
@@ -1404,43 +3800,52 @@ fn failed_lora_reconnects_keep_persisted_interface_config() {
 
     let interfaces_rs = read_source(root.join("crates/ratspeak-tauri/src/commands/interfaces.rs"))
         .expect("interfaces commands");
-    // Resume/update reconnects never request frontend rollback; only an add
-    // that created the entry may (`fresh_add`). A hardcoded `true` regresses
-    // re-adds of existing radios into config deletion on connect failure.
-    assert!(interfaces_rs.contains("\"rollback_on_error\": false,"));
-    assert!(interfaces_rs.contains("\"rollback_on_error\": fresh_add,"));
-    assert!(!interfaces_rs.contains("\"rollback_on_error\": true"));
+    // Resume/update rollback is backend-owned and revision-guarded; only a
+    // versioned marker installed by a fresh add may delete that add.
     assert!(
         interfaces_rs
             .contains("find_config_interface_with_group(&config_dir, None, &name).is_none()")
     );
-    assert!(interfaces_rs.contains("mark_lora_add_freshness(&name, fresh_add)"));
-    // Desktop pairing-timeout rollback only deletes entries the add created.
-    assert!(interfaces_rs.contains("if fresh_add {"));
+    assert!(interfaces_rs.contains("mark_lora_add_freshness(&config_dir, &name, fresh_add)"));
+    // Desktop pairing-timeout rollback consumes only the exact versioned
+    // marker installed by its own config transaction.
+    assert!(interfaces_rs.contains("if let Some(marker) = fresh_marker"));
+    assert!(interfaces_rs.contains("rollback_fresh_lora_add_marker"));
+    assert!(interfaces_rs.contains("clear_fresh_lora_add_marker"));
     // Failed resume flips the entry back to paused instead of deleting it or
     // leaving a dead enabled config.
-    assert!(
-        interfaces_rs
-            .contains("crate::rns_config::set_interface_enabled(&config_dir, &iface_name, false)")
-    );
+    assert!(interfaces_rs.contains("set_interface_enabled_if_revision"));
+    assert!(interfaces_rs.contains("InterfaceBlockCasOutcome::Applied"));
+    assert!(interfaces_rs.contains("newer settings were left untouched"));
 
     let shared_rs = read_source(root.join("crates/ratspeak-tauri/src/commands/shared.rs"))
         .expect("shared commands");
     assert!(shared_rs.contains("pub(crate) fn mark_lora_add_freshness"));
     assert!(shared_rs.contains("pub(crate) fn take_fresh_lora_add"));
+    assert!(shared_rs.contains("type FreshLoraAddKey = (PathBuf, String)"));
+    assert!(shared_rs.contains("struct FreshLoraAddEntry"));
+    assert!(shared_rs.contains("entry.marker == expected_marker"));
+    assert!(shared_rs.contains("const FRESH_LORA_ADD_TTL"));
+    assert!(shared_rs.contains("const MAX_FRESH_LORA_ADDS"));
 
     let ble_rs =
         read_source(root.join("crates/ratspeak-tauri/src/commands/ble.rs")).expect("ble commands");
-    assert!(ble_rs.contains("take_fresh_lora_add(&name)"));
-    assert!(ble_rs.contains("if fresh_add {"));
+    assert!(ble_rs.contains("rollback_ble_rnode_context"));
+    assert!(ble_rs.contains("clear_ble_rnode_rollback_context"));
 
-    // JS guards: auto-rollback only when Rust requested it; manual cancel
-    // only invokes the cancel command for adds, never for edits.
+    // Native failure cleanup is exact-token backend work; the frontend never
+    // chains a delayed cancellation command. User cancellation still reaches
+    // edit reconnects, whose config transaction clears any old marker.
     let events_js =
         read_source(root.join("dashboard/static/js/tauri_events.js")).expect("tauri events js");
-    assert!(events_js.contains("if (data.rollback_on_error && data.name) {"));
+    assert!(!events_js.contains("cancel_ble_connect"));
+    assert!(!events_js.contains("rollbackOnly"));
     let modals_js = read_source(root.join("dashboard/static/js/modals.js")).expect("modals js");
-    assert!(modals_js.contains(
+    assert!(
+        modals_js
+            .contains("RS.invoke('cancel_ble_connect', { name: bleName }).catch(function() {});")
+    );
+    assert!(!modals_js.contains(
         "if (!isEdit) RS.invoke('cancel_ble_connect', { name: bleName }).catch(function() {});"
     ));
 }
@@ -1477,6 +3882,9 @@ fn rnode_radio_catalog_has_single_runtime_source() {
     assert!(modals_js.contains("if (_rnodeIsTcpPort(port)) return 'tcp';"));
     assert!(modals_js.contains("setRnodeConnectionType('tcp')"));
     assert!(modals_js.contains("function _rnodeNormaliseInterfaceMode(mode)"));
+    assert!(modals_js.contains("var _RNODE_NEW_INTERFACE_MODE = 'roaming';"));
+    assert!(modals_js.contains("var _RNODE_LEGACY_INTERFACE_MODE = 'full';"));
+    assert!(modals_js.contains("if (!editIface) return _RNODE_NEW_INTERFACE_MODE;"));
     assert!(modals_js.contains("mode: _rnodeReadInterfaceMode()"));
     assert!(modals_js.contains("window.ratspeakDeveloperModeEnabled()"));
     assert!(modals_js.contains("built.sheet.classList.add('local-network-sheet')"));
@@ -1495,8 +3903,14 @@ fn rnode_radio_catalog_has_single_runtime_source() {
     assert!(index.contains(r#"<option value="gateway">Gateway</option>"#));
     assert!(index.contains(r#"<option value="access_point">Access Point (AP)</option>"#));
     assert!(index.contains(r#"<option value="boundary">Boundary</option>"#));
-    assert!(index.contains(r#"<option value="roaming">Roaming</option>"#));
-    assert!(index.contains("Mode affects routing and announce propagation."));
+    assert!(index.contains(r#"<option value="roaming" selected>Roaming (recommended)</option>"#));
+    assert!(index.contains("Best for mobile radios."));
+    assert!(
+        rns_config_rs.contains(r#"pub const RNODE_NEW_INTERFACE_DEFAULT_MODE: &str = "roaming";"#)
+    );
+    assert!(
+        rns_config_rs.contains(r#"pub const RETICULUM_DEFAULT_INTERFACE_MODE: &str = "full";"#)
+    );
     assert!(rns_config_rs.contains(
         r#"pub const RNODE_INTERFACE_MODES: &[&str] =
     &["full", "gateway", "access_point", "boundary", "roaming"];"#
@@ -1523,9 +3937,13 @@ fn rnode_radio_catalog_has_single_runtime_source() {
     assert!(ble_rs.contains("pub mode: Option<String>"));
     assert!(ble_rs.contains("rnode_interface_mode_value(args.mode.as_deref())"));
     assert!(ble_rs.contains("mode,"));
-    assert!(tauri_events_js.contains("mode: data.mode"));
+    assert!(!tauri_events_js.contains("ble_rnode_connect_native"));
+    assert!(ble_rs.contains("native_mode"));
+    assert!(ble_rs.contains("InterfaceMode::from_u8"));
     assert!(rns_runtime_rs.contains("pub mode: rns_interface::traits::InterfaceMode"));
-    assert!(rns_runtime_rs.matches("config.mode = mode;").count() >= 4);
+    assert!(interfaces_rs.contains("mode: rnode_runtime_mode(mode)"));
+    assert!(ble_rs.contains("BleRNodeInterfaceConfig"));
+    assert!(ble_rs.contains("spawn_ble_rnode_runtime_native_with_config_and_options"));
     let tauri_cargo =
         read_source(root.join("crates/ratspeak-tauri/Cargo.toml")).expect("tauri cargo");
     assert!(tauri_cargo.contains("rnode-tcp = [\"ratspeak-runtime/rnode-tcp\""));
@@ -1604,6 +4022,10 @@ fn empty_ghost_conversations_are_removed_when_leaving_chat_detail() {
 fn message_composer_send_preserves_preexisting_focus_state() {
     let root = repo_root();
     let lxmf = read_source(root.join("dashboard/static/js/lxmf.js")).expect("lxmf js");
+    let channels = read_source(root.join("dashboard/static/js/channels.js")).expect("channels js");
+    let nav = read_source(root.join("dashboard/static/js/nav.js")).expect("nav js");
+    let ui_shared =
+        read_source(root.join("dashboard/static/js/ui_shared.js")).expect("shared ui js");
     let start = lxmf
         .find("function sendLxmfMessage(")
         .expect("send function");
@@ -1632,13 +4054,32 @@ fn message_composer_send_preserves_preexisting_focus_state() {
         !send_function.contains("input.focus();"),
         "send must not unconditionally focus the composer after a button send"
     );
+    assert!(ui_shared.contains("RS.composer.captureFocus = function(input)"));
+    assert!(ui_shared.contains("RS.composer.consumeFocus = function(input)"));
+    assert!(ui_shared.contains("RS.composer.focusWithoutScroll = function(input)"));
+    assert!(ui_shared.contains("RS.composer.bindTapToSend = function(button, input, onSend)"));
+    assert!(channels.contains("RS.composer.bindTapToSend(send, input, channelsSendMessage)"));
+    assert!(channels.contains("var shouldRestoreComposerFocus = RS.composer"));
+    assert!(channels.contains("RS.composer.consumeFocus(input)"));
+    assert!(
+        !channels
+            .split("function channelsSendMessage()")
+            .nth(1)
+            .and_then(|tail| tail.split("function _channelsBindUI()").next())
+            .expect("channel send function")
+            .contains("input.focus();")
+    );
+    assert!(channels.contains("!event.isComposing && !isMobile()"));
+    assert!(nav.contains("el.id === 'lxmf-input' || el.id === 'channel-message-input'"));
+    assert!(nav.contains("document.getElementById('channel-transcript')"));
 
-    let messaging_css =
-        read_source(root.join("dashboard/static/css/09-messaging.css")).expect("css");
-    assert!(messaging_css.contains("overflow-y: auto;"));
-    assert!(messaging_css.contains("scrollbar-width: none;"));
-    assert!(messaging_css.contains("-webkit-appearance: none;"));
-    assert!(messaging_css.contains(".lxmf-compose textarea::-webkit-scrollbar"));
+    let components_css =
+        read_source(root.join("dashboard/static/css/07-components.css")).expect("css");
+    assert!(components_css.contains(".message-composer-input {"));
+    assert!(components_css.contains("overflow-y: auto;"));
+    assert!(components_css.contains("scrollbar-width: none;"));
+    assert!(components_css.contains("-webkit-appearance: none;"));
+    assert!(components_css.contains(".message-composer-input::-webkit-scrollbar"));
 
     let responsive_css =
         read_source(root.join("dashboard/static/css/13-responsive.css")).expect("css");
@@ -1649,8 +4090,10 @@ fn message_composer_send_preserves_preexisting_focus_state() {
 
 #[test]
 fn conversation_view_scrolls_to_recent_messages_without_yanking_history() {
-    let lxmf = read_source(repo_root().join("dashboard/static/js/lxmf.js")).expect("lxmf js");
-    let nav = read_source(repo_root().join("dashboard/static/js/nav.js")).expect("nav js");
+    let root = repo_root();
+    let lxmf = read_source(root.join("dashboard/static/js/lxmf.js")).expect("lxmf js");
+    let channels = read_source(root.join("dashboard/static/js/channels.js")).expect("channels js");
+    let nav = read_source(root.join("dashboard/static/js/nav.js")).expect("nav js");
 
     assert!(lxmf.contains("function _wireLxmfMessageScroll(container)"));
     assert!(lxmf.contains("function _captureLxmfMessageScrollState(container)"));
@@ -1659,6 +4102,14 @@ fn conversation_view_scrolls_to_recent_messages_without_yanking_history() {
         lxmf.contains("function _applyLxmfMessageScrollAfterRender(container, state, options)")
     );
     assert!(lxmf.contains("function _watchLxmfImagesForBottomPin(container, shouldPin)"));
+    assert!(lxmf.contains("var _lxmfMessageScrollStates = new WeakMap();"));
+    assert!(lxmf.contains("state.followLatest = false;"));
+    assert!(lxmf.contains("state.followLatest = true;"));
+    assert!(lxmf.contains("RS.chatScroll.applyAfterRender = _applyLxmfMessageScrollAfterRender;"));
+    assert!(channels.contains("RS.chatScroll.wire(transcript)"));
+    assert!(channels.contains("RS.chatScroll.capture(transcript)"));
+    assert!(channels.contains("RS.chatScroll.applyAfterRender(transcript, scrollState"));
+    assert!(!channels.contains("_channelsTranscriptPinToken"));
     assert!(lxmf.contains("container.querySelectorAll('img').forEach(function(img)"));
     assert!(lxmf.contains("img.addEventListener('load', function()"));
     assert!(lxmf.contains("renderConversation({ forceScrollBottom: true });"));
@@ -1669,6 +4120,8 @@ fn conversation_view_scrolls_to_recent_messages_without_yanking_history() {
     );
     assert!(nav.contains("function _chatMessagesNearBottomForKeyboard()"));
     assert!(nav.contains("function _pinChatMessagesToBottomForKeyboard()"));
+    assert!(nav.contains("RS.chatScroll.nearBottom(msgContainer)"));
+    assert!(nav.contains("RS.chatScroll.pinToBottom(msgContainer)"));
     assert!(nav.contains("_waitingForKeyboard = _chatMessagesNearBottomForKeyboard();"));
     assert!(nav.contains(
         "document.documentElement.classList.contains('keyboard-open') && _chatMessagesNearBottomForKeyboard()"
@@ -1704,8 +4157,10 @@ fn message_camera_and_photo_attachment_flow_is_native_and_previewed() {
     assert!(lxmf.contains("Could not remove image metadata; image not attached"));
     assert!(lxmf.contains("pending-file-thumbnail"));
     assert!(lxmf.contains(
-        "src=\"data:' + escapeHtml(lxmfPendingFile.mime) + ';base64,' + lxmfPendingFile.data"
+        "pendingFile.preview_url = isImage ? URL.createObjectURL(pendingFile.blob) : null;"
     ));
+    assert!(lxmf.contains("escapeHtml(lxmfPendingFile.preview_url || '')"));
+    assert!(lxmf.contains("URL.revokeObjectURL(pending.preview_url)"));
     assert!(lxmf.contains("container.classList.toggle('pending-file-has-image', isImage);"));
 
     let messaging_css =
@@ -1752,7 +4207,8 @@ fn message_media_viewer_links_and_native_saves_are_wired() {
     let state_js = read_source(root.join("dashboard/static/js/state.js")).expect("state js");
     assert!(state_js.contains("saveImageToPhotos"));
     assert!(state_js.contains("saveFileDocument"));
-    assert!(state_js.contains("data_base64: result.data_base64 || ''"));
+    assert!(state_js.contains("window.RS.invoke('save_stored_attachment_native'"));
+    assert!(!state_js.contains("data_base64: result.data_base64 || ''"));
     assert!(state_js.contains("window.RS.openExternalUrl"));
     assert!(state_js.contains("open_external_url"));
 
@@ -1780,7 +4236,9 @@ fn message_media_viewer_links_and_native_saves_are_wired() {
     assert!(android_activity.contains("fun openExternalUrl(url: String): Boolean"));
 
     let tauri_lib = read_source(root.join("src-tauri/src/lib.rs")).expect("tauri lib");
-    assert!(tauri_lib.contains("fn open_external_url(url: String)"));
+    assert!(tauri_lib.contains("async fn open_external_url(app: tauri::AppHandle, url: String)"));
+    assert!(tauri_lib.contains("app.run_on_main_thread(move ||"));
+    assert!(tauri_lib.contains("rx.recv_timeout(Duration::from_secs(15))"));
     assert!(tauri_lib.contains("fn save_image_to_photos("));
     assert!(tauri_lib.contains("performChangesAndWait"));
     assert!(tauri_lib.contains("PHAssetChangeRequest"));
@@ -1801,6 +4259,11 @@ fn voice_and_capture_paths_preflight_media_permissions() {
         root.join("src-tauri/gen/android/app/src/main/java/org/ratspeak/android/MainActivity.kt"),
     )
     .expect("main activity");
+    let call_audio =
+        read_source(root.join(
+            "src-tauri/gen/android/app/src/main/java/org/ratspeak/android/RatspeakCallAudio.kt",
+        ))
+        .expect("Android call audio owner");
     assert!(activity.contains("MEDIA_PERMISSION_REQUEST_CODE"));
     assert!(activity.contains("fun hasMediaPermissions(audio: Boolean, camera: Boolean): Boolean"));
     assert!(activity.contains(
@@ -1810,23 +4273,31 @@ fn voice_and_capture_paths_preflight_media_permissions() {
     assert!(activity.contains("mediaPlaybackRequiresUserGesture = false"));
     assert!(activity.contains("fun playCallRingtone(mode: String)"));
     assert!(activity.contains("fun stopCallRingtone()"));
-    assert!(activity.contains("fun startCallAudioRoute(role: String)"));
+    assert!(activity.contains("fun playCallTimeoutCue(): Boolean"));
+    assert!(activity.contains("fun primeCallAudioRoute(role: String)"));
+    assert!(activity.contains("fun startCallAudioRoute(role: String, sessionToken: String)"));
     assert!(activity.contains("fun stopCallAudioRoute()"));
-    assert!(activity.contains("requestCallAudioFocus()"));
+    assert!(call_audio.contains("fun startForSession("));
+    assert!(call_audio.contains("fun promoteCaptureForSession("));
+    assert!(call_audio.contains("fun demoteCaptureForSession("));
     assert!(activity.contains("fun playCallRingtone(mode: String): Boolean"));
     assert!(activity.contains("runOnMainForBoolean"));
     assert!(activity.contains("AUDIOFOCUS_REQUEST_GRANTED"));
     assert!(activity.contains("AudioManager.STREAM_RING"));
     assert!(activity.contains("AudioAttributes.USAGE_VOICE_COMMUNICATION"));
     assert!(activity.contains("volumeControlStream = AudioManager.STREAM_VOICE_CALL"));
-    assert!(activity.contains("syncCallProximityWakeLock(preferEarpiece)"));
-    assert!(activity.contains("PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK"));
-    assert!(activity.contains("isWakeLockLevelSupported"));
-    assert!(activity.contains("PowerManager.RELEASE_FLAG_WAIT_FOR_NO_PROXIMITY"));
-    assert!(activity.contains("callAudioRouteName = routeName"));
+    assert!(call_audio.contains("syncProximity(application, preferEarpiece)"));
+    assert!(call_audio.contains("PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK"));
+    assert!(call_audio.contains("isWakeLockLevelSupported"));
+    assert!(call_audio.contains("PowerManager.RELEASE_FLAG_WAIT_FOR_NO_PROXIMITY"));
+    assert!(call_audio.contains("route = requestedRoute"));
     assert!(activity.contains("AudioAttributes.USAGE_VOICE_COMMUNICATION_SIGNALLING"));
     assert!(activity.contains("AudioAttributes.USAGE_NOTIFICATION_RINGTONE"));
     assert!(activity.contains("audioManager.setCommunicationDevice(route)"));
+    assert!(call_audio.contains("private fun requestFocus(manager: AudioManager): Boolean"));
+    assert!(call_audio.contains("RatspeakMobilePolicy.callSessionOwns(ownerToken, sessionToken)"));
+    assert!(activity.contains("RatspeakVoiceAudio.stop()"));
+    assert!(call_audio.contains("fun stopForSession("));
 
     let voice_audio = read_source(root.join(
         "src-tauri/gen/android/app/src/main/java/org/ratspeak/android/RatspeakVoiceAudio.kt",
@@ -1838,14 +4309,37 @@ fn voice_and_capture_paths_preflight_media_permissions() {
     assert!(voice_audio.contains("AudioFormat.ENCODING_PCM_FLOAT"));
     assert!(voice_audio.contains("AudioFormat.ENCODING_PCM_16BIT"));
     assert!(voice_audio.contains("AudioTrack.MODE_STREAM"));
+    assert!(voice_audio.contains("AudioTrack.WRITE_BLOCKING"));
     assert!(voice_audio.contains("AudioTrack.WRITE_NON_BLOCKING"));
+    assert!(voice_audio.contains("setStartThresholdInFrames"));
+    assert!(voice_audio.contains("if (written > 0 && starting)"));
+    assert!(!voice_audio.contains("created.play()"));
+    let first_write = voice_audio
+        .find("val written = if (trackEncoding")
+        .expect("initial AudioTrack write");
+    let first_play = voice_audio[first_write..]
+        .find("active.play()")
+        .map(|offset| first_write + offset)
+        .expect("AudioTrack starts after its initial write");
+    assert!(first_write < first_play);
     assert!(voice_audio.contains("fun lastError(): String"));
 
     let state_js = read_source(root.join("dashboard/static/js/state.js")).expect("state js");
     assert!(state_js.contains("window.RS.mediaPermissions"));
     assert!(state_js.contains("window.RS.audioPlayback"));
+    assert!(state_js.contains("function _rsNativeAndroidAudioAvailable()"));
+    assert!(state_js.contains("if (_rsNativeAndroidAudioAvailable()) return null;"));
+    assert!(state_js.contains("installUnlock: _rsInstallAudioPlaybackUnlock"));
     assert!(state_js.contains("window.RatspeakAndroid.requestMediaPermissions"));
-    assert!(state_js.contains("function _rsDesktopMicrophonePermission(audio)"));
+    assert!(state_js.contains("function _rsNativeMicrophonePermission(audio)"));
+    assert!(state_js.contains("ctx.state === 'suspended' || ctx.state === 'interrupted'"));
+    assert!(!state_js.contains(
+        "_rsAudioPlaybackUnlocked = ctx.state === 'running' || ctx.state === 'interrupted'"
+    ));
+    assert!(state_js.contains("ctx.state !== 'interrupted' &&"));
+    assert!(state_js.contains("ctx.state !== 'closed'"));
+    assert!(state_js.contains("isTauriMobile() &&"));
+    assert!(state_js.contains("isIOS()"));
     assert!(state_js.contains("RS.invoke('request_microphone_permission')"));
     assert!(state_js.contains("navigator.mediaDevices.getUserMedia"));
 
@@ -1858,12 +4352,28 @@ fn voice_and_capture_paths_preflight_media_permissions() {
         .expect("voice microphone permission function");
     assert!(!voice_mic_permission.contains("isTauriDesktop"));
     assert!(lxmf.contains("function _voiceEnsurePlaybackReady()"));
+    let playback_ready = lxmf
+        .split("function _voiceEnsurePlaybackReady()")
+        .nth(1)
+        .and_then(|tail| tail.split("function _voiceSyncRingtone()").next())
+        .expect("voice playback readiness function");
+    assert!(
+        playback_ready.contains("if (_androidCallRouteBridge()) return Promise.resolve(true);")
+    );
+    assert!(
+        playback_ready.find("_androidCallRouteBridge()").unwrap()
+            < playback_ready.find("RS.audioPlayback.ensure").unwrap()
+    );
     assert!(lxmf.contains("function _voiceAfterNextPaint()"));
     assert!(lxmf.contains("function _voiceSetOptimisticOutgoing(hash)"));
     assert!(lxmf.contains("function _voiceBlockMobileNavigation(ms)"));
     assert!(lxmf.contains("var dialToken = ++_voiceDialToken;"));
+    assert!(lxmf.contains("function _voiceCancelMemoForCall()"));
     assert!(lxmf.contains(
-        "return _voiceAfterNextPaint().then(_voiceEnsurePlaybackReady).then(_voiceEnsureMicrophonePermission)"
+        "return _voiceCancelMemoForCall().then(_voiceAfterNextPaint).then(_voiceEnsurePlaybackReady).then(_voiceEnsureMicrophonePermission)"
+    ));
+    assert!(lxmf.contains(
+        "return _voiceCancelMemoForCall().then(_voiceEnsurePlaybackReady).then(_voiceEnsureMicrophonePermission)"
     ));
     assert!(lxmf.contains("RS.ringtones.sync(lxstVoiceState)"));
     assert!(lxmf.contains("RS.ringtones.setHandlers({ onOutgoingTimeout"));
@@ -1874,6 +4384,7 @@ fn voice_and_capture_paths_preflight_media_permissions() {
     assert!(lxmf.contains("function _voiceToggleSpeaker()"));
     assert!(lxmf.contains("function _voicePrimeNativeCallRoute()"));
     assert!(lxmf.contains("_voiceNativeAudioRouteLastSyncAt"));
+    assert!(lxmf.contains("_voiceNativeAudioRouteLastSyncAt = Date.now();"));
     assert!(lxmf.contains("voice_set_microphone_muted"));
     assert!(lxmf.contains("voice_restart_speaker"));
     assert!(lxmf.contains("function _voicePeerLookupHash(call)"));
@@ -1895,7 +4406,7 @@ fn voice_and_capture_paths_preflight_media_permissions() {
 
     let tauri_lib = read_source(root.join("src-tauri/src/lib.rs")).expect("tauri lib");
     assert!(tauri_lib.contains("async fn request_microphone_permission(_app: tauri::AppHandle)"));
-    assert!(tauri_lib.contains("fn request_microphone_permission_macos("));
+    assert!(tauri_lib.contains("fn request_microphone_permission_apple("));
     assert!(tauri_lib.contains("AVCaptureDevice"));
     assert!(tauri_lib.contains("requestAccessForMediaType"));
     assert!(tauri_lib.contains("_app.run_on_main_thread"));
@@ -1950,21 +4461,29 @@ fn voice_and_capture_paths_preflight_media_permissions() {
     assert!(voice_rs.contains("TelephonyControl::Announce"));
     assert!(voice_rs.contains("TelephonyServiceEvent::OutgoingCallPending"));
     assert!(voice_rs.contains("TelephonyServiceEvent::OutgoingCallFailed"));
-    assert!(voice_rs.contains("state.emit_network_event(\"lxst\""));
+    assert!(voice_rs.contains("fn record_lxst_activity("));
+    assert!(voice_rs.contains("producer::lxst_activity(transition)"));
 
     let runtime_rs =
         read_source(root.join("crates/ratspeak-runtime/src/lib.rs")).expect("runtime lib");
     assert!(runtime_rs.contains("voice::announce_if_running(state).await"));
-    assert!(runtime_rs.contains("LXST telephony announced on all interfaces"));
+    assert!(runtime_rs.contains("producer::AnnounceMethod::LxstService"));
 
     let notification_rs =
         read_source(root.join("crates/ratspeak-core/src/notification.rs")).expect("notification");
     assert!(notification_rs.contains("NativeNotificationKind::Call"));
+    assert!(notification_rs.contains("NativeNotificationKind::Channel"));
     assert!(notification_rs.contains("pub fn call("));
+    assert!(notification_rs.contains("pub fn channel("));
 
     let notifier_rs =
         read_source(root.join("crates/ratspeak-tauri/src/notifier.rs")).expect("notifier");
     assert!(notifier_rs.contains("NativeNotificationKind::Call => \"ratspeak_calls\""));
+    assert!(notifier_rs.contains("| ratspeak_core::NativeNotificationKind::Channel"));
+    assert!(notifier_rs.contains("builder.action_type_id(thread_id)"));
+    let tauri_events =
+        read_source(root.join("dashboard/static/js/tauri_events.js")).expect("tauri events");
+    assert!(tauri_events.contains("notification.actionTypeId"));
 
     let ringtone_js =
         read_source(root.join("dashboard/static/js/voice_ringtones.js")).expect("ringtone js");
@@ -1988,7 +4507,9 @@ fn voice_and_capture_paths_preflight_media_permissions() {
     assert!(ringtone_js.contains("source.loop = true"));
     assert!(ringtone_js.contains("var OUTGOING_TIMEOUT_MS = 25000"));
     assert!(ringtone_js.contains("playCallRingtone"));
+    assert!(ringtone_js.contains("playCallTimeoutCue"));
     assert!(ringtone_js.contains("stopCallRingtone"));
+    assert!(ringtone_js.contains("if (!activeNodes.length) return;"));
     assert!(ringtone_js.contains("if (started === false)"));
     assert!(ringtone_js.contains("playTimeoutCue();"));
     assert!(ringtone_js.contains("active.status !== 'established'"));
@@ -2004,6 +4525,8 @@ fn voice_and_capture_paths_preflight_media_permissions() {
     );
     assert!(activity.contains("private const val CALL_RINGTONE_INCOMING_VOLUME = 0.36"));
     assert!(activity.contains("private const val CALL_RINGTONE_OUTGOING_VOLUME = 0.18"));
+    assert!(activity.contains("private const val CALL_TIMEOUT_CUE_MS = 520L"));
+    assert!(activity.contains("mode.equals(\"timeout\", ignoreCase = true) -> \"timeout\""));
     assert!(
         activity.contains(
             "private val CALL_RINGTONE_INCOMING_PARTIALS = doubleArrayOf(0.74, 0.18, 0.08)"
@@ -2018,6 +4541,10 @@ fn voice_and_capture_paths_preflight_media_permissions() {
     assert!(activity.contains("track.setLoopPoints(0, frameCount, -1)"));
 
     let index = read_source(root.join("dashboard/index.html")).expect("dashboard index");
+    assert!(index.contains("/static/js/state.js?v=ui-20260804"));
+    assert!(index.contains("/static/js/voice_ringtones.js?v=ui-20260804"));
+    assert!(index.contains("/static/js/lxmf.js?v=ui-20260804"));
+    assert!(index.contains("/static/js/tauri_events.js?v=ui-20260804"));
     assert!(index.contains("id=\"lxst-call-global-mute-btn\""));
     assert!(index.contains("id=\"lxst-call-global-speaker-btn\""));
     assert!(index.contains("id=\"lxst-call-mute-btn\""));
@@ -2028,10 +4555,16 @@ fn voice_and_capture_paths_preflight_media_permissions() {
     let lxmf_pos = index.find("/static/js/lxmf.js").expect("lxmf script");
     assert!(ringtone_pos < lxmf_pos);
 
+    let tauri_events =
+        read_source(root.join("dashboard/static/js/tauri_events.js")).expect("tauri events js");
+    assert!(tauri_events.contains("RS.audioPlayback.installUnlock();"));
+    assert!(!tauri_events.contains("RS.audioPlayback.ensure({ installUnlock: true })"));
+
     let activity_js =
         read_source(root.join("dashboard/static/js/activity.js")).expect("activity js");
-    assert!(activity_js.contains("lxst: true"));
-    assert!(activity_js.contains("lxst: 'LXST'"));
+    assert!(activity_js.contains("calls: 'Calls'"));
+    assert!(activity_js.contains("'lxst.call': 'Call'"));
+    assert!(activity_js.contains("'lxst.media': 'Call media'"));
 
     let service =
         read_source(root.join(
@@ -2042,6 +4575,134 @@ fn voice_and_capture_paths_preflight_media_permissions() {
     assert!(service.contains("createCallNotificationChannel()"));
     assert!(service.contains("NotificationManager.IMPORTANCE_HIGH"));
     assert!(service.contains("lockscreenVisibility = Notification.VISIBILITY_PUBLIC"));
+}
+
+#[test]
+fn apple_bluetooth_permission_copy_is_current_and_aligned() {
+    let root = repo_root();
+    let expected = "Ratspeak uses Bluetooth to connect to hardware nodes and other Bluetooth peers when enabled.";
+    for relative in [
+        "src-tauri/Info.plist",
+        "src-tauri/gen/apple/ratspeak_iOS/Info.plist",
+    ] {
+        let plist = read_source(root.join(relative)).expect("Apple Info.plist");
+        assert_eq!(plist.matches(expected).count(), 2, "{relative}");
+        assert!(!plist.contains("Ratlow mesh devices"), "{relative}");
+    }
+}
+
+#[test]
+fn ios_project_model_owns_app_store_info_declarations() {
+    let root = repo_root();
+    let project =
+        read_source(root.join("src-tauri/gen/apple/project.yml")).expect("iOS project model");
+    let info = read_source(root.join("src-tauri/gen/apple/ratspeak_iOS/Info.plist"))
+        .expect("generated iOS Info.plist");
+
+    for key in [
+        "CFBundleURLTypes",
+        "NSBluetoothAlwaysUsageDescription",
+        "NSBluetoothPeripheralUsageDescription",
+        "NSBonjourServices",
+        "NSCameraUsageDescription",
+        "NSLocalNetworkUsageDescription",
+        "NSMicrophoneUsageDescription",
+        "NSPhotoLibraryAddUsageDescription",
+        "NSPhotoLibraryUsageDescription",
+        "UIBackgroundModes",
+    ] {
+        assert!(project.contains(key), "project.yml must own {key}");
+        assert!(
+            info.contains(key),
+            "generated Info.plist must contain {key}"
+        );
+    }
+    for mode in ["audio", "bluetooth-central", "bluetooth-peripheral"] {
+        assert!(project.contains(mode), "project.yml must own {mode}");
+        assert!(
+            info.contains(mode),
+            "generated Info.plist must contain {mode}"
+        );
+    }
+}
+
+#[test]
+fn apple_bundle_identifier_is_consistent_without_migrating_desktop() {
+    let root = repo_root();
+    let ios_config: serde_json::Value = serde_json::from_str(
+        &read_source(root.join("src-tauri/tauri.ios.conf.json")).expect("iOS Tauri config"),
+    )
+    .expect("valid iOS Tauri config");
+    let desktop_config: serde_json::Value = serde_json::from_str(
+        &read_source(root.join("src-tauri/tauri.conf.json")).expect("base Tauri config"),
+    )
+    .expect("valid base Tauri config");
+    let project_model =
+        read_source(root.join("src-tauri/gen/apple/project.yml")).expect("iOS project model");
+    let project = read_source(root.join("src-tauri/gen/apple/ratspeak.xcodeproj/project.pbxproj"))
+        .expect("generated iOS project");
+    let runtime = read_source(root.join("src-tauri/src/lib.rs")).expect("Tauri runtime");
+    let workflow =
+        read_source(root.join(".github/workflows/release-ios.yml")).expect("iOS workflow");
+
+    assert_eq!(ios_config["identifier"], "org.ratspeak.apple");
+    assert_eq!(desktop_config["identifier"], "org.ratspeak.desktop");
+    assert!(project_model.contains("bundleIdPrefix: org.ratspeak.apple"));
+    assert!(project_model.contains("PRODUCT_BUNDLE_IDENTIFIER: org.ratspeak.apple"));
+    assert_eq!(
+        project
+            .matches("PRODUCT_BUNDLE_IDENTIFIER = org.ratspeak.apple;")
+            .count(),
+        2
+    );
+    let normalized_runtime = runtime.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(normalized_runtime.contains("OsLogger::new( \"org.ratspeak.apple\", \"default\", )"));
+    assert!(workflow.contains("org.ratspeak.apple)"));
+}
+
+#[test]
+fn ios_release_assets_use_supported_single_size_appearance_catalog() {
+    let root = repo_root();
+    let catalog_dir = root.join("src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset");
+    let catalog: serde_json::Value = serde_json::from_str(
+        &read_source(catalog_dir.join("Contents.json")).expect("iOS app-icon catalog"),
+    )
+    .expect("valid iOS app-icon catalog JSON");
+    let images = catalog["images"]
+        .as_array()
+        .expect("iOS app-icon image list");
+    assert_eq!(images.len(), 2, "single-size iOS catalog has Any and Dark");
+
+    for image in images {
+        assert_eq!(image["idiom"], "universal");
+        assert_eq!(image["platform"], "ios");
+        assert_eq!(image["size"], "1024x1024");
+    }
+    assert_eq!(images[0]["filename"], "AppIcon-512@2x.png");
+    assert!(images[0]["appearances"].is_null());
+    assert_eq!(images[1]["filename"], "AppIcon-512@2x-dark.png");
+    assert_eq!(images[1]["appearances"][0]["appearance"], "luminosity");
+    assert_eq!(images[1]["appearances"][0]["value"], "dark");
+
+    let mut pngs = fs::read_dir(&catalog_dir)
+        .expect("read iOS app-icon catalog")
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            (path.extension().and_then(|ext| ext.to_str()) == Some("png"))
+                .then(|| entry.file_name().to_string_lossy().into_owned())
+        })
+        .collect::<Vec<_>>();
+    pngs.sort();
+    assert_eq!(
+        pngs,
+        ["AppIcon-512@2x-dark.png", "AppIcon-512@2x.png"],
+        "unreferenced images make actool report unassigned children"
+    );
+
+    let project =
+        read_source(root.join("src-tauri/gen/apple/project.yml")).expect("iOS project model");
+    assert!(project.contains("CFBundleURLTypes:"));
 }
 
 #[test]
@@ -2087,7 +4748,7 @@ fn active_call_surface_is_passive_and_shows_elapsed_duration() {
 fn settings_version_display_uses_package_version_api() {
     let root = repo_root();
     let version_file = read_source(root.join("VERSION")).expect("display version");
-    assert_eq!(version_file.trim(), "1.0.25");
+    assert_eq!(version_file.trim(), "1.0.26e");
 
     let system_rs =
         read_source(root.join("crates/ratspeak-tauri/src/commands/system.rs")).expect("system rs");
@@ -2173,13 +4834,140 @@ fn settings_version_display_uses_package_version_api() {
     assert!(
         tauri_conf.contains("connect-src 'self' ipc: http://ipc.localhost https://api.github.com")
     );
-    assert!(tauri_conf.contains(r#""versionCode": 1000029"#));
+    assert!(tauri_conf.contains(r#""versionCode": 1000034"#));
 
     let android_gradle = read_source(root.join("src-tauri/gen/android/app/build.gradle.kts"))
         .expect("android gradle");
     assert!(android_gradle.contains("fun ratspeakDisplayVersionName()"));
     assert!(android_gradle.contains("../../../VERSION"));
     assert!(android_gradle.contains("versionName = ratspeakDisplayVersionName()"));
+}
+
+#[test]
+fn release_workflows_pin_v1_0_26d_and_stage_tag_builds_as_prereleases() {
+    let root = repo_root();
+    let rsreticulum_commit = "RATSPEAK_RSRETICULUM_REF: a1b78564e08988c11f8ecac80c3ea6d596b22cab";
+    let rslxmf_commit = "RATSPEAK_RSLXMF_REF: 681c0f5961acce637183efc9a4047bf25ead56bf";
+    let dependency_refs = [
+        "RATSPEAK_RSRETICULUM_REF: ratspeak-v1.0.26d",
+        "RATSPEAK_RSLXMF_REF: ratspeak-v1.0.26d",
+        "RATSPEAK_RSLXST_REF: ratspeak-v1.0.26d",
+        "RATSPEAK_LRGP_REF: ratspeak-v1.0.26d",
+    ];
+
+    for workflow_path in [
+        ".github/workflows/release-android.yml",
+        ".github/workflows/release-desktop.yml",
+        ".github/workflows/release-macos.yml",
+        ".github/workflows/release-windows.yml",
+    ] {
+        let workflow = read_source(root.join(workflow_path)).expect("release workflow");
+        for dependency_ref in dependency_refs {
+            assert!(
+                workflow.contains(dependency_ref),
+                "{workflow_path} must pin {dependency_ref}"
+            );
+        }
+        assert!(workflow.contains("default: true\n        type: boolean"));
+        assert!(
+            workflow
+                .contains("prerelease: ${{ github.event_name == 'push' || inputs.prerelease }}")
+        );
+    }
+
+    for workflow_path in [
+        ".github/workflows/ci.yml",
+        ".github/workflows/build-desktop.yml",
+    ] {
+        let workflow = read_source(root.join(workflow_path)).expect("build workflow");
+        assert!(
+            workflow.contains(rsreticulum_commit),
+            "{workflow_path} must build the reviewed rsReticulum commit"
+        );
+        assert!(
+            workflow.contains(rslxmf_commit),
+            "{workflow_path} must build the synchronized rsLXMF commit"
+        );
+    }
+
+    for workflow_path in [
+        ".github/workflows/release-android.yml",
+        ".github/workflows/release-desktop.yml",
+        ".github/workflows/release-macos.yml",
+    ] {
+        let workflow = read_source(root.join(workflow_path)).expect("release workflow");
+        assert!(workflow.contains(r#""$(basename "$artifact")""#));
+    }
+    let windows =
+        read_source(root.join(".github/workflows/release-windows.yml")).expect("Windows release");
+    assert!(windows.contains(r#""$hash  $($_.Name)""#));
+    assert!(!windows.contains("$hash  $path"));
+    let linux =
+        read_source(root.join(".github/workflows/release-desktop.yml")).expect("Linux release");
+    assert!(linux.contains(r#"test -n "$rpm""#));
+    assert!(linux.contains(r#"test "$artifact_count" = "4""#));
+
+    let ios =
+        read_source(root.join(".github/workflows/release-ios.yml")).expect("iOS release workflow");
+    for dependency_ref in dependency_refs {
+        assert!(ios.contains(dependency_ref));
+    }
+    assert!(ios.contains(r#"--build-number "${GITHUB_RUN_NUMBER}""#));
+    assert!(ios.contains("--export-method app-store-connect"));
+    assert!(ios.contains("APPLE_DEVELOPMENT_TEAM: ${{ vars.APPLE_TEAM_ID }}"));
+    for required in [
+        "IOS_DISTRIBUTION_CERTIFICATE_BASE64",
+        "IOS_DISTRIBUTION_CERTIFICATE_PASSWORD",
+        "IOS_PROVISIONING_PROFILE_BASE64",
+        "APPSTORE_API_PRIVATE_KEY",
+        "APPLE_TEAM_ID",
+        "APPSTORE_API_KEY_ID",
+        "APPSTORE_ISSUER_ID",
+    ] {
+        assert!(ios.contains(required));
+    }
+    assert!(!ios.contains("PlistBuddy"));
+    for release_gate in [
+        "assert-apple-toolchain.sh",
+        "assert-ios-project-metadata.sh",
+        "assert-ios-signing-profile.sh",
+        "assert-ios-bundle.sh simulator",
+        "assert-ios-bundle.sh testflight",
+        "assert-no-tauri-dev-url.sh",
+    ] {
+        assert!(
+            ios.contains(release_gate),
+            "missing iOS gate: {release_gate}"
+        );
+    }
+    assert!(ios.contains("runs-on: macos-26"));
+    assert!(ios.contains("security set-key-partition-list"));
+    assert!(ios.contains("$PROFILE_UUID.mobileprovision"));
+    assert!(ios.contains("Remove temporary signing keychain"));
+
+    let ios_project = read_source(root.join("src-tauri/gen/apple/project.yml"))
+        .expect("iOS project specification");
+    assert!(ios_project.contains("path: ratspeak_iOS/PrivacyInfo.xcprivacy"));
+    assert!(ios_project.contains("buildPhase: resources"));
+    assert!(!ios_project.contains("entitlements:"));
+
+    let ios_pbx = read_source(root.join("src-tauri/gen/apple/ratspeak.xcodeproj/project.pbxproj"))
+        .expect("generated iOS project");
+    assert!(ios_pbx.contains("PrivacyInfo.xcprivacy in Resources"));
+    assert!(!ios_pbx.contains("CODE_SIGN_ENTITLEMENTS"));
+
+    let app_cargo = read_source(root.join("src-tauri/Cargo.toml")).expect("app Cargo.toml");
+    assert!(app_cargo.contains(r#"tauri = { version = "2", features = [] }"#));
+    assert!(
+        app_cargo.contains(r#"tauri = { version = "2", features = ["tray-icon", "devtools"] }"#)
+    );
+
+    let privacy_manifest =
+        read_source(root.join("src-tauri/gen/apple/ratspeak_iOS/PrivacyInfo.xcprivacy"))
+            .expect("iOS privacy manifest");
+    assert!(privacy_manifest.contains("NSPrivacyTracking"));
+    assert!(privacy_manifest.contains("NSPrivacyAccessedAPITypes"));
+    assert!(privacy_manifest.contains("Public channel"));
 }
 
 #[test]
@@ -2204,11 +4992,11 @@ fn settings_information_architecture_groups_one_off_settings() {
         .nth(1)
         .and_then(|tail| tail.split(r#"id="panel-settings-identity""#).next())
         .expect("general settings panel");
-    assert!(
-        general_panel.contains(r#"<span class="settings-row-label">Desktop Notifications</span>"#)
-    );
+    assert!(general_panel.contains(r#"<span class="settings-row-label">Notifications</span>"#));
     assert!(general_panel.contains(r#"id="settings-row-notifications""#));
     assert!(general_panel.contains(r#"id="desktop-notifications-toggle""#));
+    assert!(general_panel.contains(r#"id="settings-notification-action""#));
+    assert!(general_panel.contains(r#"id="settings-row-keep-connected""#));
     assert!(general_panel.contains(r#"<span class="settings-row-label">Block List</span>"#));
     assert!(general_panel.contains(
         r#"class="selector-badge selector-badge-no-caret" id="settings-blocked-count">Manage</button>"#
@@ -2221,8 +5009,8 @@ fn settings_information_architecture_groups_one_off_settings() {
         .expect("identity settings panel");
     assert!(identity_panel.contains(r#"<span class="settings-row-label">Status</span>"#));
     assert!(identity_panel.contains(r#"id="settings-identity-status-desc""#));
-    assert!(identity_panel.contains(r#"id="settings-edit-status-btn""#));
-    assert!(identity_panel.contains(r#"id="settings-clear-status-btn" disabled"#));
+    assert!(identity_panel.contains(r#"id="settings-status-action-btn">Set</button>"#));
+    assert!(!identity_panel.contains(r#"id="settings-clear-status-btn""#));
     assert!(identity_panel.contains(
         r#"class="selector-badge selector-badge-no-caret" id="settings-manage-identities-btn">Manage</button>"#
     ));
@@ -2255,13 +5043,23 @@ fn settings_information_architecture_groups_one_off_settings() {
         settings_js
             .contains("var _notifRow = document.getElementById('settings-row-notifications');")
     );
+    assert!(settings_js.contains("window.RatspeakAndroid.batteryOptimizationStatus()"));
+    assert!(settings_js.contains("requestBatteryOptimizationExemption()"));
+    assert!(settings_js.contains("rs-notification-permission-changed"));
     assert!(!settings_js.contains("document.getElementById('panel-settings-notifications')"));
     assert!(settings_js.contains("function syncSettingsIdentityStatus()"));
-    assert!(settings_js.contains("function clearActiveIdentityStatus()"));
-    assert!(settings_js.contains("saveIdentityStatus('')"));
+    assert!(settings_js.contains("actionBtn.textContent = status ? 'Edit' : 'Set';"));
     assert!(settings_js.contains("openIdentityStatusEditor()"));
+    assert!(settings_js.contains("clearStatusBtn.textContent = 'Clear status';"));
     assert!(
-        settings_js.contains("setActiveProfileStatus(savedStatus === null ? '' : savedStatus);")
+        settings_js.contains(
+            "clearStatusBtn.addEventListener('click', function() { submitStatus(''); });"
+        )
+    );
+    assert!(settings_js.contains("var saveLabel = initialStatus ? 'Save changes' : 'Set status';"));
+    assert!(
+        settings_js
+            .contains("setActiveProfileStatus(savedStatus === null ? nextStatus : savedStatus);")
     );
 
     assert!(views_css.contains(".settings-row-actions"));
@@ -2283,6 +5081,21 @@ fn mobile_settings_use_section_drilldown_instead_of_stacked_panels() {
     assert!(index.contains("class=\"settings-nav-desc\""));
     assert!(index.contains("id=\"settings-mobile-back-btn\""));
     assert!(index.contains("id=\"settings-mobile-detail-title\""));
+    assert!(!index.contains("settings-mobile-detail-eyebrow"));
+    for duplicated_title in [
+        r#"<div class="panel-header">General</div>"#,
+        r#"<div class="panel-header">Channels</div>"#,
+        r#"<div class="panel-header">Identity</div>"#,
+        r#"<div class="panel-header">Privacy</div>"#,
+        r#"<div class="panel-header">Network</div>"#,
+        r#"<div class="panel-header">System</div>"#,
+    ] {
+        assert!(
+            !index.contains(duplicated_title),
+            "settings detail should not repeat its page title: {duplicated_title}"
+        );
+    }
+    assert!(!index.contains("settings-relay-dot"));
     assert!(settings_js.contains("function _settingsMobileModeActive()"));
     assert!(settings_js.contains("showMobileDetail: _settingsMobileModeActive()"));
     assert!(settings_js.contains("function showSettingsMobileSectionIndex(opts)"));
@@ -2295,6 +5108,7 @@ fn mobile_settings_use_section_drilldown_instead_of_stacked_panels() {
     assert!(nav_js.contains("showSettingsMobileSectionIndex();"));
     assert!(nav_js.contains("initSettingsDetailSwipeBack();"));
     assert!(views_css.contains(".settings-nav-desc,"));
+    assert!(!responsive_css.contains(".settings-mobile-detail-eyebrow"));
     assert!(
         responsive_css
             .contains(".settings-page:not(.settings-mobile-detail-active) .settings-detail-pane")
@@ -2302,7 +5116,7 @@ fn mobile_settings_use_section_drilldown_instead_of_stacked_panels() {
     assert!(
         responsive_css.contains(".settings-detail-mode .settings-panel.settings-panel-selected")
     );
-    assert!(responsive_css.contains(".settings-row-label {\n        font-size: 16px;"));
+    assert!(responsive_css.contains(".settings-row-label {\n        font-size: 1rem;"));
 }
 
 #[test]
@@ -2322,8 +5136,8 @@ fn settings_system_panel_has_developer_mode_and_reset_group() {
     );
     assert!(index.contains(r#"<span class="settings-nav-label">System</span>"#));
     assert!(!index.contains(r#"<span class="settings-nav-label">System Data</span>"#));
-    assert!(index.contains(r#"<div class="panel-header">System</div>"#));
-    assert!(index.contains(r#"<div class="settings-panel-section-title">System</div>"#));
+    assert!(!index.contains(r#"<div class="panel-header">System</div>"#));
+    assert!(!index.contains(r#"<div class="settings-panel-section-title">System</div>"#));
     assert!(index.contains(r#"<span class="settings-row-label">Developer Mode</span>"#));
     assert!(index.contains(r#"role="radiogroup" aria-label="Developer Mode""#));
     assert!(index.contains(r#"type="radio" name="settings-developer-mode" id="settings-developer-mode-off" value="off" checked"#));
@@ -2332,9 +5146,6 @@ fn settings_system_panel_has_developer_mode_and_reset_group() {
     ));
     assert!(index.contains(r#"<div class="settings-panel-section-title">Reset</div>"#));
 
-    let system_title = index
-        .find(r#"<div class="settings-panel-section-title">System</div>"#)
-        .unwrap();
     let developer_mode = index
         .find(r#"<span class="settings-row-label">Developer Mode</span>"#)
         .unwrap();
@@ -2342,11 +5153,7 @@ fn settings_system_panel_has_developer_mode_and_reset_group() {
         .find(r#"<div class="settings-panel-section-title">Reset</div>"#)
         .unwrap();
     let cache_section = index.find(r#"id="system-section-caches""#).unwrap();
-    assert!(
-        system_title < developer_mode
-            && developer_mode < reset_title
-            && reset_title < cache_section
-    );
+    assert!(developer_mode < reset_title && reset_title < cache_section);
 
     assert!(settings_js.contains("function initDeveloperModeToggle()"));
     assert!(settings_js.contains("initDeveloperModeToggle();"));
@@ -2370,8 +5177,42 @@ fn settings_system_panel_has_developer_mode_and_reset_group() {
     assert!(views_css.contains(".settings-radio-option input:checked + span"));
     assert!(
         responsive_css
-            .contains(".settings-radio-option span { min-height: 38px; min-width: 58px; }")
+            .contains(".settings-radio-option span { min-height: 40px; min-width: 58px; }")
     );
+}
+
+#[test]
+fn settings_machine_states_share_uppercase_outfit_typography() {
+    let root = repo_root();
+    let index = read_source(root.join("dashboard/index.html")).expect("dashboard index");
+    let tokens = read_source(root.join("dashboard/static/css/00-tokens.css")).expect("type tokens");
+    let views = read_source(root.join("dashboard/static/css/10-views.css")).expect("views css");
+    let settings = read_source(root.join("dashboard/static/js/settings.js")).expect("settings js");
+    let propagation =
+        read_source(root.join("dashboard/static/js/propagation.js")).expect("propagation js");
+    let modals = read_source(root.join("dashboard/static/js/modals.js")).expect("modals js");
+
+    assert!(tokens.contains("--type-state-size:     var(--text-xs);"));
+    assert!(tokens.contains("--type-state-weight:   var(--type-weight-semibold);"));
+    assert!(tokens.contains("--type-state-tracking: 0.04em;"));
+    assert!(views.contains(".settings-radio-option span {"));
+    assert!(views.contains("font-family: var(--font-sans);"));
+    assert!(views.contains("font-size: var(--type-state-size);"));
+    assert!(views.contains("text-transform: uppercase;"));
+    assert!(views.contains(".settings-state-value {"));
+    assert!(views.contains(".relay-mode-btn {"));
+
+    assert!(
+        index.contains(
+            r#"class="selector-badge settings-state-value" id="transport-mode-select">OFF"#
+        )
+    );
+    assert!(index.contains(r#"id="hw-lock-timeout-select">OFF</button>"#));
+    assert!(settings.contains("if (!secs || secs <= 0) return 'OFF';"));
+    assert!(settings.contains("{ label: 'OFF', value: '0'"));
+    assert!(propagation.contains("? ('Cost ' + cost) : 'OFF'"));
+    assert!(propagation.contains("relayBadge.textContent = 'OFF';"));
+    assert!(modals.contains("{ label: 'Always on', value: '0' }"));
 }
 
 #[test]
@@ -2382,9 +5223,9 @@ fn mobile_primary_lists_share_readable_row_scale() {
 
     assert!(responsive_css.contains("--mobile-list-avatar-size: 44px;"));
     assert!(responsive_css.contains("--mobile-list-min-height: 58px;"));
-    assert!(responsive_css.contains("--mobile-list-title-size: 16px;"));
-    assert!(responsive_css.contains("--mobile-list-detail-size: 14px;"));
-    assert!(responsive_css.contains("--mobile-list-meta-size: 13px;"));
+    assert!(responsive_css.contains("--mobile-list-title-size: 1rem;"));
+    assert!(responsive_css.contains("--mobile-list-detail-size: 0.875rem;"));
+    assert!(responsive_css.contains("--mobile-list-meta-size: 0.8125rem;"));
     assert!(responsive_css.contains(
         ".conv-row,\n    .contacts-row,\n    .identity-list-item,\n    .games-session-row"
     ));
@@ -2405,7 +5246,7 @@ fn mobile_primary_lists_share_readable_row_scale() {
         responsive_css
             .contains(".conn-card-label {\n        font-size: var(--mobile-list-title-size);")
     );
-    assert!(responsive_css.contains(".activity-level-btn,\n    .activity-filter-chip"));
+    assert!(responsive_css.contains(".activity-profile-btn,\n    .activity-filter-chip"));
     assert!(responsive_css.contains("font-size: var(--mobile-list-meta-size);"));
     assert!(
         responsive_css.contains(
@@ -2420,7 +5261,7 @@ fn mobile_primary_lists_share_readable_row_scale() {
     assert!(responsive_css.contains(".dashboard-peers-scroll,"));
     assert!(responsive_css.contains(".peers-list-scroll::-webkit-scrollbar,"));
     assert!(responsive_css.contains(".dashboard-peers-scroll::-webkit-scrollbar,"));
-    assert!(responsive_css.contains(".conn-group-header {\n        font-size: 13px;"));
+    assert!(responsive_css.contains(".conn-group-header {\n        font-size: var(--text-sm);"));
     assert!(responsive_css.contains(".system-action-label,"));
     assert!(responsive_css.contains(".system-subsection-title,"));
     assert!(responsive_css.contains(".relay-card-header,"));
@@ -2541,11 +5382,15 @@ fn contact_detail_sheet_centers_identity_and_separates_primary_actions() {
 fn mobile_peers_rows_are_larger_and_detail_sheet_expands_progressively() {
     let root = repo_root();
     let peers = read_source(root.join("dashboard/static/js/peers.js")).expect("peers js");
-    assert!(peers.contains("var mobileRows = window.innerWidth <= 768;"));
-    assert!(peers.contains("var baseRowHeight = mobileRows ? 58 : 36;"));
-    assert!(peers.contains("var statusRowHeight = mobileRows ? 68 : 48;"));
+    assert!(peers.contains("var mobileRows = isCompactLayout();"));
+    assert!(peers.contains("function _measurePeerRowHeights(compact, scrollContainer)"));
+    assert!(peers.contains("var minimumBase = compact ? 58 : 36;"));
+    assert!(peers.contains("var minimumStatus = compact ? 68 : 48;"));
+    assert!(peers.contains("var baseRowHeight = measuredRows.base;"));
+    assert!(peers.contains("var statusRowHeight = measuredRows.status;"));
     assert!(peers.contains("_peersRowHeight = baseRowHeight;"));
-    assert!(peers.contains("var avatarSize = window.innerWidth <= 768 ? 44 : 28;"));
+    assert!(peers.contains("var avatarSize = isCompactLayout() ? 44 : 28;"));
+    assert!(peers.contains("window.addEventListener('ratspeak-text-scale-changed'"));
     assert!(peers.contains("showConnectionDetailSheet(hash, { progressive: true });"));
 
     let connections =
@@ -2618,7 +5463,12 @@ fn mobile_peers_rows_are_larger_and_detail_sheet_expands_progressively() {
     );
     assert!(responsive_css.contains(".conn-detail-sheet--compact .conn-detail-sheet-expand-hint"));
     assert!(responsive_css.contains(".conn-detail-sheet--with-add .conn-detail-sheet-expand-hint"));
-    assert!(responsive_css.contains(".conn-detail-sheet {\n    max-width: 100vw;"));
+    let conn_sheet_css = responsive_css
+        .split(".conn-detail-sheet {")
+        .nth(1)
+        .and_then(|tail| tail.split('}').next())
+        .expect("mobile connection detail sheet rule");
+    assert!(conn_sheet_css.contains("max-width: 100vw;"));
     assert!(
         responsive_css.contains(".conn-detail-sheet--compact .conn-detail-sheet-primary-actions")
     );
@@ -2867,9 +5717,36 @@ fn contact_card_qr_flow_exports_public_key_and_imports_known_identity() {
 
     assert!(contact_card_js.contains("BarcodeDetector"));
     assert!(contact_card_js.contains("RS.mediaPermissions.ensure({ camera: true })"));
-    assert!(contact_card_js.contains("RS.invoke('api_preview_contact_card'"));
+    assert!(
+        contact_card_js
+            .contains("var previewCommand = options.previewCommand || 'api_preview_contact_card'")
+    );
+    assert!(contact_card_js.contains("RS.invoke(previewCommand, { payload: payload })"));
     assert!(contact_card_js.contains("RS.invoke('import_contact_card'"));
+    assert!(contact_card_js.contains("window.RS.qr = {"));
+    assert!(contact_card_js.contains("openScanner: openContactQrScanner"));
     assert!(contact_card_js.contains("renderQrCanvas(canvas, card.payload || '')"));
+    let share_start = contact_card_js
+        .find("function showIdentityShareScreen(identityHash)")
+        .expect("identity share flow");
+    let share_end = contact_card_js[share_start..]
+        .find("function showScannedCardPreview")
+        .map(|offset| share_start + offset)
+        .expect("identity share flow end");
+    let share_flow = &contact_card_js[share_start..share_end];
+    assert!(share_flow.contains("Preparing contact card&hellip;"));
+    assert!(share_flow.contains("built.sheet.setAttribute('aria-busy', 'true')"));
+    assert!(share_flow.contains("window.requestAnimationFrame"));
+    let share_sheet_pos = share_flow
+        .find("buildSheet('contact-share-sheet')")
+        .expect("share sheet is created");
+    let share_request_pos = share_flow
+        .find("RS.invoke('api_contact_card'")
+        .expect("contact-card request is made");
+    assert!(
+        share_sheet_pos < share_request_pos,
+        "share sheet must appear before contact-card generation begins"
+    );
     assert!(contact_card_js.contains("function QrContactCard(text)"));
     assert!(contact_card_js.contains("var VERSION = 13;"));
     assert!(contact_card_js.contains("var ERROR_CORRECTION_FORMAT_BITS = 3;"));
@@ -2921,6 +5798,8 @@ fn contact_card_qr_flow_exports_public_key_and_imports_known_identity() {
     assert!(views_css.contains("transform: translate(-50%, calc(-50% + 12px)) scale(0.98);"));
     assert!(views_css.contains("transform: translate(-50%, -50%) scale(1);"));
     assert!(views_css.contains(".contact-share-qr-shell"));
+    assert!(views_css.contains(".contact-share-loading-qr"));
+    assert!(views_css.contains(".contact-share-error-title"));
     assert!(views_css.contains(".contact-scan-camera-wrap"));
     assert!(views_css.contains(".contact-scan-avatar {\n    width: 72px;\n    height: 72px;\n    border-radius: var(--radius-full);"));
     assert!(views_css.contains(".contact-scan-avatar canvas"));
@@ -2978,7 +5857,10 @@ fn mobile_contacts_tab_keeps_desktop_header_out_of_search_flow() {
 #[test]
 fn mobile_tab_swipe_uses_bottom_bar_slots_without_view_slide_animation() {
     let nav = read_source(repo_root().join("dashboard/static/js/nav.js")).expect("nav js");
-    assert!(nav.contains("var MOBILE_TAB_SLOTS = ['peers', 'message', 'contacts', 'more'];"));
+    assert!(nav.contains("var MOBILE_TAB_SLOTS = ['peers', 'message', 'channels', 'more'];"));
+    assert!(
+        nav.contains("var MORE_VIEWS = ['contacts', 'identity', 'network', 'games', 'settings'];")
+    );
     assert!(nav.contains("function _mobileTabSlot(viewId)"));
     assert!(nav.contains("function _viewForMobileTabSlot(slot)"));
     assert!(nav.contains("function blockMobileNavigation(ms)"));
@@ -3094,7 +5976,11 @@ fn message_actions_use_mobile_long_press_and_action_state() {
         .expect("messaging command");
 
     assert!(lxmf.contains("RS.gestures.attachLongPress(bubble"));
-    assert!(lxmf.contains("preventDefaultOnStart: function()"));
+    assert!(!lxmf.contains("preventDefaultOnStart: function()"));
+    assert!(lxmf.contains("container.addEventListener('touchstart', function()"));
+    assert!(lxmf.contains("state.settleToken++;"));
+    assert!(lxmf.contains("state.programmaticScrollUntil = 0;"));
+    assert!(lxmf.contains("}, { passive: true });"));
     assert!(lxmf.contains("if (e.defaultPrevented) return;"));
     assert!(lxmf.contains("(t.closest('.lxmf-msg') && _shouldPreserveLxmfComposerKeyboard())"));
     assert!(lxmf.contains("function _bindMessageFocusPreservingActivation"));
@@ -3139,6 +6025,26 @@ fn message_actions_use_mobile_long_press_and_action_state() {
     assert!(inbound.contains("\"reply_to_id\": reply_to_id"));
     assert!(inbound.contains("\"reaction_update\""));
     assert!(messaging.contains("\"reaction_update\""));
+}
+
+#[test]
+fn optimistic_lxmf_cancel_is_native_before_canonical_reconciliation() {
+    let root = repo_root();
+    let state = read_source(root.join("crates/ratspeak-runtime/src/state.rs")).expect("state rs");
+    let messaging = read_source(root.join("crates/ratspeak-tauri/src/commands/messaging.rs"))
+        .expect("messaging command");
+    let lxmf = read_source(root.join("dashboard/static/js/lxmf.js")).expect("lxmf js");
+
+    assert!(state.contains("pub fn begin_lxmf_client_send"));
+    assert!(state.contains("pub fn cancel_lxmf_client_send"));
+    assert!(state.contains("pub fn publish_canonical"));
+    assert!(state.contains("self.clear_lxmf_client_sends();"));
+    assert!(messaging.contains("finalize_lxmf_client_send"));
+    assert!(messaging.contains("LxmfClientSendCancellation::Preparing"));
+    assert!(messaging.contains("LxmfClientSendCancellation::Queued"));
+    assert!(lxmf.contains("_pendingLxmfCancelByClientId[msgId] = true;"));
+    assert!(lxmf.contains("_invokeLxmfCancel(msgId).catch(function(err)"));
+    assert!(lxmf.contains("var eventMsgId = data.msg_id || data.client_msg_id;"));
 }
 
 #[test]
@@ -3323,8 +6229,8 @@ fn identity_management_is_first_class_tab() {
     assert!(index.contains(r#"id="panel-settings-identity""#));
     assert!(index.contains(r#"id="settings-active-identity-desc""#));
     assert!(index.contains(r#"id="settings-identity-status-desc""#));
-    assert!(index.contains(r#"id="settings-edit-status-btn""#));
-    assert!(index.contains(r#"id="settings-clear-status-btn""#));
+    assert!(index.contains(r#"id="settings-status-action-btn""#));
+    assert!(!index.contains(r#"id="settings-clear-status-btn""#));
     assert!(index.contains(r#"id="settings-backup-identity-btn""#));
     assert!(index.contains(r#"id="settings-view-recovery-phrase-btn""#));
     let general_nav = index
@@ -3345,9 +6251,9 @@ fn identity_management_is_first_class_tab() {
     assert!(settings_js.contains("settings-backup-identity-btn"));
     assert!(settings_js.contains("settings-view-recovery-phrase-btn"));
     assert!(settings_js.contains("viewActiveRecoveryPhrase();"));
-    assert!(settings_js.contains("settings-edit-status-btn"));
-    assert!(settings_js.contains("settings-clear-status-btn"));
-    assert!(settings_js.contains("saveIdentityStatus('')"));
+    assert!(settings_js.contains("settings-status-action-btn"));
+    assert!(settings_js.contains("rs-dialog-clear-status"));
+    assert!(settings_js.contains("submitStatus('')"));
     assert!(
         settings_js.contains("window.syncSettingsIdentityActions = syncSettingsIdentityActions;")
     );
@@ -3423,8 +6329,16 @@ fn hardware_new_identity_reset_flow_handles_initialized_keys() {
     let root = repo_root();
     let identity_js =
         read_source(root.join("dashboard/static/js/identity.js")).expect("identity js");
+    let setup_js = read_source(root.join("dashboard/static/js/setup.js")).expect("setup js");
+    let state_js = read_source(root.join("dashboard/static/js/state.js")).expect("state js");
     let hardware_rs =
         read_source(root.join("crates/ratspeak-runtime/src/hardware.rs")).expect("hardware rs");
+
+    assert!(state_js.contains("function supportsHardwareIdentities()"));
+    assert!(state_js.contains("if (isTauriMobile()) return false;"));
+    assert!(setup_js.contains("!supportsHardwareIdentities()"));
+    assert!(identity_js.contains("!supportsHardwareIdentities()"));
+    assert!(!setup_js.contains("typeof isMobile === 'function') && isMobile()"));
 
     assert!(identity_js.contains("function _hwConfirmOverwriteIfNeeded"));
     assert!(identity_js.contains("title: 'Reset this security key?'"));
@@ -3549,13 +6463,431 @@ fn identity_switch_refreshes_interface_state_without_stale_public_servers() {
 }
 
 #[test]
-fn network_activity_opt_in_is_session_local() {
-    let source =
-        read_source(repo_root().join("dashboard/static/js/activity.js")).expect("activity js");
+fn activity_producers_are_sealed_and_legacy_rows_have_one_masked_source() {
+    let root = repo_root();
+    let activity_mod = read_source(root.join("crates/ratspeak-runtime/src/activity/mod.rs"))
+        .expect("activity mod");
+    let producer = read_source(root.join("crates/ratspeak-runtime/src/activity/producer.rs"))
+        .expect("activity producer facade");
+    let emitter = read_source(root.join("crates/ratspeak-runtime/src/activity/emitter.rs"))
+        .expect("activity emitter");
 
-    assert!(source.contains("localStorage.removeItem('rs-activity-enabled')"));
-    assert!(!source.contains("localStorage.setItem('rs-activity-enabled'"));
-    assert!(source.contains("enabled: false, level: activityLevel"));
+    assert!(activity_mod.contains("mod catalog;"));
+    assert!(!activity_mod.contains("pub mod catalog;"));
+    assert!(activity_mod.contains("pub mod producer;"));
+    assert!(!activity_mod.contains("pub use classified::{ActivityDraft"));
+    assert!(producer.contains("pub struct ProducerEvent(Payload);"));
+    assert!(!producer.contains("pub struct ActivityDraft"));
+    assert!(!producer.contains("pub time:"));
+    assert!(!producer.contains("pub kind:"));
+    assert!(!producer.contains("pub summary:"));
+    assert!(!producer.contains("pub classification:"));
+    assert!(emitter.contains("fn from_masked(event: &ActivityEventV1)"));
+    assert!(!emitter.contains("fn from_masked(event: &ActivityDraft)"));
+
+    let lifecycle = read_source(root.join("crates/ratspeak-runtime/src/activity/lifecycle.rs"))
+        .expect("activity lifecycle");
+    let admission = lifecycle
+        .find("let Some(lease) = self.inner.shared.gate.try_admit()")
+        .expect("recorder admission gate");
+    let origin_validation = lifecycle
+        .find("if !validate_origin()")
+        .expect("origin validation under admission");
+    let producer_build = lifecycle
+        .find("let mut draft = match make()")
+        .expect("lazy producer construction");
+    assert!(admission < origin_validation);
+    assert!(origin_validation < producer_build);
+
+    for relative in [
+        "crates/ratspeak-runtime/src/lib.rs",
+        "crates/ratspeak-runtime/src/voice.rs",
+        "crates/ratspeak-tauri/src/commands/interface_activity.rs",
+        "crates/ratspeak-tauri/src/commands/messaging.rs",
+        "crates/ratspeak-tauri/src/commands/network.rs",
+    ] {
+        let source = read_source(root.join(relative)).expect(relative);
+        assert!(
+            !source.contains(".record_event("),
+            "async-capable migrated adapter bypasses its origin fence in {relative}"
+        );
+        assert!(
+            source.contains("record_event_fenced("),
+            "migrated adapter has no fenced Activity producer in {relative}"
+        );
+    }
+
+    let runtime =
+        read_source(root.join("crates/ratspeak-runtime/src/lib.rs")).expect("runtime lib");
+    assert!(runtime.contains("pub async fn send_announce_from_origin("));
+    assert!(runtime.contains("send_announce_from_origin(&state, activity_origin).await"));
+    assert!(runtime.contains("biased;\n                        _ = tick_shutdown.wait()"));
+    assert!(runtime.contains("biased;\n            _ = shutdown.wait() => break"));
+    assert!(runtime.contains("let poll_activity_origin = state.activity_request_fence();"));
+    assert!(
+        runtime.contains("poll_stats_loop(poll_state, poll_shutdown, poll_activity_origin).await")
+    );
+    let poll_loop = runtime
+        .split("async fn poll_stats_loop(")
+        .nth(1)
+        .and_then(|tail| tail.split("async fn ").next())
+        .expect("poll stats loop body");
+    assert!(poll_loop.contains("if shutdown.is_triggered()"));
+    let poll_startup = poll_loop
+        .split("let mut prev_online")
+        .next()
+        .expect("poll startup marker segment");
+    assert!(!poll_startup.contains("activity_request_fence()"));
+    assert!(poll_startup.contains("runtime_activity_origin"));
+    let poll_unit = poll_loop.split("loop {").nth(1).expect("poll receive unit");
+    let poll_select = poll_unit.find("tokio::select!").unwrap();
+    let poll_origin = poll_unit
+        .find("let poll_activity_origin = state.activity_request_fence();")
+        .unwrap();
+    let poll_shutdown = poll_unit.find("if shutdown.is_triggered()").unwrap();
+    assert!(poll_select < poll_origin && poll_origin < poll_shutdown);
+
+    let direct_inbound = runtime
+        .split("async fn handle_inbound_lxmf(")
+        .nth(1)
+        .and_then(|tail| tail.split("enum InboundLxmfSource").next())
+        .expect("direct inbound loop");
+    let direct_select = direct_inbound.find("let event = tokio::select!").unwrap();
+    let direct_origin = direct_inbound
+        .find("let activity_origin = state.activity_request_fence();")
+        .unwrap();
+    let direct_shutdown = direct_inbound.find("if shutdown.is_triggered()").unwrap();
+    assert!(direct_select < direct_origin && direct_origin < direct_shutdown);
+
+    let link_inbound = runtime
+        .split("let link_inbound_state = state.clone();")
+        .nth(1)
+        .and_then(|tail| tail.split("tracing::info!(").next())
+        .expect("link inbound loop");
+    let link_select = link_inbound
+        .find("let (data, link_id) = tokio::select!")
+        .unwrap();
+    let link_origin = link_inbound
+        .find("link_inbound_state.activity_request_fence()")
+        .unwrap();
+    let link_shutdown = link_inbound
+        .find("if link_inbound_shutdown.is_triggered()")
+        .unwrap();
+    assert!(link_select < link_origin && link_origin < link_shutdown);
+
+    let decrypt_from_origin = runtime
+        .split("async fn handle_decrypted_lxmf_from_origin(")
+        .nth(1)
+        .and_then(|tail| tail.split("#[cfg(test)]").next())
+        .expect("origin-bound decrypted inbound handler");
+    assert!(!decrypt_from_origin.contains("activity_request_fence()"));
+    assert!(decrypt_from_origin.contains("activity_origin: ActivityRequestFence"));
+
+    let startup_announce = runtime
+        .split("fn schedule_startup_auto_announce(")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("async fn send_announce_from_state_inner(")
+                .next()
+        })
+        .expect("startup auto-announce task");
+    let startup_wait = startup_announce
+        .find("_ = tokio::time::sleep(Duration::from_secs(2))")
+        .unwrap();
+    let startup_origin = startup_announce
+        .find("let activity_origin = state.activity_request_fence();")
+        .unwrap();
+    let startup_shutdown = startup_announce.find("if shutdown.is_triggered()").unwrap();
+    let startup_send = startup_announce
+        .find("send_announce_from_origin(&state, activity_origin).await")
+        .unwrap();
+    let startup_success = startup_announce.find("if report.queued > 0").unwrap();
+    let startup_fenced = startup_announce
+        .find("record_activity_if_current(&state, activity_origin, ||")
+        .unwrap();
+    let startup_aggregate = startup_announce
+        .find("method: producer::AnnounceMethod::Startup")
+        .unwrap();
+    assert!(
+        startup_wait < startup_origin
+            && startup_origin < startup_shutdown
+            && startup_shutdown < startup_send
+            && startup_send < startup_success
+            && startup_success < startup_fenced
+            && startup_fenced < startup_aggregate
+    );
+
+    let periodic_announce = runtime
+        .split("// Auto-announce loop; wakes on timer or interval change.")
+        .nth(1)
+        .and_then(|tail| tail.split("let poll_state = state.clone();").next())
+        .expect("periodic auto-announce loop");
+    let periodic_wait = periodic_announce
+        .find("tokio::time::sleep(Duration::from_secs(interval_secs))")
+        .unwrap();
+    let periodic_origin = periodic_announce
+        .find("periodic_state.activity_request_fence()")
+        .unwrap();
+    let periodic_shutdown = periodic_announce
+        .find("if periodic_shutdown.is_triggered()")
+        .unwrap();
+    let periodic_send = periodic_announce
+        .find("send_announce_from_origin(")
+        .unwrap();
+    assert!(
+        periodic_wait < periodic_origin
+            && periodic_origin < periodic_shutdown
+            && periodic_shutdown < periodic_send
+    );
+
+    for relative in [
+        "crates/ratspeak-tauri/src/commands/games.rs",
+        "crates/ratspeak-tauri/src/commands/identity.rs",
+        "crates/ratspeak-tauri/src/commands/network.rs",
+    ] {
+        let source = read_source(root.join(relative)).expect(relative);
+        assert!(source.contains("activity_request_fence()"));
+        assert!(
+            source.contains("_from_origin(") || source.contains("send_announce_from_origin("),
+            "delayed announce path recaptures its Activity origin in {relative}"
+        );
+    }
+
+    let mut production_sources = Vec::new();
+    collect_files(
+        &root.join("crates/ratspeak-runtime/src"),
+        &mut production_sources,
+    );
+    collect_files(
+        &root.join("crates/ratspeak-tauri/src"),
+        &mut production_sources,
+    );
+    for path in production_sources
+        .into_iter()
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("rs"))
+    {
+        let source = read_source(&path).expect("production Rust source");
+        assert!(
+            !source.contains("emit_network_event("),
+            "legacy producer call remains in {}",
+            path.display()
+        );
+        assert!(
+            !source.contains(".add_event("),
+            "generic legacy event producer remains in {}",
+            path.display()
+        );
+        let compact = source
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        for forbidden in [
+            "emit_to_all(\"event\",",
+            "emit_to_all(\"event_log\",",
+            ".emit(\"event\",",
+            ".emit(\"event_log\",",
+            ".try_emit(\"event\",",
+            ".try_emit(\"event_log\",",
+        ] {
+            assert!(
+                !compact.contains(forbidden),
+                "generic legacy event bus producer {forbidden} remains in {}",
+                path.display()
+            );
+        }
+    }
+
+    let runtime_state =
+        read_source(root.join("crates/ratspeak-runtime/src/state.rs")).expect("runtime state");
+    assert!(!runtime_state.contains("pub fn add_event("));
+    assert!(!runtime_state.contains("legacy_activity_capture_enabled"));
+    let mut dashboard_sources = Vec::new();
+    collect_files(&root.join("dashboard/static/js"), &mut dashboard_sources);
+    for path in dashboard_sources
+        .into_iter()
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("js"))
+    {
+        let source = read_source(&path).expect("dashboard JavaScript");
+        let compact = source
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        for forbidden in [
+            "RS.listen('event',",
+            "RS.listen('event_log',",
+            "RS.listen(\"event\",",
+            "RS.listen(\"event_log\",",
+        ] {
+            assert!(
+                !compact.contains(forbidden),
+                "generic legacy listener {forbidden} remains in {}",
+                path.display()
+            );
+        }
+    }
+    let activity_frontend =
+        read_source(root.join("dashboard/static/js/activity.js")).expect("activity frontend");
+    assert!(!activity_frontend.contains("RS.listen('network_event',"));
+    assert!(!activity_frontend.contains("RS.listen('network_log_level_changed',"));
+    assert!(!activity_frontend.contains("typeof events !== 'undefined'"));
+    let publish_start = emitter
+        .find("fn try_publish(&self")
+        .expect("typed Activity publisher");
+    let publish_end = emitter[publish_start..]
+        .find("fn try_publish_status")
+        .map(|offset| publish_start + offset)
+        .expect("typed status publisher");
+    assert!(!emitter[publish_start..publish_end].contains("network_event"));
+    let runtime_compact = runtime
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    for product_stream in ["stats_update", "system_status", "announce_received"] {
+        assert!(
+            runtime_compact.contains(&format!("emit_to_all(\"{product_stream}\",")),
+            "product stream {product_stream} must remain independent of Activity"
+        );
+    }
+    let health = read_source(root.join("dashboard/static/js/health.js")).expect("health js");
+    assert!(health.contains("RS.listen('alert'"));
+    assert!(health.contains("renderAlert(data)"));
+}
+
+#[test]
+fn activity_bootstrap_is_listener_first_and_session_local() {
+    let root = repo_root();
+    let activity = read_source(root.join("dashboard/static/js/activity.js")).expect("activity js");
+    let state = read_source(root.join("dashboard/static/js/state.js")).expect("state js");
+    let identity = read_source(root.join("crates/ratspeak-tauri/src/commands/identity.rs"))
+        .expect("identity commands");
+
+    assert!(!activity.contains("localStorage"));
+    assert!(!activity.contains("sessionStorage"));
+    assert!(!activity.contains("enabled: false, level: activityLevel"));
+    assert!(activity.contains("{ required: true }"));
+    assert!(activity.contains("invoke('activity_status')"));
+    assert!(activity.contains("invoke('activity_replay', {"));
+    assert!(activity.contains("['activity_status_v1', handleStatusNotification]"));
+    assert!(activity.contains("['activity_boundary_v1', handleBoundary]"));
+    assert!(activity.contains("['activity_batch_v1', handleBatch]"));
+    assert!(activity.contains("onEvents(state.events.slice()"));
+    assert!(activity.contains("if (state.identityQuarantine) return;"));
+    assert!(activity.contains("if (authoritative && state.identityQuarantine)"));
+    assert!(activity.contains("payload.identity_generation !== state.identityGeneration"));
+    assert!(activity.contains("after: after"));
+    assert!(activity.contains("activityBootstrap.start();"));
+    let controller_start = activity
+        .find("var ACTIVITY_U64_MAX")
+        .expect("Activity controller start");
+    let controller_end = activity[controller_start..]
+        .find("\nvar activityBootstrap =")
+        .map(|offset| controller_start + offset)
+        .expect("Activity controller end");
+    let controller = &activity[controller_start..controller_end];
+    assert!(!controller.contains("parseInt("));
+    assert!(!controller.contains("BigInt("));
+    assert!(!controller.contains("Number("));
+
+    assert!(state.contains("options.required === true"));
+    assert!(state.contains("err.code = 'event_bridge_unavailable'"));
+    assert!(state.contains("rs-lifecycle-foreground-handled"));
+    assert!(
+        identity
+            .matches(r#""generation": generation.to_string()"#)
+            .count()
+            >= 3
+    );
+}
+
+#[test]
+fn mobile_native_ownership_and_usb_recovery_remain_closed_and_single_flight() {
+    let root = repo_root();
+    let native = read_source(root.join("src-tauri/src/mobile_native.rs")).expect("mobile native");
+    let supervisor = read_source(root.join(
+        "src-tauri/gen/android/app/src/main/java/org/ratspeak/android/RatspeakPlatformSupervisor.kt",
+    ))
+    .expect("Android platform supervisor");
+    let activity = read_source(
+        root.join("src-tauri/gen/android/app/src/main/java/org/ratspeak/android/MainActivity.kt"),
+    )
+    .expect("Android main activity");
+    let interfaces = read_source(root.join("crates/ratspeak-tauri/src/commands/interfaces.rs"))
+        .expect("interfaces commands");
+    let shared = read_source(root.join("crates/ratspeak-tauri/src/commands/shared.rs"))
+        .expect("shared commands");
+    let health = read_source(root.join("dashboard/static/js/health.js")).expect("health js");
+
+    assert!(native.contains("requestUsbPermissionForSelector"));
+    assert!(native.contains(r#""(IILjava/lang/String;)V""#));
+    assert!(supervisor.contains("@JvmStatic\n    fun requestUsbPermissionForSelector"));
+    let on_create = activity
+        .split("override fun onCreate(savedInstanceState: Bundle?)")
+        .nth(1)
+        .expect("MainActivity onCreate");
+    assert!(
+        on_create.find("RatspeakNativeBridge.initialize(applicationContext)")
+            < on_create.find("super.onCreate(savedInstanceState)"),
+        "native Application context must exist before Tauri can restore saved BLE"
+    );
+    assert!(interfaces.contains("pub async fn request_android_usb_permission("));
+    assert!(interfaces.contains("selector.serial_number.as_deref()"));
+    assert!(interfaces.contains("preflight_android_usb_selector_for_interface"));
+    assert!(interfaces.contains("id_interval: cfg_u64(entry, \"id_interval\")"));
+    assert!(interfaces.contains("id_callsign: cfg_non_empty_str(entry, \"id_callsign\")"));
+    assert!(interfaces.contains("config.id_interval = id_interval;"));
+    assert!(interfaces.contains("config.id_callsign = id_callsign.map"));
+    assert!(native.contains("requestUsbPermissionForLegacyPath"));
+    let runtime = read_source(root.join("crates/ratspeak-runtime/src/lib.rs")).expect("runtime");
+    assert!(
+        runtime.contains("migrate_android_usb_selectors_for_startup(&state, &config_dir).await")
+    );
+    assert!(runtime.contains("enforce_android_single_ble_rnode_for_startup(&state, &config_dir)"));
+    assert!(runtime.contains("state.wait_for_mobile_platform_bridge().await;"));
+    assert!(shared.contains("fields.remove(\"usb_vendor_id\")"));
+    assert!(shared.contains("fields.remove(\"usb_product_id\")"));
+    assert!(shared.contains("fields.remove(\"usb_serial_number\")"));
+    assert!(shared.contains("state.mobile_hardware_state_snapshot()"));
+    assert!(health.contains("var _androidUsbResumePermission = null;"));
+    assert!(health.contains("return Promise.resolve(false)"));
+    assert!(health.contains("_androidUsbResumePermission.cancel("));
+    assert!(health.contains("window._onUsbSelectorPermissionResult === ownedCallback"));
+    assert!(health.contains("function applyMobileHardwareState(data)"));
+    assert!(health.contains("if (online) mobileHealth = null;"));
+}
+
+#[test]
+fn mobile_memory_pressure_reaches_bounded_attachment_owners_without_webview_authority() {
+    let root = repo_root();
+    let native = read_source(root.join("src-tauri/src/mobile_native.rs")).expect("mobile native");
+    let state =
+        read_source(root.join("crates/ratspeak-runtime/src/state.rs")).expect("runtime state");
+    let activity = read_source(
+        root.join("src-tauri/gen/android/app/src/main/java/org/ratspeak/android/MainActivity.kt"),
+    )
+    .expect("Android main activity");
+    let bridge = read_source(root.join(
+        "src-tauri/gen/android/app/src/main/java/org/ratspeak/android/RatspeakNativeBridge.kt",
+    ))
+    .expect("Android native bridge");
+    let shell = read_source(root.join("src-tauri/src/lib.rs")).expect("mobile shell");
+    let lxmf = read_source(root.join("dashboard/static/js/lxmf.js")).expect("messaging js");
+    let state_js = read_source(root.join("dashboard/static/js/state.js")).expect("state js");
+
+    assert!(activity.contains("override fun onTrimMemory(level: Int)"));
+    assert!(activity.contains("RatspeakMobilePolicy.attachmentMemoryPressure(level)"));
+    assert!(activity.contains("RatspeakNativeBridge.publishMemoryPressure(it)"));
+    assert!(bridge.contains("private external fun nativeMemoryPressure(critical: Boolean)"));
+    assert!(native.contains("RatspeakNativeBridge_nativeMemoryPressure"));
+    assert!(native.contains("state.handle_attachment_memory_pressure(critical)"));
+    assert!(shell.contains("UIApplicationDidReceiveMemoryWarningNotification"));
+    assert!(shell.contains("register_ios_memory_warning_observer"));
+    assert!(state.contains("Active router\n    /// deliveries retain their exact lease"));
+    assert!(lxmf.contains("function handleAttachmentMemoryPressure(critical)"));
+    assert!(state_js.contains("RS.listen('attachment_memory_pressure'"));
+    assert!(state_js.contains("window.RS.invoke('save_stored_attachment_native'"));
+    assert!(bridge.contains("fun saveStoredFile("));
+    assert!(activity.contains("FileInputStream(pending.privateFile"));
+    assert!(activity.contains("input.copyTo(output, 64 * 1024)"));
 }
 
 #[test]
@@ -3759,19 +7091,15 @@ fn path_resolution_diagnostics_are_not_duplicate_or_stale() {
     let root = repo_root();
 
     let lxmf = read_source(root.join("crates/ratspeak-runtime/src/lxmf.rs")).expect("lxmf");
-    let resolve_destination = lxmf
-        .split("pub async fn resolve_destination")
-        .nth(1)
-        .expect("resolve destination fn");
-    let resolve_destination = resolve_destination
-        .split("// 5s tighter than transport's 15s for interactive responsiveness.")
-        .next()
-        .expect("resolve destination pre-timeout section");
-    assert!(resolve_destination.contains("TransportMessage::AwaitPath"));
-    assert!(
-        !resolve_destination.contains("TransportMessage::RequestPath"),
-        "AwaitPath already requests a path when none exists"
-    );
+    assert!(!lxmf.contains("pub async fn resolve_destination"));
+    assert!(lxmf.contains("self.router.try_send(msg).ok()?;"));
+
+    let messaging = read_source(root.join("crates/ratspeak-tauri/src/commands/messaging.rs"))
+        .expect("messaging commands");
+    assert!(!messaging.contains("TransportMessage::AwaitPath"));
+    assert!(!messaging.contains("resolve_before_send"));
+    assert!(messaging.contains("hydrate_contact_identity_for_send"));
+    assert!(messaging.contains("schedule_announce_after_user_send"));
 
     let handlers = read_source(root.join("crates/ratspeak-runtime/src/announce_handlers.rs"))
         .expect("announce handlers");
@@ -3786,7 +7114,10 @@ fn path_resolution_diagnostics_are_not_duplicate_or_stale() {
     let runtime = read_source(root.join("crates/ratspeak-runtime/src/lib.rs")).expect("runtime");
     assert!(runtime.contains("\"held_announces\": e.held_announces"));
     assert!(runtime.contains("\"burst_active\": e.burst_active"));
-    assert!(runtime.contains("ingress burst active; passive announces may be held"));
+    assert!(runtime.contains("PollActivityObservation::AnnounceIngressBurst"));
+    assert!(runtime.contains("PollActivityObservation::AnnouncesHeld"));
+    assert!(runtime.contains("for observation in activity_observations"));
+    assert!(runtime.contains("record_poll_activity(&state, poll_activity_origin, observation)"));
 
     let rns = read_source(root.join("crates/ratspeak-runtime/src/rns.rs")).expect("rns");
     assert!(rns.contains("\"held_announces\": s.held_announces"));
@@ -3796,7 +7127,10 @@ fn path_resolution_diagnostics_are_not_duplicate_or_stale() {
         read_source(root.join("crates/ratspeak-tauri/src/commands/network.rs")).expect("network");
     assert!(network.contains("dest_hash = dest_hash.to_ascii_lowercase();"));
     assert!(network.contains("async fn ingress_path_diagnostics"));
-    assert!(network.contains("emit_ingress_diagnostics_snapshot(state.inner()).await;"));
+    assert!(
+        network
+            .contains("emit_ingress_diagnostics_snapshot(state.inner(), diagnostics_fence).await;")
+    );
     assert!(network.contains("\"interfaces_holding_announces\""));
 }
 
@@ -3832,14 +7166,49 @@ fn peer_spammer_names_are_ui_suppressed_not_user_blocked() {
     assert!(peers.contains("function _isSuppressedPeerDisplayName(displayName)"));
     assert!(peers.contains("/meshtastic/i.test(name)"));
     assert!(peers.contains("/^![a-f0-9]{8}$/i.test(name)"));
-    assert!(peers.contains("if (_isSuppressedPeerEntry(_cache[h])) continue;"));
-    assert!(peers.contains("return _isSuppressedPeerEntry(entry) ? null : entry;"));
+    assert!(peers.contains("/^[a-f0-9]{8}$/i.test(name)"));
+    assert!(peers.contains("var BARE_HEX_CLUSTER_MIN = 3"));
+    assert!(peers.contains("function _hasKnownPeerEvidence(entry)"));
+    assert!(peers.contains("_hasConversationWith(entry.hash)"));
+    assert!(peers.contains("entry.is_contact || _supportsRatspeakFeatures(entry)"));
+    assert!(peers.contains("services.indexOf('lxst.telephony') !== -1"));
+    assert!(peers.contains("var _hideKnownSpamPeers = true"));
+    assert!(peers.contains("function setHideKnownSpamPeers(enabled)"));
+    assert!(peers.contains("if (_isSuppressedPeerEntry(_cache[h], context)) continue;"));
+    assert!(peers.contains("_isSuppressedPeerEntry(entry, _visibilityContext()) ? null : entry"));
+    assert!(peers.contains("function visibilityContextChanged()"));
+
+    let lxmf = read_source(root.join("dashboard/static/js/lxmf.js")).expect("lxmf js");
+    assert!(lxmf.contains("PeersCache.visibilityContextChanged();"));
+
+    let health = read_source(root.join("dashboard/static/js/health.js")).expect("health js");
+    assert!(health.contains("var peers = PeersCache.enriched();"));
+
+    let index = read_source(root.join("dashboard/index.html")).expect("dashboard index");
+    assert!(index.contains("Hide known spam peers"));
+    assert!(
+        index
+            .contains("Hide repeated bridge-style IDs unless you have saved or messaged the peer.")
+    );
+    assert!(index.contains("id=\"settings-hide-known-spam-peers-on\" value=\"on\" checked"));
 
     let settings = read_source(root.join("dashboard/static/js/settings.js")).expect("settings js");
     assert!(
         !settings.contains("_isSuppressedPeerDisplayName"),
-        "automatic spammer suppression must not appear in the user block list"
+        "the classifier must stay centralized in PeersCache"
     );
+    assert!(settings.contains("set_hide_known_spam_peers"));
+    assert!(settings.contains("PeersCache.setHideKnownSpamPeers"));
+    assert!(settings.contains("renderDashboardPeersList()"));
+
+    let interfaces = read_source(root.join("crates/ratspeak-tauri/src/commands/interfaces.rs"))
+        .expect("interfaces commands");
+    assert!(interfaces.contains("pub async fn set_hide_known_spam_peers"));
+    assert!(interfaces.contains("\"hide_known_spam_peers\""));
+    assert!(interfaces.contains(".is_none_or(|value| value != \"false\")"));
+
+    let tauri_lib = read_source(root.join("src-tauri/src/lib.rs")).expect("tauri lib");
+    assert!(tauri_lib.contains("set_hide_known_spam_peers"));
 }
 
 #[test]
@@ -3916,7 +7285,6 @@ fn propagated_send_paths_run_relay_readiness_preflight() {
         "send_reaction",
         "send_lxmf_reply",
         "send_lxmf_propagated",
-        "send_lxmf_with_attachment",
     ] {
         let marker = format!("pub async fn {fn_name}");
         let start = messaging.find(&marker).expect("send function exists");
@@ -3928,6 +7296,12 @@ fn propagated_send_paths_run_relay_readiness_preflight() {
             "{fn_name} must not bypass propagation relay readiness checks"
         );
     }
+    let attachment_helper = messaging
+        .split("async fn queue_prepared_attachment")
+        .nth(1)
+        .and_then(|source| source.split("\n#[tauri::command]").next())
+        .expect("shared attachment queue helper");
+    assert!(attachment_helper.contains("ensure_propagation_ready_for_send("));
     assert!(messaging.contains("destination_identity_known(state, dest_hash)"));
     assert!(messaging.contains("Recipient identity key is not known yet"));
     assert!(shared.contains("hydrate_contact_identity_for_send"));
@@ -3990,10 +7364,121 @@ fn lxmf_tick_runs_blocking_work_off_async_runtime() {
     let lxmf = read_source(root.join("crates/ratspeak-runtime/src/lxmf.rs")).expect("lxmf source");
 
     assert!(runtime.contains("tokio::task::spawn_blocking(move ||"));
-    assert!(runtime.contains("mgr.tick_with_auto_propagation_download_ready("));
+    // Match the call rather than its line layout so `cargo fmt` cannot break
+    // this source contract by wrapping the receiver onto a preceding line.
+    assert!(
+        runtime.contains("tick_with_auto_propagation_download_ready(auto_inbox_download_ready)")
+    );
     assert!(runtime.contains("lxmf tick worker failed; skipping this tick"));
-    assert!(lxmf.contains("OutboundAction::Failed(message) | OutboundAction::Expired(message)"));
-    assert!(lxmf.contains("expired_or_attempt_exhausted_outbound_surfaces_failed_state"));
+    assert!(lxmf.contains("OutboundAction::Failed(message) =>"));
+    assert!(lxmf.contains("try_auto_propagation_fallback("));
+    assert!(lxmf.contains("OutboundAction::Expired(message) =>"));
+    assert!(lxmf.contains("Do not reinterpret expiry as an"));
+    assert!(lxmf.contains("attempt_exhausted_outbound_surfaces_failed_state"));
+    assert!(lxmf.contains("expired_auto_live_send_does_not_fall_back_to_offline_inbox"));
+}
+
+#[test]
+fn voice_memos_share_lxst_capture_and_the_bounded_lxmf_attachment_path() {
+    let root = repo_root();
+    let memo = read_source(root.join("crates/ratspeak-runtime/src/voice_memo.rs"))
+        .expect("voice memo runtime");
+    let voice =
+        read_source(root.join("crates/ratspeak-runtime/src/voice.rs")).expect("voice runtime");
+    let commands = read_source(root.join("crates/ratspeak-tauri/src/commands/voice.rs"))
+        .expect("voice commands");
+    let messaging = read_source(root.join("dashboard/static/js/lxmf.js")).expect("messaging js");
+    let tauri = read_source(root.join("src-tauri/src/lib.rs")).expect("tauri entrypoint");
+    let system = read_source(root.join("crates/ratspeak-tauri/src/commands/system.rs"))
+        .expect("system commands");
+    let state_js = read_source(root.join("dashboard/static/js/state.js")).expect("state js");
+    let shared_ui = read_source(root.join("dashboard/static/js/ui_shared.js")).expect("shared ui");
+    let voice_memos =
+        read_source(root.join("dashboard/static/js/voice_memos.js")).expect("voice memo js");
+    let android = read_source(
+        root.join("src-tauri/gen/android/app/src/main/java/org/ratspeak/android/MainActivity.kt"),
+    )
+    .expect("android activity");
+    let ios_audio = read_source(root.join("crates/ratspeak-runtime/src/platform_ios.rs"))
+        .expect("ios audio session");
+
+    assert!(memo.contains("const PROFILE: Profile = Profile::QualityMedium"));
+    assert!(memo.contains("crate::voice::start_microphone_capture(PROFILE)"));
+    assert!(voice.contains("pub(crate) fn start_microphone_capture"));
+    assert!(voice.contains("MICROPHONE_CAPTURE_RETRY_DELAYS"));
+    assert!(voice.contains("host.input_devices()"));
+    assert!(voice.contains("pub fn reserve_call_audio"));
+    assert!(voice.contains("pub fn release_call_audio"));
+    let hangup = voice
+        .split("pub async fn hangup")
+        .nth(1)
+        .and_then(|source| source.split("pub async fn reject").next())
+        .expect("hangup implementation");
+    assert_eq!(
+        hangup.matches("release_call_audio").count(),
+        1,
+        "hangup may release an orphaned reservation when the service is absent, \
+         but successful signalling must wait for LXST's terminal event"
+    );
+    assert!(memo.contains("call_audio_reserved"));
+    assert!(memo.contains("_platform_audio_session"));
+    assert!(memo.contains("MAX_CONTAINER_BYTES < rns_protocol::resource::MAX_EFFICIENT_SIZE"));
+    assert!(commands.contains("VOICE_MEMO_START_UNAVAILABLE"));
+    assert!(commands.contains("crate::voice_memo::cancel_recording(&app_state)"));
+    assert!(commands.contains("spawn_blocking(move || crate::voice_memo::decode_voice_memo"));
+    assert!(messaging.contains("RS.invoke('send_lxmf_with_staged_attachment'"));
+    assert!(messaging.contains("_voiceCancelMemoForCall().then(function()"));
+    assert!(state_js.contains("function _rsNativeMicrophonePermission(audio)"));
+    assert!(shared_ui.contains("RS.composer.dismissForReplacement"));
+    assert!(voice_memos.contains("window.addEventListener('pagehide'"));
+    assert!(voice_memos.contains("startVoiceMemoAudioSession"));
+    assert!(voice_memos.contains("handleAudioInterruption"));
+    assert!(voice_memos.contains("RS.audioPlayback.ensure({ installUnlock: true })"));
+    assert!(voice_memos.contains("RS.audioPlayback.context()"));
+    assert!(voice_memos.contains("RS.audioPlayback.isReady()"));
+    assert!(voice_memos.contains("ctx.decodeAudioData"));
+    assert!(voice_memos.contains("RS.invoke('voice_memo_playback_session_start')"));
+    assert!(voice_memos.contains("RS.invoke('voice_memo_playback_session_stop')"));
+    assert!(voice_memos.contains("classes = ['is-recorded']"));
+    assert!(voice_memos.contains("classes.push('is-live')"));
+    assert!(voice_memos.contains("class=\"is-empty\""));
+    assert!(voice_memos.contains("typeof isIOS === 'function' && isIOS()"));
+    assert!(!voice_memos.contains("voice-memo-player-speed"));
+    assert!(!voice_memos.contains("playbackSpeed"));
+    let call_handoff = voice_memos
+        .split("function cancelForCall()")
+        .nth(1)
+        .and_then(|source| source.split("function handleAudioInterruption()").next())
+        .expect("voice memo call handoff");
+    let stop_playback = call_handoff
+        .find("stopAnyPlayback().then")
+        .expect("call handoff stops memo playback");
+    let idle_branch = call_handoff
+        .find("if (recorderState === 'idle')")
+        .expect("call handoff handles an idle recorder");
+    assert!(stop_playback < idle_branch);
+    assert!(system.contains("mobile_background_voice_memo_cancel_failed"));
+    assert!(android.contains("AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE"));
+    assert!(android.contains("fun startVoiceMemoAudioSession(): Boolean"));
+    assert!(ios_audio.contains("AVAudioSessionCategoryPlayAndRecord"));
+    assert!(ios_audio.contains("AVAudioSessionModeVoiceChat"));
+    assert!(ios_audio.contains("AVAudioSessionCategoryPlayback"));
+    assert!(ios_audio.contains("AVAudioSessionModeDefault"));
+    assert!(ios_audio.contains("VOICE_MEMO_PLAYBACK_SESSION_ACTIVE"));
+    for command in [
+        "voice_memo_start",
+        "voice_memo_status",
+        "voice_memo_pause",
+        "voice_memo_stop",
+        "voice_memo_cancel",
+        "voice_memo_playback_session_start",
+        "voice_memo_playback_session_stop",
+        "voice_memo_decode_data",
+        "voice_memo_decode_stored",
+        "voice_memo_inspect_stored",
+    ] {
+        assert!(tauri.contains(&format!("commands::voice::{command}")));
+    }
 }
 
 #[test]
@@ -4019,5 +7504,82 @@ fn bundled_ratspeak_propagation_nodes_are_destination_hashes_with_sync_hub_prior
     assert!(propagation.contains("static_probe_prefers_sync_hub_first"));
     assert!(announce_handlers.contains("let hash_hex = hex::encode(event.destination_hash);"));
     assert!(announce_handlers.contains("mgr.router"));
-    assert!(announce_handlers.contains("set_stamp_cost(event.destination_hash"));
+    assert!(announce_handlers.contains("mgr.update_lxmf_announce_app_data("));
+    assert!(announce_handlers.contains("LXMF_PROPAGATION_APP_NAME"));
+}
+
+#[test]
+fn public_channels_are_adult_gated_reportable_and_link_to_public_policies() {
+    let root = repo_root();
+    let db = read_source(root.join("crates/ratspeak-db/src/db.rs")).expect("database source");
+    let runtime = read_source(root.join("crates/ratspeak-runtime/src/channels.rs"))
+        .expect("channels runtime");
+    let commands = read_source(root.join("crates/ratspeak-tauri/src/commands/channels.rs"))
+        .expect("channels commands");
+    let interfaces = read_source(root.join("crates/ratspeak-tauri/src/commands/interfaces.rs"))
+        .expect("settings commands");
+    let channels =
+        read_source(root.join("dashboard/static/js/channels.js")).expect("channels frontend");
+    let nav = read_source(root.join("dashboard/static/js/nav.js")).expect("navigation frontend");
+    let legal = read_source(root.join("dashboard/static/js/legal_documents.js"))
+        .expect("offline legal documents");
+    let index = read_source(root.join("dashboard/index.html")).expect("dashboard entrypoint");
+    let state = read_source(root.join("dashboard/static/js/state.js")).expect("shared frontend");
+    let tauri = read_source(root.join("src-tauri/src/lib.rs")).expect("tauri entrypoint");
+    let android = read_source(
+        root.join("src-tauri/gen/android/app/src/main/java/org/ratspeak/android/MainActivity.kt"),
+    )
+    .expect("android activity");
+
+    assert!(db.contains("PUBLIC_CHANNEL_CONSENT_VERSION"));
+    assert!(db.contains("PUBLIC_CHANNEL_CONSENT_ACCEPTED_AT_SETTING"));
+    assert!(runtime.contains("has_current_public_channel_consent"));
+    assert!(runtime.contains("hub.desired_connected = false"));
+    assert!(runtime.contains("room.desired_joined = false"));
+    assert!(commands.contains("require_public_channel_consent"));
+    for command in ["connect_channel_hub", "join_channel"] {
+        let block = rust_function_block(&commands, command);
+        assert!(block.contains("require_public_channel_consent"));
+    }
+    assert!(interfaces.contains("adult_confirmed: bool"));
+    assert!(interfaces.contains("independent_hubs_understood: bool"));
+    assert!(interfaces.contains("policies_accepted: bool"));
+    assert!(interfaces.contains("db::try_set_settings"));
+
+    for copy in [
+        "Before you enter public channels",
+        "I am 18 or older.",
+        "I agree to the Terms and Community Guidelines.",
+        "independent hubs may contain unmoderated content",
+    ] {
+        assert!(channels.contains(copy));
+    }
+    for url in [
+        "https://ratspeak.org/privacy.html",
+        "https://ratspeak.org/terms.html",
+        "https://ratspeak.org/community-guidelines.html",
+        "https://ratspeak.org/support.html",
+    ] {
+        assert!(legal.contains(url));
+    }
+    assert!(legal.contains("version: '2026-08-11'"));
+    assert!(legal.contains("Available offline"));
+    assert!(legal.contains("function openDocument(documentId)"));
+    assert!(legal.contains("View current version online"));
+    assert!(legal.contains("Ratspeak does not currently operate a public channel hub."));
+    assert!(legal.contains("Network blackholing may also be available for known identities."));
+    assert!(channels.contains("RS.legal.open(documentId)"));
+    assert!(channels.contains("RS.legal.open('support')"));
+    assert!(nav.contains("data-about-document"));
+    assert!(nav.contains("RS.legal.open(documentId)"));
+    assert!(index.contains("/static/js/legal_documents.js"));
+    assert!(channels.contains("api_blocked_contacts"));
+    assert!(channels.contains("block_contact"));
+    assert!(channels.contains("Report channel content"));
+    assert!(channels.contains("Nothing is sent automatically"));
+    assert!(channels.contains("mail@ratspeak.org"));
+    assert!(state.contains("window.RS.openSupportEmail"));
+    assert!(tauri.contains("fn open_support_email"));
+    assert!(tauri.contains("open_support_email,"));
+    assert!(android.contains("fun openSupportEmail"));
 }

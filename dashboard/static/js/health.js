@@ -285,11 +285,14 @@ function buildIfaceActionItems(ifaceType, ifaceName) {
     var record = getConfiguredInterfaceRecord(ifaceName);
     var supportsPause = !!(record && record.iface && ifaceType !== 'ble_peer');
     var paused = supportsPause && !isInterfaceConfigEnabled(record.iface);
+    var live = supportsPause ? getInterfaceLiveStatus(ifaceName) : null;
+    var statusKnown = !!(lastStats && lastStats.interface_stats);
+    var unavailable = supportsPause && statusKnown && !paused && (!live || live.online === false);
     if (supportsPause) {
         items.push({
-            label: paused ? 'Resume Interface' : 'Pause Interface',
-            icon: paused ? ICON_PLAY : ICON_PAUSE,
-            onSelect: function() { setInterfacePaused(ifaceType, ifaceName, !paused); }
+            label: (paused || unavailable) ? 'Resume Interface' : 'Pause Interface',
+            icon: (paused || unavailable) ? ICON_PLAY : ICON_PAUSE,
+            onSelect: function() { setInterfacePaused(ifaceType, ifaceName, !(paused || unavailable)); }
         });
         items.push({ separator: true });
     }
@@ -305,16 +308,88 @@ function buildIfaceActionItems(ifaceType, ifaceName) {
 
 function setInterfacePaused(ifaceType, ifaceName, paused) {
     var command = paused ? 'pause_interface' : 'resume_interface';
-    RS.invoke(command, {
+    var record = getConfiguredInterfaceRecord(ifaceName);
+    var iface = record && record.iface;
+    var needsUsbPermission = !paused && isAndroid() && iface &&
+        String(iface.port || '').indexOf('androidusb://') === 0;
+
+    function invokeLifecycle() { return RS.invoke(command, {
         args: {
             name: ifaceName,
             iface_type: ifaceType
         }
-    }).then(function() {
+    }); }
+
+    var permission = needsUsbPermission
+        ? requestAndroidUsbResumePermission(ifaceName)
+        : Promise.resolve(true);
+    permission.then(function(granted) {
+        if (!granted) return null;
+        return invokeLifecycle();
+    }).then(function(result) {
+        if (result === null) return;
         showToast(paused ? 'Pausing interface...' : 'Resuming interface...', 'toast-blue', 2500);
         refreshConfigInterfaces();
     }).catch(function(err) {
         showToast((err && err.message) || 'Failed to update interface', 'toast-red', 8000);
+    });
+}
+
+var _androidUsbResumePermission = null;
+
+function requestAndroidUsbResumePermission(ifaceName) {
+    if (!hasAndroidBridge()) {
+        return Promise.reject(new Error('Android USB permission recovery is unavailable'));
+    }
+    if (_androidUsbResumePermission) {
+        if (_androidUsbResumePermission.ifaceName === ifaceName) return Promise.resolve(false);
+        _androidUsbResumePermission.cancel(new Error('A newer USB reconnect was requested'));
+    }
+    return new Promise(function(resolve, reject) {
+        var finished = false;
+        var ownedCallback;
+        function finish(error, granted) {
+            if (finished) return;
+            finished = true;
+            clearTimeout(timeout);
+            if (window._onUsbSelectorPermissionResult === ownedCallback) {
+                window._onUsbSelectorPermissionResult = null;
+            }
+            if (_androidUsbResumePermission &&
+                _androidUsbResumePermission.callback === ownedCallback) {
+                _androidUsbResumePermission = null;
+            }
+            if (error) reject(error);
+            else resolve(!!granted);
+        }
+        var timeout = setTimeout(function() {
+            finish(new Error('USB permission request timed out'));
+        }, 120000);
+        ownedCallback = function(result) {
+            if (result && result.granted) {
+                finish(null, true);
+                return;
+            }
+            var messages = {
+                no_match: 'USB radio is not attached',
+                ambiguous: 'More than one matching USB radio is attached',
+                selector_mismatch: 'The attached USB radio does not match this connection',
+                permission_denied: 'USB permission is required to reconnect the radio',
+                service_unavailable: 'Android USB service is unavailable',
+                request_failed: 'USB permission request failed'
+            };
+            var code = result && result.error_code;
+            finish(new Error(messages[code] || 'USB permission could not be granted'));
+        };
+        window._onUsbSelectorPermissionResult = ownedCallback;
+        _androidUsbResumePermission = {
+            ifaceName: ifaceName,
+            callback: ownedCallback,
+            cancel: function(error) { finish(error || new Error('USB reconnect cancelled')); }
+        };
+        RS.invoke('request_android_usb_permission', { name: ifaceName }).catch(function(error) {
+            finish(error);
+        });
     });
 }
 
@@ -672,9 +747,7 @@ function _resolveBlePeerLabel(peer) {
         if (typeof PeersCache !== 'undefined' && PeersCache && typeof PeersCache.get === 'function') {
             var entry = PeersCache.get(idHash);
             if (entry && entry.display_name && entry.display_name !== '' && entry.display_name !== idHash) {
-                var name = entry.display_name;
-                if (name.length > 40) name = name.substring(0, 40) + '\u2026';
-                return { label: name, title: idHash };
+                return { label: entry.display_name, title: idHash };
             }
         }
         return { label: typeof shortHash === 'function' ? shortHash(idHash, 8, 4) : idHash.substring(0, 12) + '\u2026', title: idHash };
@@ -808,7 +881,63 @@ function emptyInterfaceConfigPayload() {
         tcp_server: [],
         backbone_client: [],
         backbone_server: [],
+        mobile_hardware: {},
     };
+}
+
+function _mobileRnodeHealth(port, mobileHardware) {
+    port = String(port || '');
+    mobileHardware = mobileHardware || {};
+    var state;
+    if (port.indexOf('androidusb://') === 0) {
+        state = mobileHardware.usb_rnode || null;
+        if (!state) return null;
+        var usbLabels = {
+            attached: 'USB detected',
+            detached: 'USB disconnected',
+            permission_granted: 'Reconnecting USB',
+            permission_needed: 'USB permission needed',
+            inventory_changed: 'Waiting for USB',
+        };
+        return {
+            kind: 'usb_rnode',
+            state: state.state,
+            reason: state.reason || '',
+            label: usbLabels[state.state] || 'Waiting for USB',
+            actionable: state.state === 'permission_needed' || state.state === 'detached',
+        };
+    }
+    if (port.indexOf('ble://') === 0) {
+        state = mobileHardware.ble_rnode || null;
+        if (!state || state.state === 'connected') return null;
+        var bleLabels = {
+            connecting: 'Connecting',
+            reconnecting: 'Reconnecting',
+            disabled: 'Disconnected',
+            conflict: 'Radio conflict',
+        };
+        var failedLabels = {
+            bluetooth_off: 'Bluetooth is off',
+            permission_needed: 'Bluetooth permission needed',
+            pairing_required: 'Pairing needed',
+            bond_timeout: 'Pairing timed out',
+            stale_bond: 'Pair again',
+            bridge_unavailable: 'Radio service unavailable',
+            radio_disconnected: 'Reconnecting',
+            connect_failed: 'Connection failed',
+            multiple_configured_radios: 'Radio conflict',
+        };
+        return {
+            kind: 'ble_rnode',
+            state: state.state,
+            reason: state.reason || '',
+            label: state.state === 'failed'
+                ? (failedLabels[state.reason] || 'Connection failed')
+                : (bleLabels[state.state] || 'Waiting for radio'),
+            actionable: state.state === 'failed' || state.state === 'conflict' || state.state === 'disabled',
+        };
+    }
+    return null;
 }
 
 function _interfaceConfigByName(ifaces) {
@@ -830,6 +959,22 @@ function applyNetworkInterfacePayload(ifaces, opts) {
     _cachedConfigByName = _interfaceConfigByName(ifaces);
     if (opts.render !== false) _renderConnectionsFromCache();
     if (typeof refreshConnectPublicServers === 'function') refreshConnectPublicServers(ifaces);
+}
+
+function applyMobileHardwareState(data) {
+    if (!data || (data.kind !== 'usb_rnode' && data.kind !== 'ble_rnode')) return;
+    if (!data.state || typeof data.state !== 'string') return;
+    if (!_cachedConfigIfaces) _cachedConfigIfaces = emptyInterfaceConfigPayload();
+    if (!_cachedConfigIfaces.mobile_hardware) _cachedConfigIfaces.mobile_hardware = {};
+    _cachedConfigIfaces.mobile_hardware[data.kind] = {
+        kind: data.kind,
+        state: data.state,
+        reason: typeof data.reason === 'string' ? data.reason : '',
+    };
+    if (window._hubInterfacesData) {
+        window._hubInterfacesData.mobile_hardware = _cachedConfigIfaces.mobile_hardware;
+    }
+    _renderConnectionsFromCache();
 }
 
 function clearNetworkInterfaceCaches(opts) {
@@ -907,14 +1052,23 @@ function _renderConnectionsFromCache() {
         Object.keys(configByName).forEach(function(cn) {
             if (matchedConfigNames[cn]) return;
             var record = configByName[cn];
-            if (!record || !record.iface || isInterfaceConfigEnabled(record.iface)) return;
+            if (!record || !record.iface) return;
+            var enabled = isInterfaceConfigEnabled(record.iface);
+            var port = String(record.iface.port || '');
+            var waitingForAndroidUsb = enabled && port.indexOf('androidusb://') === 0;
+            var mobileHealth = enabled
+                ? _mobileRnodeHealth(port, ifaces.mobile_hardware)
+                : null;
+            if (enabled && !waitingForAndroidUsb && !mobileHealth) return;
             var section = interfaceSectionForConfigType(record.ifaceType);
             if (!section) return;
             allIfaces.push({
                 iface: record.iface,
                 section: section,
                 ifaceType: record.ifaceType,
-                paused: true
+                paused: !enabled,
+                waitingForDevice: waitingForAndroidUsb,
+                mobileHealth: mobileHealth,
             });
         });
 
@@ -966,11 +1120,21 @@ function _renderConnectionsFromCache() {
                 var iface = item.iface;
                 var ifaceType = item.ifaceType;
                 var paused = !!item.paused;
+                var waitingForDevice = !!item.waitingForDevice;
                 var name = iface.name || 'unknown';
                 var typeName = iface.type || '';
+                var mobileHealth = item.mobileHealth || _mobileRnodeHealth(
+                    iface.port,
+                    ifaces.mobile_hardware
+                );
 
                 var liveData = (typeof getInterfaceLiveStatus === 'function') ? getInterfaceLiveStatus(name) : null;
                 var online = liveData ? (liveData.online !== false) : false;
+                // Native USB inventory is ambient and intentionally carries no
+                // serial/path into the WebView. Never project a global negative
+                // state onto an exact interface that live transport stats prove
+                // is online.
+                if (online) mobileHealth = null;
                 var statusClass = paused ? 'paused' : (online ? 'up' : 'down');
 
                 var txb = 0, rxb = 0, txRate = 0, rxRate = 0;
@@ -1020,6 +1184,12 @@ function _renderConnectionsFromCache() {
                 }
                 if (paused) {
                     pillHtml += '<span class="conn-iface-pill conn-iface-pill-paused">Paused</span>';
+                } else if (mobileHealth) {
+                    pillHtml += '<span class="conn-iface-pill" role="status" title="' +
+                        escapeHtml(mobileHealth.label) + '">' +
+                        escapeHtml(mobileHealth.label) + '</span>';
+                } else if (waitingForDevice) {
+                    pillHtml += '<span class="conn-iface-pill" role="status">Waiting for USB</span>';
                 }
 
                 // Augment label with non-default group ID (matches Python rnsd).
@@ -1158,16 +1328,14 @@ function showInterfaceActionSheet(ifaceType, ifaceName) {
         itemsEl.appendChild(btn);
     });
 
-    overlay.classList.add('active');
-    sheet.classList.add('open');
+    RS.ui.openExistingSheet(sheet, overlay);
     overlay.onclick = function() { closeInterfaceActionSheet(); };
 }
 
 function closeInterfaceActionSheet() {
     var overlay = document.getElementById('iface-action-overlay');
     var sheet = document.getElementById('iface-action-sheet');
-    if (overlay) overlay.classList.remove('active');
-    if (sheet) sheet.classList.remove('open');
+    if (sheet) RS.ui.closeExistingSheet(sheet, overlay);
 }
 
 function toggleConnSection(headerEl) {
@@ -1308,8 +1476,12 @@ function initNetworkSubtabs() {
         var btn = e.target.closest('.network-subtab-btn');
         if (!btn) return;
         var tab = btn.dataset.subtab;
-        bar.querySelectorAll('.network-subtab-btn').forEach(function(b) { b.classList.remove('active'); });
+        bar.querySelectorAll('.network-subtab-btn').forEach(function(b) {
+            b.classList.remove('active');
+            b.setAttribute('aria-selected', 'false');
+        });
         btn.classList.add('active');
+        btn.setAttribute('aria-selected', 'true');
         main.className = main.className.replace(/subtab-\w+/g, '').trim() + ' subtab-' + tab;
     });
 }

@@ -15,9 +15,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.25</string>
+	<string>1.0.26</string>
 	<key>CFBundleVersion</key>
-	<string>1.0.25</string>
+	<string>1.0.26</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>
@@ -30,20 +30,16 @@
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
-		<string>UIInterfaceOrientationLandscapeLeft</string>
-		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 	<key>UISupportedInterfaceOrientations~ipad</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
 		<string>UIInterfaceOrientationPortraitUpsideDown</string>
-		<string>UIInterfaceOrientationLandscapeLeft</string>
-		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>Ratspeak uses Bluetooth to connect to RNode LoRa radios and Ratlow mesh devices for off-grid communication.</string>
+	<string>Ratspeak uses Bluetooth to connect to hardware nodes and other Bluetooth peers when enabled.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
-	<string>Ratspeak uses Bluetooth to connect to RNode LoRa radios and Ratlow mesh devices for off-grid communication.</string>
+	<string>Ratspeak uses Bluetooth to connect to hardware nodes and other Bluetooth peers when enabled.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Required when you enable a TCP, Local, or Bluetooth Peer interface in Network settings so Ratspeak can reach other nodes on your local network.</string>
 	<key>NSCameraUsageDescription</key>
@@ -53,7 +49,7 @@
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Ratspeak saves received images to your photo library when you choose Save to Photos.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Ratspeak uses your microphone for voice calls and when recording videos to send in a message.</string>
+	<string>Ratspeak uses your microphone for voice calls, voice messages, and videos you choose to record.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_reticulum._udp</string>
@@ -63,6 +59,17 @@
 		<string>audio</string>
 		<string>bluetooth-central</string>
 		<string>bluetooth-peripheral</string>
+	</array>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>ratspeak</string>
+			</array>
+			<key>CFBundleURLName</key>
+			<string>ratspeak</string>
+		</dict>
 	</array>
 </dict>
 </plist>

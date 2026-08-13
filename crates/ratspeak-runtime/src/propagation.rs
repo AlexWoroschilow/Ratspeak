@@ -469,43 +469,45 @@ pub fn mark_relay_path_success(state: &AppState, hash: [u8; 16]) {
     let is_static = static_set.contains(&hash);
     let now = now_f64();
     let hash_hex = hex::encode(hash);
-    if let Ok(mut registry) = state.discovered_propagation_nodes.lock()
-        && let Some(value) = registry.get_mut(&hash_hex)
-        && let Some(obj) = value.as_object_mut()
-    {
-        if is_static {
-            obj.insert("static_status".to_string(), json!("reachable"));
-        }
-        obj.insert("path_status".to_string(), json!("reachable"));
-        obj.insert("last_success".to_string(), json!(now));
-        obj.insert("last_path_success".to_string(), json!(now));
-        obj.insert("failure_count".to_string(), json!(0));
-        obj.insert("backoff_until".to_string(), serde_json::Value::Null);
-        obj.insert("last_failure_reason".to_string(), serde_json::Value::Null);
-        if is_static {
-            obj.insert("static".to_string(), json!(true));
-            let node_state_usable = matches!(
-                obj.get("node_state")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown"),
-                "enabled" | "known"
-            );
-            let node_state_disabled = obj
-                .get("node_state")
-                .and_then(|v| v.as_str())
-                .is_some_and(|s| s == "disabled");
-            if !node_state_usable && !node_state_disabled {
-                obj.insert("node_state".to_string(), json!("known"));
+    if let Ok(mut registry) = state.discovered_propagation_nodes.lock() {
+        if let Some(obj) = registry
+            .get_mut(&hash_hex)
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            if is_static {
+                obj.insert("static_status".to_string(), json!("reachable"));
             }
-            if let Some(node) = static_nodes::node_for(&hash) {
-                obj.entry("display_name".to_string())
-                    .or_insert_with(|| json!(node.display_name.clone()));
-                obj.entry("region".to_string())
-                    .or_insert_with(|| json!(node.region.clone()));
-                obj.entry("role".to_string())
-                    .or_insert_with(|| json!(node.role.clone()));
-                obj.entry("priority".to_string())
-                    .or_insert(json!(node.priority));
+            obj.insert("path_status".to_string(), json!("reachable"));
+            obj.insert("last_success".to_string(), json!(now));
+            obj.insert("last_path_success".to_string(), json!(now));
+            obj.insert("failure_count".to_string(), json!(0));
+            obj.insert("backoff_until".to_string(), serde_json::Value::Null);
+            obj.insert("last_failure_reason".to_string(), serde_json::Value::Null);
+            if is_static {
+                obj.insert("static".to_string(), json!(true));
+                let node_state_usable = matches!(
+                    obj.get("node_state")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown"),
+                    "enabled" | "known"
+                );
+                let node_state_disabled = obj
+                    .get("node_state")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| s == "disabled");
+                if !node_state_usable && !node_state_disabled {
+                    obj.insert("node_state".to_string(), json!("known"));
+                }
+                if let Some(node) = static_nodes::node_for(&hash) {
+                    obj.entry("display_name".to_string())
+                        .or_insert_with(|| json!(node.display_name.clone()));
+                    obj.entry("region".to_string())
+                        .or_insert_with(|| json!(node.region.clone()));
+                    obj.entry("role".to_string())
+                        .or_insert_with(|| json!(node.role.clone()));
+                    obj.entry("priority".to_string())
+                        .or_insert(json!(node.priority));
+                }
             }
         }
     }
@@ -520,25 +522,27 @@ pub fn mark_relay_transaction_success(state: &AppState, hash: [u8; 16], kind: &s
     let is_static = static_set.contains(&hash);
     let now = now_f64();
     let hash_hex = hex::encode(hash);
-    if let Ok(mut registry) = state.discovered_propagation_nodes.lock()
-        && let Some(value) = registry.get_mut(&hash_hex)
-        && let Some(obj) = value.as_object_mut()
-    {
-        if is_static {
-            obj.insert("static_status".to_string(), json!("reachable"));
-            obj.insert("static".to_string(), json!(true));
+    if let Ok(mut registry) = state.discovered_propagation_nodes.lock() {
+        if let Some(obj) = registry
+            .get_mut(&hash_hex)
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            if is_static {
+                obj.insert("static_status".to_string(), json!("reachable"));
+                obj.insert("static".to_string(), json!(true));
+            }
+            obj.insert("path_status".to_string(), json!("reachable"));
+            obj.insert("transaction_status".to_string(), json!(kind));
+            obj.insert("last_success".to_string(), json!(now));
+            match kind {
+                "deposit_ok" => obj.insert("last_deposit_success".to_string(), json!(now)),
+                "sync_ok" => obj.insert("last_sync_success".to_string(), json!(now)),
+                _ => None,
+            };
+            obj.insert("failure_count".to_string(), json!(0));
+            obj.insert("backoff_until".to_string(), serde_json::Value::Null);
+            obj.insert("last_failure_reason".to_string(), serde_json::Value::Null);
         }
-        obj.insert("path_status".to_string(), json!("reachable"));
-        obj.insert("transaction_status".to_string(), json!(kind));
-        obj.insert("last_success".to_string(), json!(now));
-        match kind {
-            "deposit_ok" => obj.insert("last_deposit_success".to_string(), json!(now)),
-            "sync_ok" => obj.insert("last_sync_success".to_string(), json!(now)),
-            _ => None,
-        };
-        obj.insert("failure_count".to_string(), json!(0));
-        obj.insert("backoff_until".to_string(), serde_json::Value::Null);
-        obj.insert("last_failure_reason".to_string(), serde_json::Value::Null);
     }
 }
 
@@ -547,27 +551,27 @@ pub fn mark_relay_failure(state: &AppState, hash: [u8; 16], reason: &str) {
     let is_static = static_set.contains(&hash);
     let now = now_f64();
     let hash_hex = hex::encode(hash);
-    if let Ok(mut registry) = state.discovered_propagation_nodes.lock()
-        && let Some(value) = registry.get_mut(&hash_hex)
-    {
-        let failures = value
-            .get("failure_count")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0)
-            + 1;
-        if let Some(obj) = value.as_object_mut() {
-            if is_static {
-                obj.insert("static_status".to_string(), json!("failed"));
-                obj.insert("static".to_string(), json!(true));
+    if let Ok(mut registry) = state.discovered_propagation_nodes.lock() {
+        if let Some(value) = registry.get_mut(&hash_hex) {
+            let failures = value
+                .get("failure_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                + 1;
+            if let Some(obj) = value.as_object_mut() {
+                if is_static {
+                    obj.insert("static_status".to_string(), json!("failed"));
+                    obj.insert("static".to_string(), json!(true));
+                }
+                obj.insert("path_status".to_string(), json!("failed"));
+                obj.insert("transaction_status".to_string(), json!("failed"));
+                obj.insert("failure_count".to_string(), json!(failures));
+                obj.insert(
+                    "backoff_until".to_string(),
+                    json!(now + static_probe_backoff(failures)),
+                );
+                obj.insert("last_failure_reason".to_string(), json!(reason));
             }
-            obj.insert("path_status".to_string(), json!("failed"));
-            obj.insert("transaction_status".to_string(), json!("failed"));
-            obj.insert("failure_count".to_string(), json!(failures));
-            obj.insert(
-                "backoff_until".to_string(),
-                json!(now + static_probe_backoff(failures)),
-            );
-            obj.insert("last_failure_reason".to_string(), json!(reason));
         }
     }
 }
@@ -663,47 +667,34 @@ async fn transport_query(
 
 async fn relay_path_snapshot(state: &AppState) -> RelayPathSnapshot {
     let now = now_f64();
-    let Some(TransportQueryResponse::PathTable(paths)) =
-        transport_query(state, TransportQuery::GetPathTable).await
-    else {
-        return RelayPathSnapshot {
-            state: RelayPathState::TransportUnavailable,
-            live_paths: HashSet::new(),
-        };
-    };
-
-    let interface_online: Option<std::collections::HashMap<String, bool>> =
-        match transport_query(state, TransportQuery::GetInterfaceStats).await {
-            Some(TransportQueryResponse::InterfaceStats(stats)) => {
-                if stats.is_empty() {
-                    None
-                } else {
-                    Some(stats.into_iter().map(|s| (s.name, s.online)).collect())
-                }
-            }
-            _ => None,
-        };
-    let any_interface_online = interface_online
-        .as_ref()
-        .map(|m| m.values().any(|online| *online))
-        .unwrap_or(true);
-    if !any_interface_online {
+    if matches!(crate::any_interface_online_cached(state), Some(false)) {
         return RelayPathSnapshot {
             state: RelayPathState::Offline,
             live_paths: HashSet::new(),
         };
     }
 
+    let handle = state
+        .rns
+        .read()
+        .ok()
+        .and_then(|rns| rns.as_ref().map(|mgr| mgr.handle.clone()));
+    let Some(handle) = handle else {
+        return RelayPathSnapshot {
+            state: RelayPathState::TransportUnavailable,
+            live_paths: HashSet::new(),
+        };
+    };
+    let Some(paths) = crate::transport_observation::authoritative_path_table(&handle).await else {
+        return RelayPathSnapshot {
+            state: RelayPathState::TransportUnavailable,
+            live_paths: HashSet::new(),
+        };
+    };
+
     let live_paths = paths
         .into_iter()
         .filter(|entry| entry.expires > now)
-        .filter(|entry| {
-            interface_online
-                .as_ref()
-                .and_then(|m| m.get(&entry.interface))
-                .copied()
-                .unwrap_or(true)
-        })
         .map(|entry| entry.hash)
         .collect::<HashSet<_>>();
 
@@ -805,11 +796,17 @@ pub async fn request_relay_path(state: &Arc<AppState>, hash: [u8; 16]) {
         .ok()
         .and_then(|g| g.as_ref().map(|mgr| mgr.handle.transport_tx.clone()));
     if let Some(tx) = transport_tx {
-        let _ = tx
-            .send(TransportMessage::RequestPath {
+        if tx
+            .try_send(TransportMessage::RequestPath {
                 destination_hash: hash,
             })
-            .await;
+            .is_err()
+        {
+            tracing::debug!(
+                destination = %crate::short_id(&hex::encode(hash)),
+                "relay path request could not enter the transport queue"
+            );
+        }
     }
 }
 
@@ -841,8 +838,8 @@ fn auto_relay_change_deferred_by_pending_deposit(state: &AppState, next: Option<
     }
 
     tracing::info!(
-        current = ?current.map(hex::encode),
-        next = ?next.map(hex::encode),
+        has_current = current.is_some(),
+        has_next = next.is_some(),
         "deferred auto propagation relay change until pending propagated send finishes"
     );
     true
@@ -854,7 +851,7 @@ async fn relay_send_ready_or_waiting(state: &Arc<AppState>, hash: [u8; 16]) -> R
     } else {
         request_relay_path(state, hash).await;
         tracing::info!(
-            node = %hex::encode(hash),
+        node = %crate::short_id(&hex::encode(hash)),
             "Offline Inbox path is reachable, waiting for LXMF propagation identity/stamp metadata"
         );
         RelayReadiness::Waiting
@@ -890,10 +887,10 @@ pub async fn apply_auto_selection(state: &Arc<AppState>, hash: [u8; 16]) {
 
     let st = state.clone();
     let _ = tokio::task::spawn_blocking(move || {
-        if let Ok(mut lxmf) = st.lxmf.lock()
-            && let Some(mgr) = lxmf.as_mut()
-        {
-            mgr.set_runtime_propagation_node(Some(hash));
+        if let Ok(mut lxmf) = st.lxmf.lock() {
+            if let Some(mgr) = lxmf.as_mut() {
+                mgr.set_runtime_propagation_node(Some(hash));
+            }
         }
     })
     .await;
@@ -904,7 +901,7 @@ pub async fn apply_auto_selection(state: &Arc<AppState>, hash: [u8; 16]) {
 
     emit_propagation_update(state);
     tracing::info!(
-        node = %hex_hash,
+        node = %crate::short_id(&hex_hash),
         "auto-selected propagation node"
     );
 }
@@ -913,10 +910,10 @@ pub async fn apply_auto_selection(state: &Arc<AppState>, hash: [u8; 16]) {
 pub async fn clear_auto_selection(state: &Arc<AppState>) {
     let st = state.clone();
     let _ = tokio::task::spawn_blocking(move || {
-        if let Ok(mut lxmf) = st.lxmf.lock()
-            && let Some(mgr) = lxmf.as_mut()
-        {
-            mgr.set_runtime_propagation_node(None);
+        if let Ok(mut lxmf) = st.lxmf.lock() {
+            if let Some(mgr) = lxmf.as_mut() {
+                mgr.set_runtime_propagation_node(None);
+            }
         }
     })
     .await;
@@ -977,7 +974,7 @@ async fn reselect_from_live_paths_after_probe(state: &Arc<AppState>) {
     promote_static_live_paths(state, &snapshot.live_paths);
     let current = state.auto_active_node.read().ok().and_then(|g| *g);
     if let Some(winner) = auto_select_node_with_live_paths(state, &snapshot.live_paths)
-        && current != Some(winner)
+        .filter(|winner| current != Some(*winner))
     {
         if auto_relay_change_deferred_by_pending_deposit(state, Some(winner)) {
             emit_propagation_update(state);
@@ -1022,7 +1019,7 @@ pub async fn ensure_relay_ready_for_send(state: &Arc<AppState>) -> RelayReadines
 
             let active = state.auto_active_node.read().ok().and_then(|g| *g);
             if let Some(winner) = auto_select_node_with_live_paths(state, &snapshot.live_paths)
-                && active != Some(winner)
+                .filter(|winner| active != Some(*winner))
             {
                 if auto_relay_change_deferred_by_pending_deposit(state, Some(winner)) {
                     if let Some(active) = active {
@@ -1094,7 +1091,7 @@ pub async fn reconcile_active_auto_node(state: &Arc<AppState>) {
     promote_static_live_paths(state, &snapshot.live_paths);
 
     if let Some(winner) = auto_select_node_with_live_paths(state, &snapshot.live_paths)
-        && active != winner
+        .filter(|winner| active != *winner)
     {
         if auto_relay_change_deferred_by_pending_deposit(state, Some(winner)) {
             emit_propagation_update(state);
@@ -1146,14 +1143,14 @@ pub async fn refresh_paths(state: &Arc<AppState>, ignore_throttle: bool) -> Refr
         return RefreshOutcome::Sent { count: 0 };
     }
 
-    if !ignore_throttle && let Ok(mut last) = state.last_refresh_request_at.lock() {
-        let now = Instant::now();
-        if let Some(prev) = *last
-            && now.duration_since(prev) < REFRESH_THROTTLE
-        {
-            return RefreshOutcome::Throttled;
+    if !ignore_throttle {
+        if let Ok(mut last) = state.last_refresh_request_at.lock() {
+            let now = Instant::now();
+            if last.is_some_and(|prev| now.duration_since(prev) < REFRESH_THROTTLE) {
+                return RefreshOutcome::Throttled;
+            }
+            *last = Some(now);
         }
-        *last = Some(now);
     }
 
     let transport_tx = state
@@ -1178,15 +1175,15 @@ pub async fn refresh_paths(state: &Arc<AppState>, ignore_throttle: bool) -> Refr
     let mut candidates: Vec<[u8; 16]> = select_static_probe_candidates(state, static_kind, now);
     let static_candidates = candidates.clone();
 
-    if !(ignore_throttle || mode == PropagationMode::Auto && favor_static)
-        && let Ok(reg) = state.discovered_propagation_nodes.lock()
-    {
-        let static_set = static_nodes::hash_set();
-        let mut discovered = Vec::new();
-        for hash_hex in reg.keys() {
-            if let Ok(bytes) = hex::decode(hash_hex)
-                && bytes.len() == 16
-            {
+    if !(ignore_throttle || mode == PropagationMode::Auto && favor_static) {
+        if let Ok(reg) = state.discovered_propagation_nodes.lock() {
+            let static_set = static_nodes::hash_set();
+            let mut discovered = Vec::new();
+            for hash_hex in reg.keys() {
+                let Some(bytes) = hex::decode(hash_hex).ok().filter(|bytes| bytes.len() == 16)
+                else {
+                    continue;
+                };
                 let mut h = [0u8; 16];
                 h.copy_from_slice(&bytes);
                 let Some(value) = reg.get(hash_hex) else {
@@ -1199,12 +1196,12 @@ pub async fn refresh_paths(state: &Arc<AppState>, ignore_throttle: bool) -> Refr
                     discovered.push(h);
                 }
             }
-        }
-        discovered.sort();
-        discovered.truncate(DISCOVERED_REFRESH_BUDGET);
-        for h in discovered {
-            if !candidates.contains(&h) {
-                candidates.push(h);
+            discovered.sort();
+            discovered.truncate(DISCOVERED_REFRESH_BUDGET);
+            for h in discovered {
+                if !candidates.contains(&h) {
+                    candidates.push(h);
+                }
             }
         }
     }
@@ -1241,18 +1238,19 @@ pub async fn probe_static_nodes_background(state: &Arc<AppState>) {
         return;
     }
 
-    if let Ok(current) = state.auto_active_node.read()
-        && let Some(hash) = *current
-        && static_probe_goal_satisfied_by_active(&hash)
-    {
+    let active_static_satisfies_goal = state
+        .auto_active_node
+        .read()
+        .ok()
+        .and_then(|current| *current)
+        .is_some_and(|hash| static_probe_goal_satisfied_by_active(&hash));
+    if active_static_satisfies_goal {
         return;
     }
 
     if let Ok(mut last) = state.last_static_probe_at.lock() {
         let now = Instant::now();
-        if let Some(prev) = *last
-            && now.duration_since(prev) < STATIC_BACKGROUND_INTERVAL
-        {
+        if last.is_some_and(|prev| now.duration_since(prev) < STATIC_BACKGROUND_INTERVAL) {
             return;
         }
         *last = Some(now);
@@ -1338,7 +1336,7 @@ pub async fn handle_sync_failure(state: &Arc<AppState>) {
     if hit_threshold {
         mark_relay_failure(state, node, "sync_failure_threshold");
         tracing::warn!(
-            node = %hex::encode(node),
+            node = %crate::short_id(&hex::encode(node)),
             "propagation node hit 3 failures within 30 min — dropping from auto-selection"
         );
         if auto_relay_change_deferred_by_pending_deposit(state, None) {
@@ -1444,12 +1442,7 @@ pub fn get_status_payload(state: &AppState) -> serde_json::Value {
         } else {
             None
         };
-        let (count, cost) = if let Ok(slot) = state.propagation_node.lock()
-            && let Some(node) = slot.as_ref()
-            && let Ok(node) = node.lock()
-        {
-            (node.message_count(), node.min_stamp_cost())
-        } else {
+        let fallback = || {
             (
                 0,
                 state
@@ -1457,6 +1450,18 @@ pub fn get_status_payload(state: &AppState) -> serde_json::Value {
                     .load(std::sync::atomic::Ordering::Relaxed),
             )
         };
+        let (count, cost) = state
+            .propagation_node
+            .lock()
+            .ok()
+            .and_then(|slot| {
+                slot.as_ref().and_then(|node| {
+                    node.lock()
+                        .ok()
+                        .map(|node| (node.message_count(), node.min_stamp_cost()))
+                })
+            })
+            .unwrap_or_else(fallback);
         (hash, count, cost)
     };
     let hosting_enabled = state
@@ -1693,10 +1698,10 @@ mod tests {
         let auto_node = [0x34; 16];
         let identity_id = install_lxmf_manager(&state, "auto", manual_node);
 
-        if let Ok(mut lxmf) = state.lxmf.lock()
-            && let Some(mgr) = lxmf.as_mut()
-        {
-            mgr.enable_propagation(true, &state.db, &identity_id);
+        if let Ok(mut lxmf) = state.lxmf.lock() {
+            if let Some(mgr) = lxmf.as_mut() {
+                mgr.enable_propagation(true, &state.db, &identity_id);
+            }
         }
 
         apply_auto_selection(&state, auto_node).await;
@@ -2037,7 +2042,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_send_metadata_requires_identity_and_stamp_cost() {
+    fn relay_send_metadata_requires_identity_stamp_cost_and_transfer_limit() {
         let state = make_state();
         let node = sync_hub_hash();
         let node_hex = hex::encode(node);
@@ -2052,6 +2057,16 @@ mod tests {
         assert!(!mgr.propagation_node_ready_for_send(&node));
 
         mgr.router.set_stamp_cost(node, 0);
+        assert!(!mgr.propagation_node_ready_for_send(&node));
+        let announce =
+            lxmf_core::handlers::PropagationNodeAnnounceData::new(true, 256, 10240, 0, 0, 0);
+        assert!(mgr.update_lxmf_announce_app_data(
+            node,
+            rns_identity::name_hash::name_hash(ratspeak_core::LXMF_PROPAGATION_APP_NAME),
+            Some(&lxmf_core::handlers::get_propagation_node_app_data(
+                &announce,
+            )),
+        ));
         assert!(mgr.propagation_node_ready_for_send(&node));
 
         *state.lxmf.lock().unwrap() = Some(mgr);

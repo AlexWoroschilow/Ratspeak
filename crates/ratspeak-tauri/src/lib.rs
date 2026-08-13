@@ -9,6 +9,9 @@
 
 pub mod commands;
 pub mod config;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub mod diagnostic_writer;
+pub mod diagnostics;
 pub mod emitter;
 pub mod error;
 pub mod notifier;
@@ -24,13 +27,18 @@ pub use ratspeak_runtime::platform_ios;
 pub use ratspeak_runtime::shutdown_ble_peer_for_exit;
 #[cfg(feature = "lxst-voice")]
 pub use ratspeak_runtime::voice;
+#[cfg(feature = "lxst-voice")]
+pub use ratspeak_runtime::voice_memo;
 pub use ratspeak_runtime::{
-    announce_handlers, helpers, identity_prune, lxmf, propagation, rns, rns_config, state,
+    announce_handlers, channel_hub, channels, helpers, identity_prune, lxmf, mobile_platform,
+    propagation, rns, rns_config, state,
 };
 pub use ratspeak_runtime::{
     any_interface_online_cached, apply_lxmf_settings_from_state, init_rns_lxmf,
-    maybe_opportunistic_announce_before_user_send, restart_rns_lxmf, send_announce_from_state,
-    send_manual_announce_from_state, shutdown_rns_lxmf,
+    maybe_opportunistic_announce_before_user_send,
+    maybe_opportunistic_announce_before_user_send_from_origin, restart_rns_lxmf,
+    send_announce_from_origin, send_announce_from_state, send_manual_announce_from_origin,
+    send_manual_announce_from_state, shutdown_rns_lxmf, start_channel_hub_service,
 };
 
 use std::sync::Arc;
@@ -62,8 +70,9 @@ pub async fn init_core(
     let app_state = Arc::new(AppState::new(config.clone(), db_pool, emitter, notifier));
     app_state.set_startup_stage("checking");
 
-    // Relay BLE diagnostics → `ble_diag` events.
-    commands::ble::spawn_ble_diag_broadcaster(&app_state);
+    // Relay typed BLE pairing/product events. Raw ble_diag strings are never
+    // forwarded across IPC.
+    commands::ble::spawn_ble_event_broadcaster(&app_state);
 
     // Relay AutoInterface events → `auto_unavailable` / `auto_carrier_state`.
     commands::interfaces::spawn_auto_event_broadcaster(&app_state);
@@ -71,7 +80,10 @@ pub async fn init_core(
     let init_state = app_state.clone();
     let init_data_dir = data_dir.clone();
     tokio::spawn(async move {
-        init_rns_lxmf(Arc::clone(&init_state), init_data_dir).await;
+        {
+            let _identity_lifecycle = init_state.identity_switch_lock.lock().await;
+            init_rns_lxmf(Arc::clone(&init_state), init_data_dir).await;
+        }
         commands::ble::restore_ble_peer_if_requested(init_state).await;
     });
 

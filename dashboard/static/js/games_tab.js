@@ -11,6 +11,8 @@
     // Pre-mutation snapshot per session_id; restored on game_action_result failure.
     var _optimisticBackup = {};
     var _celebratedWins = {};
+    var _actionInFlight = {};
+    var _manifestsById = {};
 
     var WIN_LINES = [
         [0,1,2],[3,4,5],[6,7,8],
@@ -60,14 +62,38 @@
         return myHash && hash === myHash;
     }
 
+    function _sessionValue(session, key, fallback) {
+        return RS.games.state.value(session, key, fallback);
+    }
+
+    function _drawOfferOwner(session) {
+        return _sessionValue(session, 'draw_offered_by', '');
+    }
+
     function _appId(session) {
         return (session && (session.app_id || session.game)) || '';
+    }
+
+    function _gameView(appId) {
+        return RS.games && RS.games.views ? RS.games.views.get(appId) : null;
+    }
+
+    function _gameViewContext(session, root) {
+        return {
+            root: root || document,
+            isMe: function(hash) { return _isMe(session, hash); },
+            myHash: function() { return _getMyHash(session); },
+            contactName: _contactName,
+            sendMove: function(payload, optimistic) {
+                return _sendGameViewMove(session, payload, optimistic);
+            },
+        };
     }
 
     function _isViewingSession(sessionId) {
         if (!sessionId || _selectedSessionId !== sessionId) return false;
         if (typeof currentView === 'undefined' || currentView !== 'games') return false;
-        if (typeof isMobile === 'function' && isMobile()) {
+        if (typeof isCompactLayout === 'function' && isCompactLayout()) {
             if (typeof RS === 'undefined' || !RS.viewStack || typeof RS.viewStack.top !== 'function') {
                 return false;
             }
@@ -106,23 +132,13 @@
 
     function _celebrationOptions(session) {
         var appId = _appId(session);
-        var opts = {
-            count: appId === 'chess' ? 72 : 48,
-            duration: appId === 'chess' ? 1900 : 1600,
-        };
-
-        if (appId === 'chess') {
-            var cs = getComputedStyle(document.documentElement);
-            opts.colors = [
-                '#dce1e8',
-                '#5f7185',
-                (cs.getPropertyValue('--accent') || '#D2693B').trim(),
-                (cs.getPropertyValue('--status-online') || '#2E8B57').trim(),
-                (cs.getPropertyValue('--ble-accent') || '#0E9AA7').trim(),
-            ];
-        }
-
-        var target = document.querySelector(appId === 'chess' ? '.chess-board' : '.ttt-grid');
+        var view = _gameView(appId);
+        var opts = view && view.celebrationOptions
+            ? view.celebrationOptions(session, _gameViewContext(session))
+            : { count: 48, duration: 1600 };
+        var target = view && view.boardSelector
+            ? document.querySelector(view.boardSelector)
+            : null;
         if (target) {
             var rect = target.getBoundingClientRect();
             if (rect.width > 0 && rect.height > 0) {
@@ -134,7 +150,8 @@
     }
 
     function _maybeCelebrateWin(session) {
-        if (!session || session.status !== 'completed' || !_isMe(session, session.winner)) return;
+        if (!session || session.status !== 'completed' ||
+                !_isMe(session, _sessionValue(session, 'winner', ''))) return;
         if (!session.game_id || _celebratedWins[session.game_id]) return;
 
         _celebratedWins[session.game_id] = true;
@@ -152,6 +169,16 @@
             state === 'sending_via_link' ||
             state === 'reusing_direct_link' ||
             state === 'reusing_backchannel';
+    }
+
+    function _activeMoveDeliveryText(state) {
+        if (_isSendingDeliveryState(state) || state === 'pending' || state === 'routing') {
+            return 'Sending move…';
+        }
+        if (state === 'propagating') return 'Storing move in Offline Inbox…';
+        if (state === 'sent') return 'Move sent';
+        if (state === 'failed') return 'Move failed — tap Resend';
+        return '';
     }
 
     function _statusText(session) {
@@ -183,34 +210,35 @@
         }
         if (status === 'expired') return 'Expired';
         if (status === 'completed') {
-            var t = session.terminal || '';
+            var t = _sessionValue(session, 'terminal', '');
+            var winner = _sessionValue(session, 'winner', '');
             if (t === 'draw') return 'Draw';
             if (t === 'resign') {
-                return _isMe(session, session.winner) ? 'They resigned' : 'You resigned';
+                return _isMe(session, winner) ? 'They resigned' : 'You resigned';
             }
-            if (_isMe(session, session.winner)) return 'You won!';
-            if (session.winner) return 'You lost!';
+            if (_isMe(session, winner)) return 'You won!';
+            if (winner) return 'You lost!';
             return 'Completed';
         }
         if (status === 'active') {
             // In-flight/failed outbound move overrides the "their turn" label.
-            if (session.delivery_state === 'failed') return 'Move failed — tap Resend';
-            if (session.draw_offered) return 'Draw offered';
-            var isChess = (session.app_id === 'chess' || session.game === 'chess');
-            var myMarker, theirMarker;
-            if (isChess) {
-                var myCol = session.my_color || (session.metadata && session.metadata.my_color) || '';
-                myMarker = myCol === 'b' ? 'Black' : 'White';
-                theirMarker = myCol === 'b' ? 'White' : 'Black';
-            } else {
-                myMarker = session.my_marker
-                    || (_isMe(session, session.first_turn) ? 'X' : 'O');
-                theirMarker = myMarker === 'X' ? 'O' : 'X';
+            var deliveryText = _activeMoveDeliveryText(session.delivery_state);
+            if (deliveryText) return deliveryText;
+            if (_sessionValue(session, 'draw_offered', false)) {
+                return _isMe(session, _drawOfferOwner(session))
+                    ? 'Draw offer sent'
+                    : 'Draw offered';
             }
-            if (_isMe(session, session.turn)) return 'Your turn (' + myMarker + ')';
-            if (session.turn) {
+            var view = _gameView(_appId(session));
+            if (view && view.activeStatusText) {
+                var customStatus = view.activeStatusText(session, _gameViewContext(session));
+                if (customStatus) return customStatus;
+            }
+            var turn = _sessionValue(session, 'turn', '');
+            if (_isMe(session, turn)) return 'Your turn';
+            if (turn) {
                 var name = _contactName(session.contact_hash) || 'Opponent';
-                return name + '\u2019s turn (' + theirMarker + ')';
+                return name + '\u2019s turn';
             }
             return 'Active';
         }
@@ -229,27 +257,72 @@
         }
         if (status === 'active') {
             if (session.delivery_state === 'failed') return 'status-lost';
-            if (session.draw_offered) return 'status-challenge';
-            return _isMe(session, session.turn) ? 'status-your-turn' : 'status-their-turn';
+            if (_activeMoveDeliveryText(session.delivery_state)) return 'status-waiting';
+            if (_sessionValue(session, 'draw_offered', false)) {
+                return _isMe(session, _drawOfferOwner(session))
+                    ? 'status-waiting'
+                    : 'status-challenge';
+            }
+            return _isMe(session, _sessionValue(session, 'turn', ''))
+                ? 'status-your-turn'
+                : 'status-their-turn';
         }
         if (status === 'completed') {
-            if (_isMe(session, session.winner)) return 'status-won';
-            if (session.terminal === 'draw') return 'status-draw';
+            if (_isMe(session, _sessionValue(session, 'winner', ''))) return 'status-won';
+            if (_sessionValue(session, 'terminal', '') === 'draw') return 'status-draw';
             return 'status-lost';
         }
         return 'status-muted';
     }
 
     function _gameIcon(appId) {
-        if (appId === 'ttt') return '#';
-        if (appId === 'chess') return '\u265E'; // black knight glyph — consistent across platforms
+        var view = _gameView(appId);
+        if (view) return view.icon;
+        var manifest = _manifestsById[appId];
+        var icon = manifest && manifest.icon;
+        if (icon && icon.length <= 2) return icon;
         return '?';
     }
 
+    function _gameIconMarkup(appId) {
+        if (appId === 'four_in_a_row') {
+            return '<span class="games-four-icon-mark" aria-hidden="true">' +
+                '<span></span><span></span><span></span><span></span>' +
+            '</span>';
+        }
+        return escapeHtml(_gameIcon(appId));
+    }
+
     function _gameName(appId) {
+        var manifest = _manifestsById[appId];
+        if (manifest && manifest.display_name) return manifest.display_name;
+        var view = _gameView(appId);
+        if (view && view.displayName) return view.displayName;
         if (appId === 'ttt') return 'Tic-Tac-Toe';
         if (appId === 'chess') return 'Chess';
         return appId || 'Unknown';
+    }
+
+    function _loadGameManifests() {
+        return RS.invoke('get_available_games').then(function(manifests) {
+            if (!Array.isArray(manifests)) return;
+            var next = {};
+            for (var i = 0; i < manifests.length; i++) {
+                var manifest = manifests[i];
+                if (manifest && manifest.app_id) next[manifest.app_id] = manifest;
+            }
+            _manifestsById = next;
+        }).catch(function() {});
+    }
+
+    function _beginSessionAction(sessionId) {
+        if (!sessionId || _actionInFlight[sessionId]) return false;
+        _actionInFlight[sessionId] = true;
+        return true;
+    }
+
+    function _finishSessionAction(sessionId) {
+        if (sessionId) delete _actionInFlight[sessionId];
     }
 
     function _filterSessions() {
@@ -261,6 +334,18 @@
             if (_activeFilter === 'completed') return status === 'completed' || status === 'declined' || status === 'expired';
             return true;
         });
+    }
+
+    function _findSession(sessionId) {
+        for (var i = 0; i < _allSessions.length; i++) {
+            if (_allSessions[i].game_id === sessionId) return _allSessions[i];
+        }
+        return null;
+    }
+
+    function _canDeleteSession(session) {
+        return !!session && (session.status === 'completed' ||
+            session.status === 'declined' || session.status === 'expired');
     }
 
     function renderSessionList() {
@@ -288,18 +373,19 @@
 
             var appId = _appId(s);
             html += '<div class="' + classes + ' game-row-' + escapeHtml(appId || 'unknown') + '" data-session-id="' + escapeHtml(s.game_id) + '" role="button" tabindex="0">' +
-                '<div class="games-session-icon">' + _gameIcon(s.app_id || s.game) + '</div>' +
+                '<div class="games-session-icon">' + _gameIconMarkup(s.app_id || s.game) + '</div>' +
                 '<div class="games-session-info">' +
                     '<div class="games-session-name">' + ratspeakDisplayNameHtml(_contactName(s.contact_hash), s.contact_hash) + '</div>' +
                     '<div class="games-session-meta">' +
-                        '<span class="games-session-game">' + _gameName(appId) + '</span>' +
-                        '<span class="games-session-status ' + _statusClass(s) + '">' + _statusText(s) + '</span>' +
+                        '<span class="games-session-game">' + escapeHtml(_gameName(appId)) + '</span>' +
+                        '<span class="games-session-status ' + _statusClass(s) + '">' + escapeHtml(_statusText(s)) + '</span>' +
                     '</div>' +
                 '</div>' +
-                '<div class="games-session-time">' + RS.relativeTime(s.updated_at || s.last_action_at) + '</div>' +
-                '<button type="button" class="games-session-delete" aria-label="Remove game from history" title="Remove from history">' +
-                    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v5"/><path d="M14 11v5"/></svg>' +
-                '</button>' +
+                '<div class="games-session-time">' + escapeHtml(RS.relativeTime(s.updated_at || s.last_action_at)) + '</div>' +
+                (_canDeleteSession(s) ?
+                    '<button type="button" class="games-session-delete" aria-label="Remove game from history" title="Remove from history">' +
+                        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v5"/><path d="M14 11v5"/></svg>' +
+                    '</button>' : '') +
             '</div>';
         }
         container.innerHTML = html;
@@ -332,7 +418,7 @@
             });
         }
 
-        if (isMobile()) {
+        if (isMobile() && _canDeleteSession(_findSession(sessionId))) {
             var firedRecently = false;
             RS.gestures.attachLongPress(row, {
                 duration: RS.gestures.LONG_PRESS_GAMES_ROW_MS,
@@ -356,6 +442,12 @@
 
     function _confirmDeleteSession(sessionId, mobile) {
         if (!sessionId) return;
+        if (!_canDeleteSession(_findSession(sessionId))) {
+            if (typeof showToast === 'function') {
+                showToast('Finish the game before removing it', 'toast-red', 3000);
+            }
+            return;
+        }
         if (mobile) {
             _showDeleteSheet(sessionId);
         } else if (typeof rsConfirm === 'function') {
@@ -388,8 +480,13 @@
     }
 
     function _deleteSession(sessionId) {
-        RS.invoke('delete_game_session', { sessionId: sessionId }).catch(function() {});
-        _removeSessionLocal(sessionId);
+        RS.invoke('delete_game_session', { sessionId: sessionId }).then(function() {
+            _removeSessionLocal(sessionId);
+        }).catch(function() {
+            if (typeof showToast === 'function') {
+                showToast('Game could not be removed', 'toast-red', 3000);
+            }
+        });
     }
 
     function _removeSessionLocal(sessionId) {
@@ -401,7 +498,7 @@
         delete _celebratedWins[sessionId];
         if (_selectedSessionId === sessionId) {
             _selectedSessionId = null;
-            if (window.innerWidth <= 768 &&
+            if (isCompactLayout() &&
                 RS.viewStack.top() && RS.viewStack.top().viewId === 'game-detail') {
                 RS.viewStack.pop();
             }
@@ -419,36 +516,25 @@
         renderDetail();
         updateGamesBadge();
 
-        if (window.innerWidth <= 768) {
+        if (isCompactLayout()) {
             RS.viewStack.push('game-detail', { meta: { sessionId: sessionId } });
             history.pushState({ view: 'games', detail: true }, '', '#games');
         }
     }
 
     function _getSelectedSession() {
-        if (!_selectedSessionId) return null;
-        for (var i = 0; i < _allSessions.length; i++) {
-            if (_allSessions[i].game_id === _selectedSessionId) return _allSessions[i];
-        }
-        return null;
+        return _selectedSessionId ? _findSession(_selectedSessionId) : null;
     }
 
     function _renderDetailMeta(session) {
-        var appId = _appId(session);
         var chips = [];
-        var moveCount = parseInt(session.move_count, 10);
+        var moveCount = parseInt(_sessionValue(session, 'move_count', ''), 10);
         if (!isNaN(moveCount) && moveCount > 0) chips.push('Move ' + moveCount);
 
-        if (appId === 'chess') {
-            var myColor = session.my_color || (session.metadata && session.metadata.my_color) || '';
-            if (myColor === 'w') chips.push('White');
-            if (myColor === 'b') chips.push('Black');
-            if (session.in_check || (session.metadata && session.metadata.in_check)) chips.push('Check');
-            var lastMove = session.last_move || (session.metadata && session.metadata.last_move) || '';
-            if (lastMove) chips.push(lastMove.slice(0, 2) + '\u2192' + lastMove.slice(2, 4));
-        } else if (appId === 'ttt') {
-            var marker = session.my_marker || (_isMe(session, session.first_turn) ? 'X' : 'O');
-            if (marker) chips.push('You are ' + marker);
+        var view = _gameView(_appId(session));
+        if (view && view.detailChips) {
+            var gameChips = view.detailChips(session, _gameViewContext(session));
+            if (Array.isArray(gameChips)) chips = chips.concat(gameChips);
         }
 
         if (_isSendingDeliveryState(session.delivery_state)) chips.push('Sending');
@@ -482,11 +568,12 @@
         }
 
         var appId = _appId(session);
+        var gameView = _gameView(appId);
         panel.setAttribute('data-game', appId);
         var status = session.status;
         var statusTxt = _statusText(session);
         var statusCls = _statusClass(session);
-        var themeClass = appId === 'chess' ? 'games-theme-chess' : (appId === 'ttt' ? 'games-theme-ttt' : 'games-theme-unknown');
+        var themeClass = gameView ? gameView.themeClass : 'games-theme-unknown';
 
         var html = '';
 
@@ -496,9 +583,9 @@
 
         html += '<div class="games-detail-header ' + themeClass + '">' +
             '<div class="games-detail-heading">' +
-                '<span class="games-detail-icon">' + _gameIcon(appId) + '</span>' +
+                '<span class="games-detail-icon">' + _gameIconMarkup(appId) + '</span>' +
                 '<span class="games-detail-copy">' +
-                    '<span class="games-detail-title">' + _gameName(appId) + '</span>' +
+                    '<span class="games-detail-title">' + escapeHtml(_gameName(appId)) + '</span>' +
                     '<span class="games-detail-vs">vs ' + ratspeakDisplayNameHtml(_contactName(session.contact_hash), session.contact_hash) + '</span>' +
                 '</span>' +
             '</div>' +
@@ -516,10 +603,8 @@
         }
 
         html += '<div class="games-detail-board games-board-' + escapeHtml(appId || 'unknown') + '">';
-        if (appId === 'ttt') {
-            html += _renderTTTBoard(session);
-        } else if (appId === 'chess') {
-            html += _renderChessBoard(session);
+        if (gameView) {
+            html += gameView.renderBoard(session, _gameViewContext(session, panel));
         } else {
             html += '<div class="empty-state-primary">Unsupported game type</div>';
         }
@@ -556,6 +641,9 @@
                 RS.invoke('resend_last_game_action', {
                     args: { session_id: session.game_id }
                 }).catch(function(err) {
+                    session.delivery_state = 'failed';
+                    renderSessionList();
+                    renderDetail();
                     if (typeof showToast === 'function') {
                         var msg = (err && err.message) || 'Resend failed';
                         showToast(msg, 'toast-red', 4000);
@@ -565,8 +653,7 @@
         }
 
         _bindControlEvents(session);
-        _bindTTTCellEvents(session);
-        _bindChessSquareEvents(session);
+        if (gameView) gameView.bindBoard(session, _gameViewContext(session, panel));
     }
 
     function _renderTTTBoard(session) {
@@ -601,7 +688,7 @@
         html += '<div class="ttt-player-label' + (xTurnActive ? ' active-turn' : '') + '">' + xPlayer + '</div>';
 
         var markerClass = isMyTurn ? (iAmX ? ' my-marker-x' : ' my-marker-o') : '';
-        html += '<div class="ttt-grid' + (isMyTurn ? ' your-turn' : '') + markerClass + '">';
+        html += '<div class="ttt-grid' + (isMyTurn ? ' your-turn' : '') + markerClass + '" role="grid" aria-label="Tic-Tac-Toe board">';
         for (var i = 0; i < 9; i++) {
             var cell = board[i];
             var classes = 'ttt-cell';
@@ -620,7 +707,9 @@
                 display = '<svg class="ttt-marker-svg" viewBox="0 0 50 50">' +
                     '<circle cx="25" cy="25" r="15" stroke="currentColor" stroke-width="5" fill="none"/></svg>';
             }
-            html += '<div class="' + classes + '" data-cell-index="' + i + '">' + display + '</div>';
+            var cellLabel = 'Square ' + (i + 1) + ': ' + (cell === '_' ? 'empty' : cell);
+            var canPlayCell = isMyTurn && cell === '_';
+            html += '<button type="button" role="gridcell" class="' + classes + '" data-cell-index="' + i + '" aria-label="' + cellLabel + '" aria-disabled="' + (canPlayCell ? 'false' : 'true') + '"' + (canPlayCell ? '' : ' tabindex="-1"') + '>' + display + '</button>';
         }
         html += '</div>';
 
@@ -682,9 +771,40 @@
         return null;
     }
 
+    function _tttActiveStatusText(session) {
+        var myMarker = session.my_marker
+            || (_isMe(session, session.first_turn) ? 'X' : 'O');
+        var theirMarker = myMarker === 'X' ? 'O' : 'X';
+        if (_isMe(session, session.turn)) return 'Your turn (' + myMarker + ')';
+        if (session.turn) {
+            return (_contactName(session.contact_hash) || 'Opponent') +
+                '\u2019s turn (' + theirMarker + ')';
+        }
+        return '';
+    }
+
+    function _tttDetailChips(session) {
+        var marker = session.my_marker || (_isMe(session, session.first_turn) ? 'X' : 'O');
+        return marker ? ['You are ' + marker] : [];
+    }
+
+    function _tttSessionDelta(record, previous) {
+        var previousBoard = previous ? previous.state : null;
+        if (record.game_id !== _selectedSessionId || !record.state ||
+                !previousBoard || record.state === previousBoard) return;
+        for (var cell = 0; cell < 9; cell++) {
+            if ((previousBoard[cell] || '_') !== (record.state[cell] || '_')) {
+                _animatingCell = cell;
+                _animatingCellExpiry = Date.now() + 600;
+                break;
+            }
+        }
+    }
+
     function _handleTTTMove(session, cellIndex) {
         var board = (session.state || '_________').split('');
         if (board[cellIndex] !== '_') return;
+        if (!_beginSessionAction(session.game_id)) return;
 
         var myMarker = session.my_marker || (_isMe(session, session.first_turn) ? 'X' : 'O');
 
@@ -745,7 +865,16 @@
                 command: 'move',
                 payload: { i: cellIndex },
             }
-        }).catch(function() {});
+        }).then(function() {
+            _finishSessionAction(session.game_id);
+        }).catch(function() {
+            _finishSessionAction(session.game_id);
+            _handleGameActionFailure({
+                session_id: session.game_id,
+                command: 'move',
+                reason: 'send_failed',
+            });
+        });
     }
 
     function _bindTTTCellEvents(session) {
@@ -765,6 +894,53 @@
     // Piece values for captured-tray sorting + material advantage display.
     var CHESS_PIECE_VALUES = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 };
     var _chessSelected = {}; // { [session_id]: "e2" | null }
+
+    function _chessActiveStatusText(session) {
+        var myColor = session.my_color || (session.metadata && session.metadata.my_color) || '';
+        var myMarker = myColor === 'b' ? 'Black' : 'White';
+        var theirMarker = myColor === 'b' ? 'White' : 'Black';
+        if (_isMe(session, session.turn)) return 'Your turn (' + myMarker + ')';
+        if (session.turn) {
+            return (_contactName(session.contact_hash) || 'Opponent') +
+                '\u2019s turn (' + theirMarker + ')';
+        }
+        return '';
+    }
+
+    function _chessDetailChips(session) {
+        var chips = [];
+        var myColor = session.my_color || (session.metadata && session.metadata.my_color) || '';
+        if (myColor === 'w') chips.push('White');
+        if (myColor === 'b') chips.push('Black');
+        if (session.in_check || (session.metadata && session.metadata.in_check)) chips.push('Check');
+        var lastMove = session.last_move || (session.metadata && session.metadata.last_move) || '';
+        if (lastMove) chips.push(lastMove.slice(0, 2) + '\u2192' + lastMove.slice(2, 4));
+        return chips;
+    }
+
+    function _chessCelebrationOptions() {
+        var styles = getComputedStyle(document.documentElement);
+        return {
+            count: 72,
+            duration: 1900,
+            colors: [
+                (styles.getPropertyValue('--chess-light') || '#D4BC9E').trim(),
+                (styles.getPropertyValue('--chess-dark') || '#9B8365').trim(),
+                (styles.getPropertyValue('--accent') || '#D2693B').trim(),
+                (styles.getPropertyValue('--status-online') || '#2E8B57').trim(),
+                (styles.getPropertyValue('--ble-accent') || '#0E9AA7').trim(),
+            ],
+        };
+    }
+
+    function _chessActionPayload(action, session, payload) {
+        // A FIDE claim reason makes the peer auto-accept instead of prompting.
+        if (action === 'draw_offer' &&
+                (session.draw_offer_reason === '3fr' || session.draw_offer_reason === '50m')) {
+            return { r: session.draw_offer_reason };
+        }
+        return payload;
+    }
 
     // FEN field 1 → { square: pieceCode } map. pieceCode is "w"|"b" + letter.
     function _chessFenToPieces(fen) {
@@ -942,7 +1118,8 @@
                 var clickable = isMyTurn && (isSelected || isLegalTarget || (piece && piece[0] === myColor));
                 if (clickable) classes.push('clickable');
 
-                html += '<div class="' + classes.join(' ') + '" data-square="' + sq + '">' + coordHtml + pieceHtml + '</div>';
+                var pieceName = piece ? _chessPieceName(piece) : 'empty';
+                html += '<button type="button" role="gridcell" class="' + classes.join(' ') + '" data-square="' + sq + '" aria-label="' + sq + ': ' + pieceName + '" aria-disabled="' + (clickable ? 'false' : 'true') + '"' + (clickable ? '' : ' tabindex="-1"') + '>' + coordHtml + pieceHtml + '</button>';
             }
         }
         html += '</div>';
@@ -997,6 +1174,13 @@
             case 'agr': return 'By agreement';
             default:    return '';
         }
+    }
+
+    function _chessPieceName(piece) {
+        if (!piece || piece.length < 2) return 'empty';
+        var color = piece[0] === 'w' ? 'white' : 'black';
+        var names = { p: 'pawn', n: 'knight', b: 'bishop', r: 'rook', q: 'queen', k: 'king' };
+        return color + ' ' + (names[piece[1]] || 'piece');
     }
 
     function _bindChessSquareEvents(session) {
@@ -1092,31 +1276,36 @@
             document.body.appendChild(wrap);
         }
 
+        var finishPromotion = function(piece) {
+            document.removeEventListener('click', dismiss, true);
+            document.removeEventListener('keydown', escDismiss, true);
+            wrap.remove();
+            _chessSelected[sid] = null;
+            if (piece) {
+                _sendChessMove(session, baseUci + piece);
+            } else {
+                renderDetail();
+            }
+        };
         wrap.querySelectorAll('.chess-promotion-option').forEach(function(btn) {
             btn.addEventListener('click', function(e) {
                 e.stopPropagation();
-                var piece = btn.getAttribute('data-piece');
-                wrap.remove();
-                _chessSelected[sid] = null;
-                _sendChessMove(session, baseUci + piece);
+                finishPromotion(btn.getAttribute('data-piece'));
             });
         });
 
         var dismiss = function(e) {
             if (wrap.contains(e.target)) return;
-            document.removeEventListener('click', dismiss, true);
-            document.removeEventListener('keydown', escDismiss, true);
-            wrap.remove();
-            _chessSelected[sid] = null;
-            _sendChessMove(session, baseUci + 'q');
+            finishPromotion(null);
         };
         var escDismiss = function(e) {
-            if (e.key !== 'Escape' && e.key !== 'Enter') return;
-            document.removeEventListener('click', dismiss, true);
-            document.removeEventListener('keydown', escDismiss, true);
-            wrap.remove();
-            _chessSelected[sid] = null;
-            _sendChessMove(session, baseUci + 'q');
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                finishPromotion(null);
+            } else if (e.key === 'Enter') {
+                e.preventDefault();
+                finishPromotion(available.indexOf('q') !== -1 ? 'q' : available[0]);
+            }
         };
         // Defer a tick so the click doesn't immediately dismiss.
         setTimeout(function() {
@@ -1133,6 +1322,7 @@
         var pieces = _chessFenToPieces(fen);
         var moved = pieces[from];
         if (!moved) return; // shouldn't happen — we validated via legal_moves
+        if (!_beginSessionAction(sid)) return;
 
         _optimisticBackup[sid] = {
             fen: session.fen,
@@ -1191,7 +1381,16 @@
                 command: 'move',
                 payload: { m: uci },
             }
-        }).catch(function() {});
+        }).then(function() {
+            _finishSessionAction(sid);
+        }).catch(function() {
+            _finishSessionAction(sid);
+            _handleGameActionFailure({
+                session_id: sid,
+                command: 'move',
+                reason: 'send_failed',
+            });
+        });
     }
 
     // Approximations OK — authoritative server FEN overwrites in a beat.
@@ -1224,6 +1423,48 @@
         return board + tail;
     }
 
+    function _gameActions(session) {
+        var appId = _appId(session);
+        var manifest = _manifestsById[appId];
+        if (manifest && Array.isArray(manifest.actions)) return manifest.actions;
+        var view = _gameView(appId);
+        return view && Array.isArray(view.actions) ? view.actions : [];
+    }
+
+    function _gameSupportsAction(session, action) {
+        return _gameActions(session).indexOf(action) !== -1;
+    }
+
+    function _renderStandardActiveControls(session, drawOfferLabel) {
+        var html = '';
+        if (_sessionValue(session, 'draw_offered', false) &&
+                _gameSupportsAction(session, 'draw_accept') &&
+                _gameSupportsAction(session, 'draw_decline')) {
+            var drawOwner = _drawOfferOwner(session);
+            if (drawOwner && !_isMe(session, drawOwner)) {
+                html += '<button class="nr-btn games-ctrl-accept" id="games-draw-accept-btn">Accept Draw</button>';
+                html += '<button class="nr-btn nr-btn-secondary" id="games-draw-decline-btn">Decline Draw</button>';
+            } else {
+                html += '<span class="games-ctrl-waiting">Waiting for opponent to respond...</span>';
+            }
+            html += '<span class="games-ctrl-separator"></span>';
+        } else if (_gameSupportsAction(session, 'draw_offer')) {
+            html += '<button class="nr-btn nr-btn-secondary" id="games-draw-offer-btn">' +
+                escapeHtml(drawOfferLabel || 'Offer Draw') + '</button>';
+        }
+        if (_gameSupportsAction(session, 'resign')) {
+            html += '<button class="nr-btn nr-btn-danger" id="games-resign-btn">Resign</button>';
+        }
+        return html;
+    }
+
+    function _chessRenderActiveControls(session) {
+        var drawLabel = '';
+        if (session.draw_offer_reason === '3fr') drawLabel = 'Claim threefold';
+        if (session.draw_offer_reason === '50m') drawLabel = 'Claim 50-move';
+        return _renderStandardActiveControls(session, drawLabel);
+    }
+
     function _renderControls(session) {
         var status = session.status;
         var html = '';
@@ -1237,19 +1478,10 @@
                 html += '<button class="nr-btn nr-btn-secondary" id="games-cancel-btn">Cancel</button>';
             }
         } else if (status === 'active') {
-            var isChess = (session.app_id || session.game) === 'chess';
-            if (session.draw_offered) {
-                html += '<button class="nr-btn games-ctrl-accept" id="games-draw-accept-btn">Accept Draw</button>';
-                html += '<button class="nr-btn nr-btn-secondary" id="games-draw-decline-btn">Decline Draw</button>';
-                html += '<span class="games-ctrl-separator"></span>';
-            } else if (isChess && session.draw_offer_reason === '3fr') {
-                html += '<button class="nr-btn nr-btn-secondary" id="games-draw-offer-btn">Claim threefold</button>';
-            } else if (isChess && session.draw_offer_reason === '50m') {
-                html += '<button class="nr-btn nr-btn-secondary" id="games-draw-offer-btn">Claim 50-move</button>';
-            } else {
-                html += '<button class="nr-btn nr-btn-secondary" id="games-draw-offer-btn">Offer Draw</button>';
-            }
-            html += '<button class="nr-btn nr-btn-danger" id="games-resign-btn">Resign</button>';
+            var view = _gameView(_appId(session));
+            html += view && view.renderActiveControls
+                ? view.renderActiveControls(session)
+                : _renderStandardActiveControls(session, '');
         } else if (status === 'completed' || status === 'declined' || status === 'expired') {
             html += '<button class="nr-btn" id="games-rematch-btn">Rematch</button>';
         }
@@ -1305,11 +1537,10 @@
             startNewGame(session.app_id || session.game || 'ttt', session.contact_hash);
         });
         _bindBtn('games-draw-offer-btn', function() {
-            // FIDE reason makes the peer auto-accept instead of prompting.
             var payload = {};
-            var isChess = (session.app_id || session.game) === 'chess';
-            if (isChess && (session.draw_offer_reason === '3fr' || session.draw_offer_reason === '50m')) {
-                payload = { r: session.draw_offer_reason };
+            var view = _gameView(_appId(session));
+            if (view && view.actionPayload) {
+                payload = view.actionPayload('draw_offer', session, payload) || payload;
             }
             _sendAction(session, 'draw_offer', payload);
         });
@@ -1319,6 +1550,15 @@
         _bindBtn('games-draw-decline-btn', function() {
             _sendAction(session, 'draw_decline');
         });
+        var view = _gameView(_appId(session));
+        if (view && view.bindControls) {
+            view.bindControls(session, {
+                bindButton: _bindBtn,
+                sendAction: function(action, payload) {
+                    _sendAction(session, action, payload);
+                },
+            });
+        }
     }
 
     function _bindBtn(id, handler) {
@@ -1327,6 +1567,8 @@
     }
 
     function _sendAction(session, action, payload) {
+        var sessionId = session.game_id;
+        if (!_beginSessionAction(sessionId)) return;
         RS.invoke('send_game_action', {
             args: {
                 dest_hash: session.contact_hash,
@@ -1335,24 +1577,83 @@
                 command: action,
                 payload: payload || {},
             }
-        }).then(function(ack) {
-            if (ack && ack.ok === false) {
-                var msg = _reasonToMessage(ack.reason || 'send_failed', action);
-                if (typeof showToast === 'function') showToast(msg, 'toast-red', 4000);
-            }
+        }).then(function() {
+            _finishSessionAction(sessionId);
+            // Backend rejections are emitted through game_action_result so
+            // optimistic rollback and user feedback have one ordered path.
+            // The promise catch below remains for IPC failures that cannot
+            // produce a backend event.
         }).catch(function() {
+            _finishSessionAction(sessionId);
             if (typeof showToast === 'function') {
                 showToast(_reasonToMessage('send_failed', action), 'toast-red', 4000);
             }
         });
     }
 
+    // View adapters can request immediate, presentation-only move feedback
+    // without owning transport or protocol authority. The runtime remains the
+    // source of truth and its next session snapshot replaces this local state.
+    function _sendGameViewMove(session, payload, optimistic) {
+        var sessionId = session && session.game_id;
+        if (!sessionId || !_beginSessionAction(sessionId)) return false;
+
+        optimistic = optimistic || {};
+        var fields = Array.isArray(optimistic.fields) ? optimistic.fields : [];
+        var adapterFields = RS.games.optimistic.captureFields(session, fields);
+        _optimisticBackup[sessionId] = {
+            state: session.state,
+            move_count: session.move_count,
+            turn: session.turn,
+            status: session.status,
+            terminal: session.terminal,
+            winner: session.winner,
+            delivery_state: session.delivery_state,
+            adapter_fields: adapterFields,
+        };
+
+        if (typeof optimistic.apply === 'function') optimistic.apply(session);
+        session.delivery_state = 'pending';
+        renderSessionList();
+        renderDetail();
+        if (typeof haptic === 'function') haptic('selection');
+
+        RS.invoke('send_game_action', {
+            args: {
+                dest_hash: session.contact_hash,
+                session_id: session.game_id,
+                app_id: session.app_id || session.game,
+                command: 'move',
+                payload: payload || {},
+            }
+        }).then(function() {
+            _finishSessionAction(sessionId);
+        }).catch(function() {
+            _finishSessionAction(sessionId);
+            _handleGameActionFailure({
+                session_id: sessionId,
+                command: 'move',
+                reason: 'send_failed',
+            });
+        });
+        return true;
+    }
+
     function _reasonToMessage(reason, command) {
         switch (reason) {
             case 'invalid_params':       return 'Bad action parameters';
             case 'session_terminal':     return 'Session already ended';
+            case 'session_exists':       return 'That game session already exists';
+            case 'session_not_found':    return 'This game session is no longer available';
+            case 'invalid_state':        return 'That action is not available right now';
             case 'dispatch_failed':      return 'Action rejected by game rules';
             case 'not_your_turn':        return 'Not your turn';
+            case 'unauthorized_sender':  return 'This action is not from the game opponent';
+            case 'session_expired':      return 'This game has expired';
+            case 'unsupported_app':      return 'This game version is not supported';
+            case 'protocol_error':       return 'Invalid game action';
+            case 'storage_failed':       return 'Game state could not be saved';
+            case 'resend_required':       return 'Action saved locally — tap Resend to retry';
             case 'lxmf_not_initialized': return 'Messaging not ready — wait a moment';
             case 'pack_failed':          return 'Action rejected — invalid envelope';
             case 'send_failed':
@@ -1361,6 +1662,66 @@
                     ? 'Move couldn’t be delivered — tap Resend'
                     : 'Action couldn’t be delivered';
         }
+    }
+
+    // Tauri command rejections that happen before LRGP dispatch do not have a
+    // backend game_action_result event to restore an optimistic board. Keep
+    // one rollback path for both IPC rejection and emitted protocol results.
+    function _handleGameActionFailure(data) {
+        if (!data || !data.session_id) return;
+        var sid = data.session_id;
+        var reason = data.reason || 'send_failed';
+
+        // A failed durable-outbox rollback intentionally leaves the canonical
+        // board advanced with its exact envelope available to Resend.
+        if (reason === 'resend_required') {
+            delete _optimisticBackup[sid];
+            for (var pendingIndex = 0; pendingIndex < _allSessions.length; pendingIndex++) {
+                if (_allSessions[pendingIndex].game_id === sid) {
+                    _allSessions[pendingIndex].delivery_state = 'failed';
+                    break;
+                }
+            }
+            renderSessionList();
+            if (sid === _selectedSessionId) renderDetail();
+            if (typeof showToast === 'function') {
+                showToast(_reasonToMessage(reason, data.command), 'toast-red', 5000);
+            }
+            return;
+        }
+
+        var backup = _optimisticBackup[sid];
+        if (backup) {
+            for (var i = 0; i < _allSessions.length; i++) {
+                if (_allSessions[i].game_id !== sid) continue;
+                var session = _allSessions[i];
+                session.state = backup.state;
+                session.move_count = backup.move_count;
+                session.turn = backup.turn;
+                session.status = backup.status;
+                session.terminal = backup.terminal;
+                session.winner = backup.winner;
+                session.delivery_state = backup.delivery_state;
+                if (backup.fen !== undefined) session.fen = backup.fen;
+                if (backup.legal_moves !== undefined) session.legal_moves = backup.legal_moves;
+                if (backup.last_move !== undefined) session.last_move = backup.last_move;
+                if (backup.in_check !== undefined) session.in_check = backup.in_check;
+                if (backup.draw_offer_reason !== undefined) session.draw_offer_reason = backup.draw_offer_reason;
+                if (backup.terminal_reason !== undefined) session.terminal_reason = backup.terminal_reason;
+                if (backup.adapter_fields) {
+                    RS.games.optimistic.restoreFields(session, backup.adapter_fields);
+                }
+                break;
+            }
+            delete _optimisticBackup[sid];
+            renderSessionList();
+            if (sid === _selectedSessionId) renderDetail();
+        }
+
+        if (typeof showToast === 'function') {
+            showToast(_reasonToMessage(reason, data.command), 'toast-red', 4000);
+        }
+        if (typeof haptic === 'function') haptic('error');
     }
 
     function showNewGameDialog() {
@@ -1382,7 +1743,16 @@
 
         var contactsHtml = '';
         if (sorted.length === 0) {
-            contactsHtml = '<div class="games-sheet-empty">No contacts yet.</div>';
+            contactsHtml = '<div class="games-sheet-empty">' +
+                '<span class="games-sheet-empty-icon" aria-hidden="true">' +
+                    '<svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"></circle><path d="M3.5 18c.5-3 2.4-4.7 5.5-4.7 1.5 0 2.7.4 3.6 1.1"></path><path d="M17 11v7M13.5 14.5h7"></path></svg>' +
+                '</span>' +
+                '<span class="games-sheet-empty-copy">' +
+                    '<span class="games-sheet-empty-title">No contacts yet</span>' +
+                    '<span class="games-sheet-empty-hint">Add someone before starting a game.</span>' +
+                '</span>' +
+                '<button type="button" class="nr-btn nr-btn-secondary games-sheet-open-contacts" id="games-sheet-open-contacts">Open Contacts</button>' +
+            '</div>';
         } else {
             for (var i = 0; i < sorted.length; i++) {
                 var c = sorted[i];
@@ -1398,34 +1768,52 @@
             }
         }
 
+        var manifests = RS.games.views.supportedManifests(Object.keys(_manifestsById).map(function(appId) {
+            return _manifestsById[appId];
+        }));
+        if (manifests.length === 0) {
+            manifests = [
+                { app_id: 'ttt', display_name: 'Tic-Tac-Toe', icon: 'ttt', session_type: 'turn_based' },
+                { app_id: 'chess', display_name: 'Chess', icon: 'chess', session_type: 'turn_based' },
+                { app_id: 'four_in_a_row', display_name: 'Four in a Row', icon: 'four_in_a_row', session_type: 'turn_based' },
+            ];
+        }
+        manifests.sort(function(a, b) {
+            return (a.display_name || a.app_id).localeCompare(b.display_name || b.app_id);
+        });
+        var gameCardsHtml = manifests.map(function(manifest, index) {
+            var appId = manifest.app_id || '';
+            var name = manifest.display_name || appId;
+            return '<button type="button" class="games-sheet-game-card' + (index === 0 ? ' selected' : '') + '" data-app-id="' + escapeHtml(appId) + '" aria-pressed="' + (index === 0 ? 'true' : 'false') + '">' +
+                '<span class="game-card-icon">' + _gameIconMarkup(appId) + '</span>' +
+                '<span class="games-sheet-game-copy"><span class="games-sheet-game-name">' + escapeHtml(name) + '</span></span>' +
+                '<span class="games-sheet-game-check" aria-hidden="true">✓</span>' +
+            '</button>';
+        }).join('');
+
         var shell = RS.sheetShell.create({ sheetClass: 'bottom-sheet games-new-dialog' });
         shell.overlay.id = 'games-new-sheet-overlay';
         shell.sheet.id = 'games-new-sheet';
+        shell.sheet.setAttribute('role', 'dialog');
+        shell.sheet.setAttribute('aria-modal', 'true');
+        shell.sheet.setAttribute('aria-labelledby', 'games-new-sheet-title');
+        shell.sheet._gamesPreviousFocus = document.activeElement;
         shell.sheet.innerHTML = '<div class="bottom-sheet-handle"></div>' +
             '<div class="bottom-sheet-header">' +
                 '<div>' +
-                    '<div class="bottom-sheet-title">New game</div>' +
-                    '<div class="games-sheet-subtitle">Choose a game and opponent.</div>' +
+                    '<div class="bottom-sheet-title" id="games-new-sheet-title">New game</div>' +
+                    '<div class="games-sheet-subtitle">Choose what to play and who to challenge.</div>' +
                 '</div>' +
                 '<button type="button" class="bottom-sheet-close" id="games-sheet-close" aria-label="Close">&times;</button>' +
             '</div>' +
             '<div class="bottom-sheet-body">' +
                 '<div class="games-sheet-section">' +
-                    '<div class="games-sheet-header">Game</div>' +
-                    '<div class="games-sheet-game-grid">' +
-                        '<button type="button" class="games-sheet-game-card selected" data-app-id="ttt" aria-pressed="true">' +
-                            '<span class="game-card-icon">#</span>' +
-                            '<span><span class="games-sheet-game-name">Tic-Tac-Toe</span><span class="games-sheet-game-hint">Fast, simple turns</span></span>' +
-                        '</button>' +
-                        '<button type="button" class="games-sheet-game-card" data-app-id="chess" aria-pressed="false">' +
-                            '<span class="game-card-icon">\u265E</span>' +
-                            '<span><span class="games-sheet-game-name">Chess</span><span class="games-sheet-game-hint">Full rules</span></span>' +
-                        '</button>' +
-                    '</div>' +
+                    '<div class="games-sheet-header" id="games-sheet-game-label">Game</div>' +
+                    '<div class="games-sheet-game-grid" role="group" aria-labelledby="games-sheet-game-label">' + gameCardsHtml + '</div>' +
                 '</div>' +
                 '<div class="games-sheet-section">' +
-                    '<div class="games-sheet-header">Opponent</div>' +
-                    '<div class="games-sheet-contact-list">' + contactsHtml + '</div>' +
+                    '<div class="games-sheet-header" id="games-sheet-opponent-label">Opponent</div>' +
+                    '<div class="games-sheet-contact-list' + (sorted.length === 0 ? ' is-empty' : '') + '" role="group" aria-labelledby="games-sheet-opponent-label">' + contactsHtml + '</div>' +
                 '</div>' +
             '</div>' +
             '<div class="bottom-sheet-footer games-sheet-footer">' +
@@ -1438,9 +1826,13 @@
         var sheet = shell.sheet;
 
         var selectedHash = null;
-        var selectedAppId = 'ttt';
+        var selectedAppId = manifests[0] ? manifests[0].app_id : 'ttt';
 
         if (sheet) {
+            sheet._ratspeakDismiss = function() {
+                _closeNewGameSheet();
+                return true;
+            };
             sheet.querySelectorAll('.games-sheet-game-card').forEach(function(card) {
                 card.addEventListener('click', function() {
                     if (typeof haptic === 'function') haptic('selection');
@@ -1468,10 +1860,42 @@
                     if (sendBtn) sendBtn.disabled = false;
                 });
             });
+
+            sheet.addEventListener('keydown', function(e) {
+                if (e.key === 'Escape') {
+                    e.preventDefault();
+                    _closeNewGameSheet();
+                    return;
+                }
+                if (e.key !== 'Tab') return;
+                var focusable = sheet.querySelectorAll('button:not([disabled])');
+                if (!focusable.length) return;
+                var first = focusable[0];
+                var last = focusable[focusable.length - 1];
+                if (e.shiftKey && document.activeElement === first) {
+                    e.preventDefault();
+                    last.focus();
+                } else if (!e.shiftKey && document.activeElement === last) {
+                    e.preventDefault();
+                    first.focus();
+                }
+            });
+
+            requestAnimationFrame(function() {
+                var selectedGame = sheet.querySelector('.games-sheet-game-card.selected');
+                if (selectedGame) selectedGame.focus();
+            });
         }
 
         _bindBtn('games-sheet-close', _closeNewGameSheet);
         _bindBtn('games-sheet-cancel', _closeNewGameSheet);
+        _bindBtn('games-sheet-open-contacts', function() {
+            _closeNewGameSheet(function() {
+                if (typeof switchView === 'function') {
+                    switchView('contacts', { pushState: true });
+                }
+            });
+        });
         _bindBtn('games-sheet-send', function() {
             if (!selectedHash) return;
             if (typeof haptic === 'function') haptic('selection');
@@ -1490,10 +1914,18 @@
         }
     }
 
-    function _closeNewGameSheet() {
+    function _closeNewGameSheet(done) {
+        var sheet = document.getElementById('games-new-sheet');
+        var previousFocus = sheet && sheet._gamesPreviousFocus;
         RS.sheetShell.dismiss({
             overlay: document.getElementById('games-new-sheet-overlay'),
-            sheet: document.getElementById('games-new-sheet'),
+            sheet: sheet,
+        }, function() {
+            if (typeof done === 'function') {
+                done();
+            } else if (previousFocus && previousFocus.focus) {
+                previousFocus.focus();
+            }
         });
     }
 
@@ -1504,6 +1936,7 @@
         for (var i = 0; i < arr.length; i++) {
             sessionId += ('0' + arr[i].toString(16)).slice(-2);
         }
+        if (!_beginSessionAction(sessionId)) return;
 
         RS.invoke('send_game_action', {
             args: {
@@ -1514,9 +1947,11 @@
                 payload: {},
             }
         }).then(function(ack) {
+            _finishSessionAction(sessionId);
             if (ack && ack.ok === false) {
-                var msg = _reasonToMessage(ack.reason || 'send_failed', 'challenge');
-                if (typeof showToast === 'function') showToast('Challenge failed: ' + msg, 'toast-red', 4000);
+                // game_action_result owns rejection feedback. Avoid showing
+                // the same backend failure twice via both IPC completion and
+                // the event stream.
                 return;
             }
             if (typeof showToast === 'function') showToast('Challenge sent', 'toast-green', 2000);
@@ -1529,6 +1964,7 @@
                 }
             }).catch(function() {});
         }).catch(function() {
+            _finishSessionAction(sessionId);
             if (typeof showToast === 'function') {
                 showToast('Challenge failed', 'toast-red', 4000);
             }
@@ -1565,6 +2001,17 @@
             if (data && data.session_id) _removeSessionLocal(data.session_id);
         });
 
+        RS.listen('game_protocol_error', function(data) {
+            if (!data) return;
+            var message = data.message
+                ? String(data.message).slice(0, 180)
+                : _reasonToMessage(data.code || 'protocol_error', data.ref || 'action');
+            if (typeof showToast === 'function') {
+                showToast('Game action rejected: ' + message, 'toast-red', 5000);
+            }
+            if (typeof haptic === 'function') haptic('error');
+        });
+
         // Success clears the optimistic backup; failure restores it.
         RS.listen('game_action_result', function(data) {
             if (!data || !data.session_id) return;
@@ -1575,56 +2022,7 @@
                 return;
             }
 
-            var reason = data.reason || 'send_failed';
-
-            // Construction-time send failure (lxmf_not_initialized, hex/sign).
-            // Backend already rolled back; drop the optimistic backup so we
-            // don't try to double-rollback locally.
-            if (reason === 'send_failed') {
-                delete _optimisticBackup[sid];
-                if (typeof showToast === 'function') {
-                    showToast(_reasonToMessage(reason, data.command), 'toast-red', 5000);
-                }
-                if (typeof haptic === 'function') haptic('error');
-                return;
-            }
-
-            // Immediate rejection — backend never mutated, roll back locally.
-            var backup = _optimisticBackup[sid];
-            if (!backup) {
-                if (typeof showToast === 'function') {
-                    showToast(_reasonToMessage(reason, data.command), 'toast-red', 4000);
-                }
-                return;
-            }
-
-            for (var i = 0; i < _allSessions.length; i++) {
-                if (_allSessions[i].game_id !== sid) continue;
-                var s = _allSessions[i];
-                s.state = backup.state;
-                s.move_count = backup.move_count;
-                s.turn = backup.turn;
-                s.status = backup.status;
-                s.terminal = backup.terminal;
-                s.winner = backup.winner;
-                s.delivery_state = backup.delivery_state;
-                if (backup.fen !== undefined) s.fen = backup.fen;
-                if (backup.legal_moves !== undefined) s.legal_moves = backup.legal_moves;
-                if (backup.last_move !== undefined) s.last_move = backup.last_move;
-                if (backup.in_check !== undefined) s.in_check = backup.in_check;
-                if (backup.draw_offer_reason !== undefined) s.draw_offer_reason = backup.draw_offer_reason;
-                if (backup.terminal_reason !== undefined) s.terminal_reason = backup.terminal_reason;
-                break;
-            }
-            delete _optimisticBackup[sid];
-
-            renderSessionList();
-            if (sid === _selectedSessionId) renderDetail();
-
-            if (typeof showToast === 'function') {
-                showToast(_reasonToMessage(reason, data.command), 'toast-red', 4000);
-            }
-            if (typeof haptic === 'function') haptic('error');
+            _handleGameActionFailure(data);
         });
 
         // Per-action signal from the runtime — forces a board redraw and badge
@@ -1646,17 +2044,11 @@
     function _handleSessionDelta(record, prev) {
         if (!record || !record.game_id) return;
 
-        var prevBoard = prev ? prev.state : null;
         var prevStatus = prev ? prev.status : null;
 
-        if (record.game_id === _selectedSessionId && record.state && prevBoard && record.state !== prevBoard) {
-            for (var c = 0; c < 9; c++) {
-                if ((prevBoard[c] || '_') !== (record.state[c] || '_')) {
-                    _animatingCell = c;
-                    _animatingCellExpiry = Date.now() + 600;
-                    break;
-                }
-            }
+        var view = _gameView(_appId(record));
+        if (view && view.onSessionDelta) {
+            view.onSessionDelta(record, prev, _gameViewContext(record));
         }
 
         var isNew = !prev;
@@ -1676,7 +2068,9 @@
         // Toast on remote moves whenever the user isn't actively staring at
         // this game's board. `currentView !== 'games'` catches every other tab;
         // even on the games view a delta on a non-selected game still alerts.
-        var movedSinceLast = prev && record.move_count !== prev.move_count;
+        var movedSinceLast = prev &&
+            _sessionValue(record, 'move_count', null) !==
+            _sessionValue(prev, 'move_count', null);
         var notViewingThisGame = !_isViewingSession(record.game_id);
         if (movedSinceLast && notViewingThisGame && record.status === 'active') {
             if (typeof showToast === 'function') showToast('Game update from ' + _contactName(record.contact_hash), 'toast-blue', 3000, function() { window.openGameSession(record.game_id); });
@@ -1715,8 +2109,12 @@
         for (var i = 0; i < tabs.length; i++) {
             tabs[i].addEventListener('click', function() {
                 var all = document.querySelectorAll('.games-tab');
-                for (var j = 0; j < all.length; j++) all[j].classList.remove('active');
+                for (var j = 0; j < all.length; j++) {
+                    all[j].classList.remove('active');
+                    all[j].setAttribute('aria-pressed', 'false');
+                }
                 this.classList.add('active');
+                this.setAttribute('aria-pressed', 'true');
                 _activeFilter = this.getAttribute('data-filter');
                 renderSessionList();
             });
@@ -1730,6 +2128,10 @@
 
     window.gamesTabLoad = function() {
         _contactNameCache = {};
+        _loadGameManifests().then(function() {
+            renderSessionList();
+            renderDetail();
+        });
         RS.invoke('get_all_game_sessions').then(function(sessions) {
             if (Array.isArray(sessions)) {
                 _allSessions = sessions;
@@ -1766,11 +2168,55 @@
         updateGamesBadge();
     };
 
+    function _registerBuiltinGameViews() {
+        if (!RS.games || !RS.games.views) {
+            throw new Error('Game view registry must load before games_tab.js');
+        }
+        if (!RS.games.views.has('ttt')) {
+            RS.games.views.register('ttt', {
+                displayName: 'Tic-Tac-Toe',
+                icon: '#',
+                themeClass: 'games-theme-ttt',
+                boardSelector: '.ttt-grid',
+                actions: ['challenge', 'accept', 'decline', 'move', 'resign',
+                    'draw_offer', 'draw_accept', 'draw_decline'],
+                renderBoard: _renderTTTBoard,
+                bindBoard: _bindTTTCellEvents,
+                activeStatusText: _tttActiveStatusText,
+                detailChips: _tttDetailChips,
+                onSessionDelta: _tttSessionDelta,
+                celebrationOptions: function() {
+                    return { count: 48, duration: 1600 };
+                },
+            });
+        }
+        if (!RS.games.views.has('chess')) {
+            RS.games.views.register('chess', {
+                displayName: 'Chess',
+                icon: '\u265E',
+                themeClass: 'games-theme-chess',
+                boardSelector: '.chess-board',
+                actions: ['challenge', 'accept', 'decline', 'move', 'resign',
+                    'draw_offer', 'draw_accept', 'draw_decline'],
+                renderBoard: _renderChessBoard,
+                bindBoard: _bindChessSquareEvents,
+                activeStatusText: _chessActiveStatusText,
+                detailChips: _chessDetailChips,
+                renderActiveControls: _chessRenderActiveControls,
+                celebrationOptions: _chessCelebrationOptions,
+                actionPayload: _chessActionPayload,
+            });
+        }
+    }
+
     function _init() {
+        _loadGameManifests();
         _initTabFilters();
         _initNewGameBtn();
         _initGameEvents();
     }
+
+    _registerBuiltinGameViews();
 
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', _init);

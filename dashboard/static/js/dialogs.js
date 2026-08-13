@@ -120,9 +120,21 @@ function rsPrompt(opts) {
     });
 }
 
+function _rsHandleNativeBack(opts, dismiss) {
+    if (opts.nativeBackDismissible === false) return false;
+    var value = typeof opts.nativeBackValue === 'function'
+        ? opts.nativeBackValue()
+        : (Object.prototype.hasOwnProperty.call(opts, 'nativeBackValue')
+            ? opts.nativeBackValue
+            : null);
+    dismiss(value);
+    return true;
+}
+
 // Builds canonical .bottom-sheet shell. Caller wires its own overlay-click
 // handler so dismiss-on-tap can use live state.
 function _rsBuildSheet(opts, onClose) {
+    opts = opts || {};
     var resolved = false;
     var previousFocus = document.activeElement;
 
@@ -134,13 +146,14 @@ function _rsBuildSheet(opts, onClose) {
     var sheet = shell.sheet;
     sheet.setAttribute('role', 'dialog');
     sheet.setAttribute('aria-modal', 'true');
+    sheet.setAttribute('aria-label', opts.ariaLabel || opts.title || 'Dialog');
     sheet.style.zIndex = '100000';
 
     var handle = document.createElement('div');
     handle.className = 'bottom-sheet-handle';
     sheet.appendChild(handle);
 
-    if (opts.title) {
+    if (opts.title && opts.showTitle !== false) {
         var header = document.createElement('div');
         header.className = 'bottom-sheet-header';
         var title = document.createElement('div');
@@ -178,11 +191,20 @@ function _rsBuildSheet(opts, onClose) {
         resolved = true;
 
         RS.sheetShell.dismiss(shell, function() {
-            if (previousFocus && previousFocus.focus) previousFocus.focus();
+            var restoreFocus = RS.ui && typeof RS.ui.prefersKeyboardFocus === 'function'
+                ? RS.ui.prefersKeyboardFocus()
+                : true;
+            if (restoreFocus && previousFocus && previousFocus.focus) previousFocus.focus();
         });
 
         if (onClose) onClose(value);
     }
+
+    // Preserve each dialog's documented cancel value when native Back closes
+    // a rich sheet. Non-dismissible progress sheets still consume Back.
+    sheet._ratspeakDismiss = function() {
+        return _rsHandleNativeBack(opts, dismiss);
+    };
 
     function present() {
         RS.sheetShell.present(shell);
@@ -212,7 +234,10 @@ function _rsShowDialog(cfg, callback) {
         return !!confirmed;
     }
 
-    var built = _rsBuildSheet({ title: cfg.title }, callback);
+    var built = _rsBuildSheet({
+        title: cfg.title,
+        nativeBackValue: function() { return resolveValue(false); }
+    }, callback);
 
     built.overlay.addEventListener('click', function(e) {
         if (e.target === built.overlay) built.dismiss(resolveValue(false));
@@ -322,7 +347,9 @@ function rsChoice(opts) {
         var built = _rsBuildSheet({
             title: opts.title || 'Choose',
             titleIcon: opts.titleIcon || '',
-            titleIconType: opts.titleIconType || ''
+            titleIconType: opts.titleIconType || '',
+            showTitle: opts.showTitle !== false,
+            ariaLabel: opts.ariaLabel || opts.title || 'Choose an action'
         }, resolve);
 
         built.overlay.addEventListener('click', function(e) {
@@ -522,7 +549,10 @@ function rsProgress(opts) {
     var previousFocus = document.activeElement;
     var _onClose = null;
 
-    var built = _rsBuildSheet({ title: opts.title || 'Working...' }, function() {
+    var built = _rsBuildSheet({
+        title: opts.title || 'Working...',
+        nativeBackDismissible: false
+    }, function() {
         resolved = true;
         if (_onClose) _onClose();
     });

@@ -63,6 +63,26 @@ function copyIdentityValue(value, noun) {
     });
 }
 
+function identityAddressRowHtml(label, value) {
+    var rawValue = value || '';
+    var safeLabel = escapeHtml(label || 'Value');
+    var safeValue = escapeHtml(rawValue);
+    var unavailable = rawValue ? '' : ' disabled aria-disabled="true"';
+    var actionLabel = rawValue ? 'Copy ' + safeLabel : safeLabel + ' unavailable';
+    return '<button type="button" class="identity-address-row"' +
+        ' data-copy-value="' + safeValue + '"' +
+        ' data-copy-label="' + safeLabel + '"' +
+        ' aria-label="' + actionLabel + '" title="' + actionLabel + '"' + unavailable + '>' +
+            '<span class="identity-address-meta">' +
+                '<span class="identity-label">' + safeLabel + '</span>' +
+                '<span class="identity-value mono" dir="ltr">' + (safeValue || '&mdash;') + '</span>' +
+            '</span>' +
+            '<span class="identity-address-action" aria-hidden="true">' +
+                '<svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><rect x="2" y="2" width="13" height="13" rx="2"/></svg>' +
+            '</span>' +
+        '</button>';
+}
+
 function identitySetInlineError(id, message) {
     var errEl = document.getElementById(id);
     if (!errEl) return;
@@ -630,20 +650,8 @@ function renderActiveIdentityCard() {
             '</div>' +
         '</div>' +
         '<div class="identity-address-stack">' +
-            '<button type="button" class="identity-address-row" data-copy-value="' + escapeHtml(lxmfHash) + '" data-copy-label="Address">' +
-                '<span class="identity-address-meta">' +
-                    '<span class="identity-label">LXMF Address</span>' +
-                    '<span class="identity-value mono">' + copyableHash(lxmfHash) + '</span>' +
-                '</span>' +
-                '<span class="identity-address-action"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><rect x="2" y="2" width="13" height="13" rx="2"/></svg></span>' +
-            '</button>' +
-            '<button type="button" class="identity-address-row" data-copy-value="' + escapeHtml(identityHash) + '" data-copy-label="Hash">' +
-                '<span class="identity-address-meta">' +
-                    '<span class="identity-label">Identity Hash</span>' +
-                    '<span class="identity-value mono">' + copyableHash(identityHash) + '</span>' +
-                '</span>' +
-                '<span class="identity-address-action"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><rect x="2" y="2" width="13" height="13" rx="2"/></svg></span>' +
-            '</button>' +
+            identityAddressRowHtml('LXMF Address', lxmfHash) +
+            identityAddressRowHtml('Identity Hash', identityHash) +
         '</div>' +
         editorHtml +
         '<div class="identity-detail-actions">' +
@@ -707,6 +715,12 @@ function renderActiveIdentityCard() {
             saveBtn.disabled = true;
             saveBtn.textContent = 'Saving...';
             RS.invoke('api_set_display_name', { args: { display_name: newName } }).then(function() {
+                // Refresh the cached name so no consumer keeps offering the
+                // superseded one (channel nicknames, header, modals).
+                try { localStorage.setItem('ratspeak_identity_name', newName); } catch (_) {}
+                // The backend retired the old name from saved hub bookmarks;
+                // reload them so an open session sees it without a restart.
+                if (typeof channelsRefreshSavedHubs === 'function') channelsRefreshSavedHubs();
                 showToast('Display name saved and announced', 'toast-green', 3000);
                 saveBtn.textContent = 'Saved!';
                 saveBtn.className = 'nr-btn nr-btn-success';
@@ -1858,7 +1872,8 @@ RS.listen('identity_switched', function(data) {
     if (typeof lxmfIdentityHash !== 'undefined') lxmfIdentityHash = data.hash;
 
     if (typeof events !== 'undefined') events = [];
-    if (typeof activityLog !== 'undefined') activityLog = [];
+    if (typeof activityEvents !== 'undefined') activityEvents = [];
+    if (typeof activityResetReveals === 'function') activityResetReveals();
 
     var msgList = document.getElementById('lxmf-messages');
     if (msgList) msgList.innerHTML = '<div class="lxmf-empty">Select a contact to view conversation.</div>';
@@ -2476,7 +2491,8 @@ document.addEventListener('DOMContentLoaded', function() {
     // Hardware (YubiKey/PIV) identities are desktop-only for now: the `hardware`
     // feature + hw_* commands are gated off on mobile. Hide the entry points there.
     // TODO(ratkey-mobile): add the wrapped-session model — see HARDWARE_STATUS.md.
-    var hideHardware = (typeof isMobile === 'function') && isMobile();
+    var hideHardware = (typeof supportsHardwareIdentities === 'function')
+        && !supportsHardwareIdentities();
 
     var identityHwBtn = document.getElementById('identity-hardware-btn');
     if (identityHwBtn) {

@@ -1,6 +1,199 @@
 (function() {
     window.RS = window.RS || {};
     RS.ui = RS.ui || {};
+    RS.composer = RS.composer || {};
+    RS.text = RS.text || {};
+
+    // Keep focus behavior appropriate to the user's latest input method.
+    // Touch controls should release their transient focus after activation,
+    // while keyboard and assistive activation retain visible focus and focus
+    // restoration across rebuilt surfaces.
+    var interactionModality = 'keyboard';
+
+    function setInteractionModality(value) {
+        interactionModality = value;
+        document.documentElement.dataset.inputModality = value;
+    }
+
+    document.addEventListener('keydown', function(event) {
+        if (event.metaKey || event.ctrlKey || event.altKey) return;
+        setInteractionModality('keyboard');
+    }, true);
+    document.addEventListener('pointerdown', function(event) {
+        setInteractionModality(event.pointerType === 'touch' ? 'touch' : 'pointer');
+    }, true);
+    document.addEventListener('touchstart', function() {
+        setInteractionModality('touch');
+    }, { capture: true, passive: true });
+
+    RS.ui.prefersKeyboardFocus = function() {
+        return interactionModality === 'keyboard';
+    };
+
+    RS.ui.focusAfterUpdate = function(element) {
+        if (!element || !RS.ui.prefersKeyboardFocus()) return;
+        try { element.focus({ preventScroll: true }); }
+        catch (_) { element.focus(); }
+    };
+
+    document.addEventListener('click', function(event) {
+        if (interactionModality !== 'touch') return;
+        var target = event.target && event.target.closest
+            ? event.target.closest('button, a[href], [role="button"]')
+            : null;
+        if (!target || target.hasAttribute('data-keep-touch-focus')) return;
+        setTimeout(function() {
+            if (document.activeElement === target && typeof target.blur === 'function') target.blur();
+        }, 0);
+    }, true);
+
+    // Shared soft-keyboard continuity for every chat composer. Pointer-down on
+    // a send control must not blur the textarea, otherwise Android closes and
+    // reopens the IME around the asynchronous command response.
+    var composerFocusState = new WeakMap();
+
+    RS.composer.captureFocus = function(input) {
+        if (!input) return;
+        composerFocusState.set(input, {
+            wasFocused: document.activeElement === input,
+            capturedAt: Date.now()
+        });
+    };
+
+    RS.composer.consumeFocus = function(input) {
+        if (!input) return false;
+        var focusedNow = document.activeElement === input;
+        var state = composerFocusState.get(input);
+        composerFocusState.delete(input);
+        if (state && Date.now() - state.capturedAt < 8000) {
+            return state.wasFocused || focusedNow;
+        }
+        return focusedNow;
+    };
+
+    RS.composer.focusWithoutScroll = function(input) {
+        if (!input || document.activeElement === input) return;
+        try { input.focus({ preventScroll: true }); }
+        catch (_) { input.focus(); }
+    };
+
+    // Composer replacements (voice recorder, attachment review, etc.) must
+    // wait for the mobile IME/visual viewport to settle after blur. Keeping
+    // this transition here prevents each composer from inventing a subtly
+    // different keyboard workaround.
+    RS.composer.dismissForReplacement = function(input) {
+        if (input && document.activeElement === input) input.blur();
+        return new Promise(function(resolve) {
+            var startedAt = Date.now();
+            function settled() {
+                var mobile = typeof isTauriMobile === 'function' && isTauriMobile();
+                var keyboardOpen = document.documentElement.classList.contains('keyboard-open');
+                if (!mobile || !keyboardOpen || Date.now() - startedAt >= 240) {
+                    if (typeof requestAnimationFrame === 'function') {
+                        requestAnimationFrame(function() { requestAnimationFrame(resolve); });
+                    } else {
+                        setTimeout(resolve, 0);
+                    }
+                    return;
+                }
+                setTimeout(settled, 24);
+            }
+            settled();
+        });
+    };
+
+    RS.composer.resize = function(input, maxHeight) {
+        if (!input) return '';
+        input.style.height = 'auto';
+        input.style.height = Math.min(input.scrollHeight, maxHeight || 124) + 'px';
+        return input.style.height;
+    };
+
+    RS.composer.reset = function(input) {
+        if (!input) return;
+        input.value = '';
+        input.style.height = '';
+        input.scrollTop = 0;
+    };
+
+    RS.text.utf8Length = function(value) {
+        var text = String(value == null ? '' : value);
+        if (window.TextEncoder) return new TextEncoder().encode(text).length;
+        return unescape(encodeURIComponent(text)).length;
+    };
+
+    RS.text.truncateUtf8 = function(value, maxBytes) {
+        var result = '';
+        var used = 0;
+        Array.from(String(value == null ? '' : value)).some(function(character) {
+            var bytes = RS.text.utf8Length(character);
+            if (used + bytes > maxBytes) return true;
+            result += character;
+            used += bytes;
+            return false;
+        });
+        return result;
+    };
+
+    RS.composer.bindTapToSend = function(button, input, onSend) {
+        if (!button || !input || typeof onSend !== 'function' || button._rsStableSendBound) return;
+        button._rsStableSendBound = true;
+        var startX = 0;
+        var startY = 0;
+        var moved = false;
+        var suppressClickUntil = 0;
+        var moveCancelSq = 12 * 12;
+
+        button.addEventListener('touchstart', function(event) {
+            event.preventDefault();
+            RS.composer.captureFocus(input);
+            var touch = event.touches && event.touches[0];
+            if (touch) {
+                startX = touch.clientX;
+                startY = touch.clientY;
+            }
+            moved = false;
+        }, { passive: false });
+
+        button.addEventListener('touchmove', function(event) {
+            var touch = event.touches && event.touches[0];
+            if (!touch) return;
+            var dx = touch.clientX - startX;
+            var dy = touch.clientY - startY;
+            if (dx * dx + dy * dy > moveCancelSq) moved = true;
+        }, { passive: true });
+
+        button.addEventListener('touchend', function(event) {
+            event.preventDefault();
+            suppressClickUntil = Date.now() + 500;
+            if (!moved) onSend();
+        });
+
+        button.addEventListener('touchcancel', function() { moved = true; });
+        button.addEventListener('mousedown', function(event) {
+            event.preventDefault();
+            RS.composer.captureFocus(input);
+        });
+        button.addEventListener('click', function(event) {
+            if (Date.now() < suppressClickUntil) {
+                event.preventDefault();
+                event.stopPropagation();
+                return;
+            }
+            RS.composer.captureFocus(input);
+            onSend();
+        });
+    };
+
+    RS.ui.bindKeyboardActivation = function(element) {
+        if (!element || element._ratspeakKeyboardActivationBound) return;
+        element._ratspeakKeyboardActivationBound = true;
+        element.addEventListener('keydown', function(event) {
+            if (event.key !== 'Enter' && event.key !== ' ') return;
+            event.preventDefault();
+            element.click();
+        });
+    };
 
     var transportLabels = { auto: 'AUTO', on: 'ON', off: 'OFF' };
     var transportChoices = [
@@ -12,6 +205,111 @@
     function elementRef(elOrId) {
         return typeof elOrId === 'string' ? document.getElementById(elOrId) : elOrId;
     }
+
+    var helpPopover = null;
+    var helpTrigger = null;
+    var helpPinned = false;
+
+    function ensureHelpPopover() {
+        if (helpPopover) return helpPopover;
+        helpPopover = document.createElement('div');
+        helpPopover.id = 'rs-help-popover';
+        helpPopover.className = 'rs-help-popover';
+        helpPopover.setAttribute('role', 'tooltip');
+        helpPopover.hidden = true;
+        document.body.appendChild(helpPopover);
+        return helpPopover;
+    }
+
+    function positionHelpPopover() {
+        if (!helpTrigger || !helpPopover || helpPopover.hidden) return;
+        var margin = 12;
+        var gap = 8;
+        var triggerRect = helpTrigger.getBoundingClientRect();
+        var popoverRect = helpPopover.getBoundingClientRect();
+        var left = triggerRect.left + (triggerRect.width - popoverRect.width) / 2;
+        left = Math.max(margin, Math.min(left, window.innerWidth - popoverRect.width - margin));
+        var top = triggerRect.bottom + gap;
+        var placement = 'below';
+        if (top + popoverRect.height > window.innerHeight - margin &&
+            triggerRect.top - gap - popoverRect.height >= margin) {
+            top = triggerRect.top - gap - popoverRect.height;
+            placement = 'above';
+        }
+        top = Math.max(margin, Math.min(top, window.innerHeight - popoverRect.height - margin));
+        helpPopover.style.left = Math.round(left) + 'px';
+        helpPopover.style.top = Math.round(top) + 'px';
+        helpPopover.dataset.placement = placement;
+    }
+
+    function closeHelpPopover() {
+        if (!helpTrigger) return;
+        helpTrigger.classList.remove('open');
+        helpTrigger.setAttribute('aria-expanded', 'false');
+        helpTrigger.removeAttribute('aria-describedby');
+        helpTrigger = null;
+        helpPinned = false;
+        if (helpPopover) {
+            helpPopover.classList.remove('open');
+            helpPopover.hidden = true;
+        }
+    }
+
+    function openHelpPopover(trigger, pinned) {
+        var text = trigger && trigger.getAttribute('data-tooltip');
+        if (!text) return;
+        if (helpTrigger && helpTrigger !== trigger) closeHelpPopover();
+        var popover = ensureHelpPopover();
+        helpTrigger = trigger;
+        helpPinned = !!pinned;
+        popover.textContent = text;
+        popover.hidden = false;
+        trigger.classList.add('open');
+        trigger.setAttribute('aria-expanded', 'true');
+        trigger.setAttribute('aria-describedby', popover.id);
+        positionHelpPopover();
+        requestAnimationFrame(function() {
+            if (helpTrigger === trigger) popover.classList.add('open');
+        });
+    }
+
+    RS.ui.bindHelpPopovers = function(root) {
+        var scope = root || document;
+        var triggers = scope.querySelectorAll('[data-tooltip]');
+        triggers.forEach(function(trigger) {
+            if (trigger._ratspeakHelpPopoverBound) return;
+            trigger._ratspeakHelpPopoverBound = true;
+            trigger.setAttribute('aria-expanded', 'false');
+            trigger.addEventListener('click', function(event) {
+                event.preventDefault();
+                event.stopPropagation();
+                if (helpTrigger === trigger && helpPinned) closeHelpPopover();
+                else openHelpPopover(trigger, true);
+            });
+            trigger.addEventListener('focus', function() {
+                if (RS.ui.prefersKeyboardFocus()) openHelpPopover(trigger, false);
+            });
+            trigger.addEventListener('blur', function() {
+                if (helpTrigger === trigger && !helpPinned) closeHelpPopover();
+            });
+            trigger.addEventListener('pointerenter', function(event) {
+                if (event.pointerType !== 'touch') openHelpPopover(trigger, false);
+            });
+            trigger.addEventListener('pointerleave', function(event) {
+                if (event.pointerType === 'touch' || helpPinned || document.activeElement === trigger) return;
+                if (helpTrigger === trigger) closeHelpPopover();
+            });
+        });
+    };
+
+    document.addEventListener('click', function(event) {
+        if (helpTrigger && !helpTrigger.contains(event.target)) closeHelpPopover();
+    });
+    document.addEventListener('keydown', function(event) {
+        if (event.key === 'Escape') closeHelpPopover();
+    });
+    window.addEventListener('resize', positionHelpPopover);
+    window.addEventListener('scroll', positionHelpPopover, true);
 
     function currentNetworkType() {
         if (navigator.connection && navigator.connection.type) return navigator.connection.type;
@@ -87,7 +385,23 @@
         if (!modal) return null;
         modal.classList.add('open');
         if (overlay) overlay.classList.add('active');
-        if (typeof _trapFocus === 'function') _trapFocus(modal);
+        // Feature close callbacks may clear pending edits or secrets. Never
+        // replace them with the generic visual close used by simple sheets.
+        if (typeof modal._ratspeakDismiss !== 'function') {
+            modal._ratspeakDismiss = function() {
+                RS.ui.closeExistingSheet(modal, overlay);
+            };
+        }
+        if (!modal._ratspeakEscapeHandler) {
+            modal._ratspeakEscapeHandler = function(event) {
+                if (event.key === 'Escape' && modal.classList.contains('open')) {
+                    event.preventDefault();
+                    modal._ratspeakDismiss();
+                }
+            };
+            document.addEventListener('keydown', modal._ratspeakEscapeHandler);
+        }
+        if (typeof _trapFocus === 'function' && !modal._focusTrapHandler) _trapFocus(modal);
         return modal;
     };
 
@@ -95,6 +409,10 @@
         var modal = elementRef(modalId);
         var overlay = elementRef(overlayId);
         if (!modal) return;
+        if (modal._ratspeakEscapeHandler) {
+            document.removeEventListener('keydown', modal._ratspeakEscapeHandler);
+            modal._ratspeakEscapeHandler = null;
+        }
         if (typeof _releaseFocus === 'function') _releaseFocus(modal);
         modal.classList.remove('open');
         if (overlay) overlay.classList.remove('active');
@@ -200,7 +518,7 @@
     RS.ui.openActionMenu = function(trigger, items, opts) {
         opts = opts || {};
         if (!trigger || !items || !items.length) return Promise.resolve(null);
-        if (typeof isMobile === 'function' && isMobile() && typeof rsChoice === 'function' && opts.mobileSheet !== false) {
+        if (typeof isCompactLayout === 'function' && isCompactLayout() && typeof rsChoice === 'function' && opts.mobileSheet !== false) {
             var choices = items.filter(function(item) { return !item.separator && !item.disabled; }).map(function(item, idx) {
                 return {
                     label: item.label,
@@ -210,7 +528,11 @@
                     danger: !!item.danger
                 };
             });
-            return rsChoice({ title: opts.title || 'Actions', choices: choices }).then(function(idx) {
+            return rsChoice({
+                title: opts.title || 'Actions',
+                showTitle: opts.showTitle !== false,
+                choices: choices
+            }).then(function(idx) {
                 if (idx === null || idx === undefined) return null;
                 var item = items.filter(function(candidate) { return !candidate.separator && !candidate.disabled; })[idx];
                 if (item && typeof item.onSelect === 'function') item.onSelect();

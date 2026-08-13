@@ -1,11 +1,53 @@
 var currentView = 'dashboard';
-var VIEWS = ['dashboard', 'message', 'contacts', 'identity', 'peers', 'network', 'games', 'settings'];
+var _messageUnreadSources = { direct: 0, channels: 0 };
+
+// Direct LXMF and Channels have distinct destinations and attention indicators.
+// Keep one source-aware reducer so asynchronous listeners cannot hide the
+// other surface's state.
+function setMessageUnreadSource(source, count) {
+    if (source !== 'direct' && source !== 'channels') return;
+    count = Number(count);
+    if (!Number.isFinite(count) || count < 0) count = 0;
+    count = Math.floor(count);
+    _messageUnreadSources[source] = count;
+
+    var directDot = document.getElementById('nav-unread-dot');
+    if (directDot) directDot.style.display = _messageUnreadSources.direct > 0 ? '' : 'none';
+    var channelsDot = document.getElementById('nav-channels-unread');
+    if (channelsDot) channelsDot.style.display = _messageUnreadSources.channels > 0 ? '' : 'none';
+    var bottomDot = document.getElementById('bb-unread');
+    if (bottomDot) {
+        bottomDot.style.display = _messageUnreadSources.direct > 0 ? '' : 'none';
+        if (bottomDot.parentElement) {
+            bottomDot.parentElement.setAttribute(
+                'aria-label',
+                'Messages' + (_messageUnreadSources.direct > 0
+                    ? ', ' + _messageUnreadSources.direct + ' unread'
+                    : '')
+            );
+        }
+    }
+    var bottomChannelsDot = document.getElementById('bb-channels-unread');
+    if (bottomChannelsDot) {
+        bottomChannelsDot.style.display = _messageUnreadSources.channels > 0 ? '' : 'none';
+        if (bottomChannelsDot.parentElement) {
+            bottomChannelsDot.parentElement.setAttribute(
+                'aria-label',
+                'Channels' + (_messageUnreadSources.channels > 0
+                    ? ', ' + _messageUnreadSources.channels + ' unread'
+                    : '')
+            );
+        }
+    }
+}
+window.setMessageUnreadSource = setMessageUnreadSource;
+var VIEWS = ['dashboard', 'message', 'channels', 'contacts', 'identity', 'peers', 'network', 'games', 'settings'];
 
 // Tab-bar destinations use replaceState; MORE_VIEWS live under the hamburger.
-var TAB_VIEWS = ['peers', 'message', 'contacts', 'identity', 'network', 'games', 'settings'];
-var PRIMARY_TAB_VIEWS = ['peers', 'message', 'contacts'];
-var MORE_VIEWS = ['identity', 'network', 'games', 'settings'];
-var MOBILE_TAB_SLOTS = ['peers', 'message', 'contacts', 'more'];
+var TAB_VIEWS = ['peers', 'message', 'channels', 'contacts', 'identity', 'network', 'games', 'settings'];
+var PRIMARY_TAB_VIEWS = ['peers', 'message', 'channels'];
+var MORE_VIEWS = ['contacts', 'identity', 'network', 'games', 'settings'];
+var MOBILE_TAB_SLOTS = ['peers', 'message', 'channels', 'more'];
 var DEFAULT_MORE_VIEW = 'identity';
 var _lastMoreView = DEFAULT_MORE_VIEW;
 var _lastPrimaryView = 'peers';
@@ -41,6 +83,21 @@ var VIEW_ALIASES = {
     'propagation': 'network'
 };
 
+function _normalizeViewId(viewId) {
+    var normalized = String(viewId || '').replace(/^#/, '');
+    if (VIEW_ALIASES[normalized]) normalized = VIEW_ALIASES[normalized];
+    return VIEWS.indexOf(normalized) !== -1 ? normalized : null;
+}
+
+function _resolveInitialView() {
+    var hashView = _normalizeViewId(window.location.hash);
+    if (hashView) return hashView;
+    if (typeof isCompactLayout === 'function' && isCompactLayout()) return 'peers';
+    var saved = null;
+    try { saved = localStorage.getItem('ratspeak_view'); } catch(e) {}
+    return _normalizeViewId(saved) || 'dashboard';
+}
+
 var _navTransitioning = false;
 var _navInitialLoad = true;
 var _mobileNavigationBlockedUntil = 0;
@@ -54,8 +111,20 @@ if (window.matchMedia) {
     });
 }
 
+function _mobileBlockingOverlayOpen() {
+    return !!document.querySelector(
+        '.bottom-sheet.open, .bottom-sheet-overlay.active, ' +
+        '.modal-overlay.active, .game-modal-overlay, .block-list-overlay, ' +
+        '#rs-image-viewer.open, .action-popover.open, ' +
+        '[class*="-scrim"].active, .channels-layout.members-open'
+    );
+}
+
 function _isMobileNavigationBlocked() {
-    return isMobile() && Date.now() < _mobileNavigationBlockedUntil;
+    return isMobile() && (
+        Date.now() < _mobileNavigationBlockedUntil ||
+        _mobileBlockingOverlayOpen()
+    );
 }
 
 function blockMobileNavigation(ms) {
@@ -197,7 +266,7 @@ function _focusView(viewEl) {
 }
 
 function _animateViewSwitch(oldView, newView, transitionType) {
-    if (!oldView || !newView || oldView === newView || !isMobile()) {
+    if (!oldView || !newView || oldView === newView || !isCompactLayout()) {
         if (oldView) { oldView.classList.remove('active'); _cleanTransitionClasses(oldView); }
         if (newView) { newView.classList.add('active'); }
         return;
@@ -238,8 +307,7 @@ function _animateViewSwitch(oldView, newView, transitionType) {
 }
 
 function switchView(viewId, opts) {
-    if (VIEW_ALIASES && VIEW_ALIASES[viewId]) viewId = VIEW_ALIASES[viewId];
-    if (VIEWS.indexOf(viewId) === -1) viewId = 'dashboard';
+    viewId = _normalizeViewId(viewId) || 'dashboard';
     if (viewId === currentView && !_navInitialLoad) return;
     if (_navTransitioning) return;
 
@@ -249,7 +317,7 @@ function switchView(viewId, opts) {
     var newEl = document.getElementById('view-' + viewId);
 
     var transitionType = 'fade';
-    if (!_navInitialLoad && isMobile()) {
+    if (!_navInitialLoad && isCompactLayout()) {
         if (opts.transition) {
             transitionType = opts.transition;
         } else if (opts.back) {
@@ -289,16 +357,20 @@ function switchView(viewId, opts) {
         try { localStorage.setItem('ratspeak_more_view', viewId); } catch(e) {}
     }
     _rememberPrimaryView(viewId);
+    var mobileSlot = _mobileTabSlot(viewId);
     document.querySelectorAll('.bottom-bar-item').forEach(function(item) {
-        item.classList.remove('active');
-        if (item.dataset.view === viewId) item.classList.add('active');
+        var selected = item.dataset.view === mobileSlot;
+        item.classList.toggle('active', selected);
+        if (selected) item.setAttribute('aria-current', 'page');
+        else item.removeAttribute('aria-current');
     });
     var hamburger = document.getElementById('bottom-bar-hamburger');
     if (hamburger) {
-        if (isMoreView) hamburger.classList.add('active');
-        else hamburger.classList.remove('active');
+        hamburger.classList.toggle('active', isMoreView);
+        if (isMoreView) hamburger.setAttribute('aria-current', 'page');
+        else hamburger.removeAttribute('aria-current');
     }
-    document.querySelectorAll('.bottom-sheet-item').forEach(function(item) {
+    document.querySelectorAll('#bottom-sheet .bottom-sheet-item[data-view]').forEach(function(item) {
         item.classList.remove('active');
         if (item.dataset.view === viewId) item.classList.add('active');
     });
@@ -331,6 +403,12 @@ function switchView(viewId, opts) {
         // Pop chat-detail so view-chat-detail body/layout classes clear.
         var top = RS.viewStack.top();
         if (top && top.viewId === 'chat-detail') RS.viewStack.pop();
+    }
+
+    if (previousView === 'channels' && viewId !== 'channels') {
+        var topChannel = RS.viewStack.top();
+        if (topChannel && topChannel.viewId === 'channel-detail') RS.viewStack.pop();
+        if (typeof channelsCloseMemberPane === 'function') channelsCloseMemberPane();
     }
 
     if (previousView === 'games' && viewId !== 'games') {
@@ -398,6 +476,12 @@ var VIEW_LIFECYCLE = {
         if (typeof initThemeToggle === 'function') initThemeToggle();
         if (typeof initHapticsToggle === 'function') initHapticsToggle();
         if (typeof initSettingsSectionNav === 'function') initSettingsSectionNav();
+        // Settings is opened through switchView(), not openSettings(). Bind
+        // backend-backed controls from the real navigation lifecycle so a
+        // native radio change cannot look selected without being persisted.
+        if (typeof initChannelHostingToggle === 'function') initChannelHostingToggle();
+        if (typeof initDeveloperModeToggle === 'function') initDeveloperModeToggle();
+        if (typeof initWindowDecorationsToggle === 'function') initWindowDecorationsToggle();
     },
 
     identity: function() {
@@ -431,6 +515,19 @@ var VIEW_LIFECYCLE = {
         if (typeof renderContactList === 'function') renderContactList();
     },
 
+    channels: function() {
+        if (typeof channelsLoad === 'function') {
+            Promise.resolve(channelsLoad()).then(function() {
+                if (typeof channelsPrepareVisibleRead === 'function') {
+                    channelsPrepareVisibleRead();
+                }
+                if (typeof channelsRefreshDirectory === 'function') {
+                    channelsRefreshDirectory(false);
+                }
+            });
+        }
+    },
+
     contacts: function() {
         if (typeof renderStandaloneContactList === 'function') renderStandaloneContactList();
         // Re-fetch if contacts_update event was missed.
@@ -453,6 +550,14 @@ function _fireViewLifecycle(viewId) {
 }
 
 function _closeOpenBottomSheet() {
+    var openSheets = document.querySelectorAll('.rs-sheet-shell.open, .bottom-sheet.open');
+    if (openSheets.length) {
+        var topSheet = openSheets[openSheets.length - 1];
+        if (typeof topSheet._ratspeakDismiss === 'function') {
+            topSheet._ratspeakDismiss();
+            return true;
+        }
+    }
     var sheet = document.getElementById('bottom-sheet');
     if (!sheet || !sheet.classList.contains('open')) return false;
     sheet.classList.remove('open');
@@ -490,6 +595,7 @@ function _handleAppBackNavigation(opts) {
         (window.RS && typeof RS.closeImageViewer === 'function' && RS.closeImageViewer()) ||
         (window.RS && typeof RS.closeMessageActionMenu === 'function' && RS.closeMessageActionMenu()) ||
         _closeOpenBottomSheet() ||
+        (typeof channelsHandleMemberPaneBack === 'function' && channelsHandleMemberPaneBack()) ||
         _closeOpenFabPicker() ||
         _closeOpenContactSheet()
     ) {
@@ -513,7 +619,7 @@ function _handleAppBackNavigation(opts) {
         return true;
     }
 
-    if (isMobile() && MORE_VIEWS.indexOf(currentView) !== -1) {
+    if (isCompactLayout() && MORE_VIEWS.indexOf(currentView) !== -1) {
         if (fromPopState && state && PRIMARY_TAB_VIEWS.indexOf(state.view) !== -1) {
             switchView(state.view, { skipHistory: true, back: true });
         } else {
@@ -572,6 +678,12 @@ function showAboutModal() {
                     ' &middot; ' +
                     '<a href="https://reticulum.network" target="_blank" rel="noopener" class="text-link">reticulum.network</a>' +
                 '</p>' +
+                '<div class="about-policy-links" aria-label="Ratspeak policies and support">' +
+                    '<button type="button" data-about-document="privacy">Privacy</button>' +
+                    '<button type="button" data-about-document="terms">Terms</button>' +
+                    '<button type="button" data-about-document="guidelines">Guidelines</button>' +
+                    '<button type="button" data-about-document="support">Support</button>' +
+                '</div>' +
             '</div>' +
         '</div>';
     document.body.appendChild(overlay);
@@ -584,6 +696,13 @@ function showAboutModal() {
 
     function close() { overlay.remove(); }
     document.getElementById('about-modal-close').addEventListener('click', close);
+    overlay.querySelectorAll('[data-about-document]').forEach(function(button) {
+        button.addEventListener('click', function() {
+            var documentId = button.getAttribute('data-about-document');
+            close();
+            if (RS.legal && typeof RS.legal.open === 'function') RS.legal.open(documentId);
+        });
+    });
     overlay.addEventListener('click', function(e) {
         if (e.target === overlay) close();
     });
@@ -960,15 +1079,14 @@ function initBottomSheet() {
     if (!trigger || !sheet || !overlay) return;
 
     function openSheet() {
-        sheet.classList.add('open');
-        overlay.classList.add('active');
+        RS.ui.openExistingSheet(sheet, overlay);
         // Push state so OS back closes the sheet before navigating.
         history.pushState({ view: currentView, sheet: true }, '', '#' + currentView);
     }
     function closeSheet() {
-        sheet.classList.remove('open');
-        overlay.classList.remove('active');
+        RS.ui.closeExistingSheet(sheet, overlay);
     }
+    sheet._ratspeakDismiss = closeSheet;
 
     trigger.addEventListener('click', function(e) {
         e.preventDefault();
@@ -1006,6 +1124,7 @@ function initSheetSwipeDismiss(sheetId, overlayId, closeFn) {
     if (!sheet) return;
     var overlay = overlayId ? document.getElementById(overlayId) : null;
     var close = closeFn || function() {};
+    sheet._ratspeakDismiss = close;
     if (overlay && !overlay._sheetDismissWired) {
         overlay.addEventListener('click', close);
         overlay._sheetDismissWired = true;
@@ -1023,15 +1142,22 @@ var _keyboardStableTimer = null;
 var _maxViewportHeight = 0;
 
 function _chatMessagesNearBottomForKeyboard() {
-    var msgContainer = document.getElementById('lxmf-messages');
+    var msgContainer = document.body.classList.contains('view-channel-detail')
+        ? document.getElementById('channel-transcript')
+        : document.getElementById('lxmf-messages');
     if (!msgContainer) return true;
+    if (window.RS && RS.chatScroll) return RS.chatScroll.nearBottom(msgContainer);
     var bottomGap = Math.max(0, msgContainer.scrollHeight - msgContainer.clientHeight - msgContainer.scrollTop);
     return bottomGap <= 160;
 }
 
 function _pinChatMessagesToBottomForKeyboard() {
-    var msgContainer = document.getElementById('lxmf-messages');
-    if (msgContainer) msgContainer.scrollTop = msgContainer.scrollHeight;
+    var msgContainer = document.body.classList.contains('view-channel-detail')
+        ? document.getElementById('channel-transcript')
+        : document.getElementById('lxmf-messages');
+    if (!msgContainer) return;
+    if (window.RS && RS.chatScroll) RS.chatScroll.pinToBottom(msgContainer);
+    else msgContainer.scrollTop = msgContainer.scrollHeight;
 }
 
 function initKeyboardDetection() {
@@ -1054,12 +1180,15 @@ function initKeyboardDetection() {
         // fall back to comparing against the tallest viewport we've seen.
         var heightDrop = _maxViewportHeight > 0 ? (_maxViewportHeight - currentHeight) : 0;
         var keyboardOpen = kbHeight > 150 || heightDrop > 150;
-        var inChat = document.body.classList.contains('view-chat-detail');
+        var inConversationDetail =
+            document.body.classList.contains('view-chat-detail') ||
+            document.body.classList.contains('view-channel-detail');
 
         if (isMobile()) {
-            if (keyboardOpen && inChat) {
+            if (keyboardOpen && inConversationDetail) {
                 // WKWebView pushes content behind the notch on focus; clamp
-                // --app-height and pin scrollTop to keep the chat header visible.
+                // --app-height and pin scrollTop to keep the conversation
+                // header and composer inside the visual viewport.
                 document.documentElement.style.setProperty('--app-height', currentHeight + 'px');
                 if (window.scrollY > 0 || document.documentElement.scrollTop > 0) {
                     window.scrollTo(0, 0);
@@ -1096,8 +1225,11 @@ function initKeyboardDetection() {
     window.visualViewport.addEventListener('scroll', function() {
         // Pin scroll while chat keyboard is open; WKWebView otherwise scrolls
         // the header behind the notch as the viewport pans.
-        var inChat = document.body.classList.contains('view-chat-detail');
-        if (document.documentElement.classList.contains('keyboard-open') && inChat) {
+        var inConversationDetail =
+            document.body.classList.contains('view-chat-detail') ||
+            document.body.classList.contains('view-channel-detail');
+        if (document.documentElement.classList.contains('keyboard-open') &&
+                inConversationDetail) {
             if (window.scrollY > 0 || document.documentElement.scrollTop > 0) {
                 window.scrollTo(0, 0);
             }
@@ -1134,7 +1266,7 @@ function initKeyboardDetection() {
             return;
         }
 
-        if (el.id === 'lxmf-input') {
+        if (el.id === 'lxmf-input' || el.id === 'channel-message-input') {
             _waitingForKeyboard = _chatMessagesNearBottomForKeyboard();
             return;
         }
@@ -1153,7 +1285,7 @@ function initKeyboardDetection() {
 
     document.addEventListener('focusout', function(e) {
         var el = e.target;
-        if (el.id === 'lxmf-input') {
+        if (el.id === 'lxmf-input' || el.id === 'channel-message-input') {
             _waitingForKeyboard = false;
             clearTimeout(_keyboardStableTimer);
         }
@@ -1167,8 +1299,7 @@ function initTextareaAutoGrow() {
     var _growRaf = null;
     textarea.addEventListener('input', function() {
         var ta = this;
-        ta.style.height = 'auto';
-        ta.style.height = Math.min(ta.scrollHeight, 124) + 'px';
+        if (RS.composer && typeof RS.composer.resize === 'function') RS.composer.resize(ta);
         // rAF so scroll happens after the browser applies the new height.
         if (document.documentElement.classList.contains('keyboard-open') && _chatMessagesNearBottomForKeyboard()) {
             if (_growRaf) cancelAnimationFrame(_growRaf);
@@ -1187,7 +1318,7 @@ function _settingsDetailSwipeActive() {
 }
 
 function initDrillDownSwipeBack() {
-    if (!isMobile()) return;
+    if (!isTouchDevice()) return;
 
     function _animateOutAndPop() {
         var viewEl = document.getElementById('view-' + currentView);
@@ -1218,6 +1349,8 @@ function initDrillDownSwipeBack() {
         distanceThreshold: RS.gestures.SWIPE_DISTANCE_DRILLBACK_PX,
         hapticAt: { commit: 'selection' },
         skipIf: function(e) {
+            if (!isCompactLayout()) return true;
+            if (_isMobileNavigationBlocked()) return true;
             if (_navTransitioning) return true;
             if (e.target.closest('button, a, input, select, .selector-badge')) return true;
             if (_settingsDetailSwipeActive()) return true;
@@ -1250,7 +1383,7 @@ function initDrillDownSwipeBack() {
 }
 
 function initSettingsDetailSwipeBack() {
-    if (!isMobile()) return;
+    if (!isTouchDevice()) return;
 
     function _settingsDetailPane() {
         return document.querySelector('#view-settings .settings-detail-pane');
@@ -1269,6 +1402,7 @@ function initSettingsDetailSwipeBack() {
         distanceThreshold: RS.gestures.SWIPE_DISTANCE_DRILLBACK_PX,
         hapticAt: { commit: 'selection' },
         skipIf: function(e) {
+            if (!isCompactLayout()) return true;
             if (_navTransitioning) return true;
             if (!_settingsDetailSwipeActive()) return true;
             if (e.target.closest('button, a, input, select, textarea, .selector-badge, .theme-toggle, .prop-toggle')) return true;
@@ -1319,6 +1453,7 @@ function initEdgeSwipeOpenSidebar() {
         edgeZone: RS.gestures.EDGE_ZONE_PX,
         dwellMs: RS.gestures.SWIPE_DWELL_SIDEBAR_OPEN_MS,
         skipIf: function() {
+            if (isCompactLayout()) return true;
             if (typeof _isSetupActive === 'function' && _isSetupActive()) return true;
             return sidebar.classList.contains('open');
         },
@@ -1331,13 +1466,14 @@ function initEdgeSwipeOpenSidebar() {
 }
 
 function initTabSwipe() {
-    if (!isMobile()) return;
+    if (!isTouchDevice()) return;
 
     RS.gestures.attachSwipe(document, {
         direction: 'horizontal',
         edgeMargin: RS.gestures.EDGE_MARGIN_TAB_SWIPE_PX,
         distanceThreshold: RS.gestures.SWIPE_DISTANCE_PX,
         skipIf: function(e) {
+            if (!isCompactLayout()) return true;
             if (typeof _isSetupActive === 'function' && _isSetupActive()) return true;
             if (_isMobileNavigationBlocked()) return true;
             if (_navTransitioning) return true;
@@ -1353,6 +1489,8 @@ function initTabSwipe() {
             if (lxmfLayout && lxmfLayout.classList.contains('view-chat-detail')) return true;
             var gamesLayout = document.querySelector('.games-layout');
             if (gamesLayout && gamesLayout.classList.contains('view-game-detail')) return true;
+            var channelsLayout = document.querySelector('.channels-layout');
+            if (channelsLayout && channelsLayout.classList.contains('view-channel-detail')) return true;
             return false;
         },
         onCommit: function(_target, dx) {
@@ -1508,6 +1646,7 @@ function bindFirstRunAnnounceListener() {
 }
 
 document.addEventListener('DOMContentLoaded', function() {
+    var initialView = _resolveInitialView();
     document.querySelectorAll('.nav-item').forEach(function(item) {
         item.addEventListener('click', function(e) {
             e.preventDefault();
@@ -1523,7 +1662,6 @@ document.addEventListener('DOMContentLoaded', function() {
     initSidebarSwipe();
     initKeyboardDetection();
     initTextareaAutoGrow();
-    _initHistoryNavigation();
     RS.gestures.attachRipple(document, {
         selectors: RS.gestures.RIPPLE_SELECTORS,
         hapticOnTap: 'light'
@@ -1560,25 +1698,13 @@ document.addEventListener('DOMContentLoaded', function() {
     // Delay so initial layout settles; actual display waits for an online interface.
     scheduleFirstRunTooltip(2000);
 
-    if (typeof needsSetup !== 'undefined' && needsSetup) return;
-
-    // Mobile lands on peers; desktop: hash -> last-saved view -> dashboard.
-    if (isMobile()) {
-        switchView('peers');
-    } else {
-        var hash = window.location.hash.replace('#', '');
-        if (hash && VIEWS.indexOf(hash) !== -1) {
-            switchView(hash);
-        } else {
-            var saved = null;
-            try { saved = localStorage.getItem('ratspeak_view'); } catch(e) {}
-            if (saved && VIEWS.indexOf(saved) !== -1) {
-                switchView(saved);
-            } else {
-                switchView('dashboard');
-            }
-        }
+    if (typeof needsSetup !== 'undefined' && needsSetup) {
+        _initHistoryNavigation();
+        return;
     }
+
+    switchView(initialView);
+    _initHistoryNavigation();
 
     _navInitialLoad = false;
 });

@@ -206,7 +206,7 @@
             var bytes = textBytes(value);
             var maxBytePayload = Math.floor((DATA_CODEWORDS * 8 - 4 - BYTE_COUNT_BITS) / 8);
             if (bytes.length > maxBytePayload) {
-                throw new Error('Contact card is too large for the QR layout');
+                throw new Error('Share payload is too large for the QR layout');
             }
             var bits = [];
             appendBits(bits, 0x4, 4);
@@ -491,12 +491,13 @@ z`,
         });
     }
 
-    function saveQrBlob(blob, fileName) {
+    function saveQrBlob(blob, fileName, shareTitle) {
+        shareTitle = shareTitle || 'Ratspeak Contact Card';
         if (window.File && navigator.canShare && navigator.share) {
             try {
                 var file = new File([blob], fileName, { type: 'image/png' });
                 if (navigator.canShare({ files: [file] })) {
-                    return navigator.share({ files: [file], title: 'Ratspeak Contact Card' })
+                    return navigator.share({ files: [file], title: shareTitle })
                         .then(function() { return 'share'; });
                 }
             } catch (_) {}
@@ -519,6 +520,12 @@ z`,
         });
     }
 
+    function shareQrCanvas(canvas, fileName, shareTitle) {
+        return canvasBlob(canvas).then(function(blob) {
+            return saveQrBlob(blob, fileName, shareTitle);
+        });
+    }
+
     function closeSheet(overlay, sheet, onClose) {
         RS.sheetShell.dismiss({ overlay: overlay, sheet: sheet }, onClose);
     }
@@ -533,10 +540,58 @@ z`,
     }
 
     function showIdentityShareScreen(identityHash) {
-        RS.invoke('api_contact_card', { hashHex: identityHash || null }).then(function(card) {
+        var built = buildSheet('contact-share-sheet');
+        var closed = false;
+        var loadGeneration = 0;
+
+        function closeShareScreen() {
+            if (closed) return;
+            closed = true;
+            closeSheet(built.overlay, built.sheet);
+        }
+
+        function bindCloseButton() {
+            var closeButton = built.sheet.querySelector('.contact-card-close');
+            if (closeButton) closeButton.addEventListener('click', closeShareScreen);
+        }
+
+        function renderLoading() {
+            built.sheet.setAttribute('aria-busy', 'true');
+            built.sheet.innerHTML =
+                '<div class="contact-card-topbar">' +
+                    '<button class="contact-card-close" type="button" aria-label="Close">&times;</button>' +
+                '</div>' +
+                '<div class="contact-share-loading" role="status" aria-live="polite">' +
+                    '<div class="contact-share-loading-qr" aria-hidden="true">' +
+                        '<span class="loading-spinner"></span>' +
+                    '</div>' +
+                    '<div class="contact-share-loading-label">Preparing contact card&hellip;</div>' +
+                '</div>';
+            bindCloseButton();
+        }
+
+        function renderError(err, generation) {
+            if (closed || generation !== loadGeneration) return;
+            built.sheet.removeAttribute('aria-busy');
+            var message = err && err.message ? err.message : 'Could not build contact card';
+            built.sheet.innerHTML =
+                '<div class="contact-card-topbar">' +
+                    '<button class="contact-card-close" type="button" aria-label="Close">&times;</button>' +
+                '</div>' +
+                '<div class="contact-share-error" role="alert">' +
+                    '<div class="contact-share-error-title">Contact card unavailable</div>' +
+                    '<div class="contact-share-error-message">' + escapeHtml(message) + '</div>' +
+                    '<button class="nr-btn contact-share-retry" type="button">Try again</button>' +
+                '</div>';
+            bindCloseButton();
+            built.sheet.querySelector('.contact-share-retry').addEventListener('click', loadCard);
+        }
+
+        function renderCard(card, generation) {
+            if (closed || generation !== loadGeneration) return;
             var name = card.display_name || 'Ratspeak Contact';
             var fileBase = safeFileBase(name);
-            var built = buildSheet('contact-share-sheet');
+            built.sheet.removeAttribute('aria-busy');
             built.sheet.innerHTML =
                 '<div class="contact-card-topbar">' +
                     '<button class="contact-card-close" type="button" aria-label="Close">&times;</button>' +
@@ -555,26 +610,16 @@ z`,
                 '</div>' +
                 '<div class="contact-share-actions">' +
                     '<button class="nr-btn contact-share-action" id="contact-copy-address">' + iconSvg('copy') + '<span>Copy</span></button>' +
-                    '<button class="nr-btn contact-share-action" id="contact-share-qr">' + iconSvg('qr') + '<span>Share QR</span></button>' +
+                    '<button class="nr-btn contact-share-action" id="contact-share-qr" disabled aria-busy="true">' + iconSvg('qr') + '<span>Share QR</span></button>' +
                 '</div>';
 
             var canvas = built.sheet.querySelector('canvas');
-            try {
-                renderQrCanvas(canvas, card.payload || '');
-            } catch (err) {
-                showToast(err && err.message ? err.message : 'Could not render QR', 'toast-red', 3000);
-            }
-
-            built.overlay.addEventListener('click', function(e) {
-                if (e.target === built.overlay) closeSheet(built.overlay, built.sheet);
-            });
-            built.sheet.querySelector('.contact-card-close').addEventListener('click', function() {
-                closeSheet(built.overlay, built.sheet);
-            });
+            var shareButton = built.sheet.querySelector('#contact-share-qr');
+            bindCloseButton();
             built.sheet.querySelector('#contact-copy-address').addEventListener('click', function() {
                 copyText(card.lxmf_hash, 'Address');
             });
-            built.sheet.querySelector('#contact-share-qr').addEventListener('click', function() {
+            shareButton.addEventListener('click', function() {
                 canvasBlob(canvas).then(function(blob) {
                     return saveQrBlob(blob, fileBase + '-' + CONTACT_QR_FILE);
                 }).then(function(method) {
@@ -584,9 +629,43 @@ z`,
                     showToast(err && err.message ? err.message : 'Could not share QR', 'toast-red', 3000);
                 });
             });
-        }).catch(function(err) {
-            showToast(err && err.message ? err.message : 'Could not build contact card', 'toast-red', 3000);
+
+            // Let the ready sheet paint before the synchronous QR encoder runs.
+            // Two animation frames guarantee one complete rendering opportunity.
+            var nextFrame = window.requestAnimationFrame || function(callback) {
+                return window.setTimeout(callback, 0);
+            };
+            nextFrame(function() {
+                nextFrame(function() {
+                    if (closed || generation !== loadGeneration || !canvas.isConnected) return;
+                    try {
+                        renderQrCanvas(canvas, card.payload || '');
+                        shareButton.disabled = false;
+                        shareButton.removeAttribute('aria-busy');
+                    } catch (err) {
+                        shareButton.removeAttribute('aria-busy');
+                        showToast(err && err.message ? err.message : 'Could not render QR', 'toast-red', 3000);
+                    }
+                });
+            });
+        }
+
+        function loadCard() {
+            if (closed) return;
+            var generation = ++loadGeneration;
+            renderLoading();
+            RS.invoke('api_contact_card', { hashHex: identityHash || null }).then(function(card) {
+                renderCard(card, generation);
+            }).catch(function(err) {
+                renderError(err, generation);
+            });
+        }
+
+        built.overlay.addEventListener('click', function(e) {
+            if (e.target === built.overlay) closeShareScreen();
         });
+        built.sheet._ratspeakDismiss = closeShareScreen;
+        loadCard();
     }
 
     function showScannedCardPreview(parent, payload, card, closeAll) {
@@ -622,7 +701,16 @@ z`,
         });
     }
 
-    function openContactQrScanner() {
+    function openContactQrScanner(options) {
+        options = options || {};
+        var scannerTitle = options.title || 'Scan Contact QR';
+        var checkingText = options.checkingText || 'Checking contact card...';
+        var invalidText = options.invalidText || 'That QR is not a valid Ratspeak contact card.';
+        var invalidImageText = options.invalidImageText ||
+            'That image does not contain a valid Ratspeak contact QR.';
+        var emptyImageText = options.emptyImageText ||
+            'No Ratspeak contact QR found in that image.';
+        var previewCommand = options.previewCommand || 'api_preview_contact_card';
         var built = buildSheet('contact-scan-sheet');
         var stream = null;
         var stopped = false;
@@ -632,7 +720,7 @@ z`,
         var firstDetectLogged = false;
         built.sheet.innerHTML =
             '<div class="contact-card-topbar">' +
-                '<div class="contact-scan-title">Scan Contact QR</div>' +
+                '<div class="contact-scan-title">' + escapeHtml(scannerTitle) + '</div>' +
                 '<button class="contact-card-close" type="button" aria-label="Close">&times;</button>' +
             '</div>' +
             '<div class="contact-scan-body">' +
@@ -706,6 +794,10 @@ z`,
             closeSheet(built.overlay, built.sheet);
         }
 
+        // Native Android Back must take the same path as the visible close
+        // controls so an active camera stream is stopped before removal.
+        built.sheet._ratspeakDismiss = closeAll;
+
         function setFallbackReady(ready) {
             if (!cameraWrap) return;
             cameraWrap.classList.toggle('fallback-ready', !!ready);
@@ -724,14 +816,18 @@ z`,
         }
 
         function handleScannedPayload(payload, source, invalidMessage, retry) {
-            status.textContent = 'Checking contact card...';
+            status.textContent = checkingText;
             contactScanDiag('payload_detected', { source: source });
-            return RS.invoke('api_preview_contact_card', { payload: payload }).then(function(card) {
+            return RS.invoke(previewCommand, { payload: payload }).then(function(preview) {
                 stopStream();
-                showScannedCardPreview(body, payload, card, closeAll);
+                if (typeof options.onPreview === 'function') {
+                    options.onPreview(body, payload, preview, closeAll);
+                } else {
+                    showScannedCardPreview(body, payload, preview, closeAll);
+                }
             }).catch(function(err) {
                 contactScanDiag('payload_rejected', scanErrorDetail(err));
-                status.textContent = invalidMessage || 'That QR is not a valid Ratspeak contact card.';
+                status.textContent = invalidMessage || invalidText;
                 if (typeof retry === 'function') retry();
             });
         }
@@ -798,10 +894,10 @@ z`,
                     var code = window.jsQR(image.data, width, height, { inversionAttempts: 'attemptBoth' });
                     if (code && code.data) {
                         contactScanDiag('file_decode_success', { width: width, height: height });
-                        handleScannedPayload(code.data, 'file', 'That image does not contain a valid Ratspeak contact QR.');
+                        handleScannedPayload(code.data, 'file', invalidImageText);
                     } else {
                         contactScanDiag('file_decode_empty', { width: width, height: height });
-                        status.textContent = 'No Ratspeak contact QR found in that image.';
+                        status.textContent = emptyImageText;
                     }
                 } catch (err) {
                     contactScanDiag('file_decode_failed', scanErrorDetail(err));
@@ -948,7 +1044,7 @@ z`,
                                 firstDetectLogged = 'done';
                             }
                             if (codes && codes.length && codes[0].rawValue) {
-                                handleScannedPayload(codes[0].rawValue, 'live', 'That QR is not a valid Ratspeak contact card.', function() {
+                                handleScannedPayload(codes[0].rawValue, 'live', invalidText, function() {
                                     setTimeout(function() {
                                         if (!stopped && liveActive) {
                                             status.textContent = 'Point the camera at a Ratspeak QR.';
@@ -1179,9 +1275,15 @@ z`,
 
     window.RSContactCard = {
         renderQrCanvas: renderQrCanvas,
+        shareQrCanvas: shareQrCanvas,
         openIdentityShareScreen: showIdentityShareScreen,
         openContactQrScanner: openContactQrScanner,
         openContactAddOptions: openContactAddOptions,
+    };
+    window.RS.qr = {
+        renderCanvas: renderQrCanvas,
+        shareCanvas: shareQrCanvas,
+        openScanner: openContactQrScanner,
     };
     window.closeContactAddDial = closeContactAddDial;
     window.openIdentityShareScreen = showIdentityShareScreen;

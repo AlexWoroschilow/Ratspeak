@@ -10,6 +10,10 @@ use tauri::State;
 use crate::error::{AppError, AppResult};
 use crate::helpers::{active_identity_id, sanitize_text, validate_hex};
 use crate::state::AppState;
+use ratspeak_runtime::activity::producer;
+use ratspeak_runtime::activity::{
+    ActivityCaptureState, ActivityRecorder, ActivityRecorderError, CaptureProfile,
+};
 
 #[tauri::command]
 pub async fn api_announces(state: State<'_, Arc<AppState>>) -> AppResult<Value> {
@@ -44,6 +48,7 @@ pub async fn set_propagation_hosting(
     state: State<'_, Arc<AppState>>,
     args: PropagationHostingArgs,
 ) -> AppResult<Value> {
+    let activity_origin = state.activity_request_fence();
     let cost = args.stamp_cost.unwrap_or_else(|| {
         state
             .propagation_node_stamp_cost
@@ -73,20 +78,21 @@ pub async fn set_propagation_hosting(
     .await
     .map_err(|_| AppError::internal("set_propagation_hosting db task panicked"))?;
 
-    if let Ok(mut lxmf) = state.lxmf.lock()
-        && let Some(mgr) = lxmf.as_mut()
-    {
-        crate::apply_lxmf_settings_from_state(&state, mgr);
+    if let Ok(mut lxmf) = state.lxmf.lock() {
+        if let Some(mgr) = lxmf.as_mut() {
+            crate::apply_lxmf_settings_from_state(&state, mgr);
+        }
     }
-    if let Ok(slot) = state.propagation_node.lock()
-        && let Some(node) = slot.as_ref()
-        && let Ok(mut node) = node.lock()
-    {
-        node.set_min_stamp_cost(cost);
+    if let Ok(slot) = state.propagation_node.lock() {
+        if let Some(node) = slot.as_ref() {
+            if let Ok(mut node) = node.lock() {
+                node.set_min_stamp_cost(cost);
+            }
+        }
     }
 
     if args.enabled {
-        crate::send_announce_from_state(&state).await;
+        crate::send_announce_from_origin(&state, activity_origin).await;
     }
     crate::propagation::emit_propagation_update(&state);
     Ok(crate::propagation::get_status_payload(&state))
@@ -104,6 +110,7 @@ pub async fn set_stamp_settings(
     state: State<'_, Arc<AppState>>,
     args: StampSettingsArgs,
 ) -> AppResult<Value> {
+    let activity_origin = state.activity_request_fence();
     let cost = args
         .required_cost
         .unwrap_or(if args.enforce { 8 } else { 0 });
@@ -127,13 +134,13 @@ pub async fn set_stamp_settings(
     .await
     .map_err(|_| AppError::internal("set_stamp_settings db task panicked"))?;
 
-    if let Ok(mut lxmf) = state.lxmf.lock()
-        && let Some(mgr) = lxmf.as_mut()
-    {
-        crate::apply_lxmf_settings_from_state(&state, mgr);
+    if let Ok(mut lxmf) = state.lxmf.lock() {
+        if let Some(mgr) = lxmf.as_mut() {
+            crate::apply_lxmf_settings_from_state(&state, mgr);
+        }
     }
 
-    crate::send_announce_from_state(&state).await;
+    crate::send_announce_from_origin(&state, activity_origin).await;
     let payload = crate::propagation::get_status_payload(&state);
     state.emit_to_all("propagation_update", payload.clone());
     Ok(payload)
@@ -203,10 +210,10 @@ pub async fn set_propagation_mode(
             let st_for_off = st.clone();
             let identity_id = crate::helpers::active_identity_id(&st);
             tokio::task::spawn_blocking(move || {
-                if let Ok(mut lxmf) = st_for_off.lxmf.lock()
-                    && let Some(mgr) = lxmf.as_mut()
-                {
-                    mgr.enable_propagation(false, &st_for_off.db, &identity_id);
+                if let Ok(mut lxmf) = st_for_off.lxmf.lock() {
+                    if let Some(mgr) = lxmf.as_mut() {
+                        mgr.enable_propagation(false, &st_for_off.db, &identity_id);
+                    }
                 }
             })
             .await
@@ -219,10 +226,10 @@ pub async fn set_propagation_mode(
             let st_for_on = st.clone();
             let identity_id = crate::helpers::active_identity_id(&st);
             tokio::task::spawn_blocking(move || {
-                if let Ok(mut lxmf) = st_for_on.lxmf.lock()
-                    && let Some(mgr) = lxmf.as_mut()
-                {
-                    mgr.enable_propagation(true, &st_for_on.db, &identity_id);
+                if let Ok(mut lxmf) = st_for_on.lxmf.lock() {
+                    if let Some(mgr) = lxmf.as_mut() {
+                        mgr.enable_propagation(true, &st_for_on.db, &identity_id);
+                    }
                 }
             })
             .await
@@ -255,14 +262,14 @@ pub async fn set_propagation_mode(
             let st_for_man = st.clone();
             let stored = stored_hash.clone();
             tokio::task::spawn_blocking(move || {
-                if let Ok(mut lxmf) = st_for_man.lxmf.lock()
-                    && let Some(mgr) = lxmf.as_mut()
-                {
-                    mgr.enable_propagation(true, &st_for_man.db, &identity_id);
-                    if !stored.is_empty() && validate_hex(&stored, 32, 32) {
-                        mgr.set_propagation_node(Some(&stored), &st_for_man.db, &identity_id);
-                    } else {
-                        mgr.set_runtime_propagation_node(None);
+                if let Ok(mut lxmf) = st_for_man.lxmf.lock() {
+                    if let Some(mgr) = lxmf.as_mut() {
+                        mgr.enable_propagation(true, &st_for_man.db, &identity_id);
+                        if !stored.is_empty() && validate_hex(&stored, 32, 32) {
+                            mgr.set_propagation_node(Some(&stored), &st_for_man.db, &identity_id);
+                        } else {
+                            mgr.set_runtime_propagation_node(None);
+                        }
                     }
                 }
             })
@@ -477,7 +484,10 @@ fn empty_ingress_diagnostics() -> Value {
     })
 }
 
-async fn emit_ingress_diagnostics_snapshot(state: &Arc<AppState>) {
+pub(crate) async fn emit_ingress_diagnostics_snapshot(
+    state: &Arc<AppState>,
+    expected_fence: crate::state::ActivityRequestFence,
+) {
     let transport_tx = state
         .rns
         .read()
@@ -489,22 +499,44 @@ async fn emit_ingress_diagnostics_snapshot(state: &Arc<AppState>) {
     let Some(entries) = query_interface_stats(&tx).await else {
         return;
     };
+    // The transport query may complete after an identity switch. Serialize the
+    // Activity records with the switch boundary and reject the stale snapshot
+    // rather than publishing old-identity interface data afterward.
+    let _identity_lifecycle = state.identity_switch_lock.lock().await;
+    let _activity_control = state.activity_control_lock.lock().await;
+    if !state.is_current_activity_request_fence_after_identity_lock(expected_fence) {
+        return;
+    }
     for entry in entries {
-        if entry.burst_active {
-            let msg = format!(
-                "{} ingress burst active; passive announces may be held",
-                entry.name
+        let burst_active = entry.burst_active;
+        let held_announces = entry.held_announces;
+        if burst_active {
+            state.activity.record_event_fenced(
+                || state.is_current_activity_request_fence_after_identity_lock(expected_fence),
+                || {
+                    Ok(producer::rns_announce_activity(
+                        producer::RnsAnnounceActivity {
+                            transition: producer::RnsAnnounceTransition::IngressBurstStarted,
+                            interface: None,
+                        },
+                    ))
+                },
             );
-            state.emit_network_event("announce", &msg, &entry.name, "standard");
         }
-        if entry.held_announces > 0 {
-            let msg = format!(
-                "{} holding {} passive announce{} during ingress burst",
-                entry.name,
-                entry.held_announces,
-                if entry.held_announces == 1 { "" } else { "s" }
+        if held_announces > 0 {
+            state.activity.record_event_fenced(
+                || state.is_current_activity_request_fence_after_identity_lock(expected_fence),
+                || {
+                    Ok(producer::rns_announce_activity(
+                        producer::RnsAnnounceActivity {
+                            transition: producer::RnsAnnounceTransition::Held {
+                                count: held_announces,
+                            },
+                            interface: None,
+                        },
+                    ))
+                },
             );
-            state.emit_network_event("announce", &msg, &entry.name, "standard");
         }
     }
 }
@@ -522,42 +554,69 @@ pub async fn enable_network_log(
     state: State<'_, Arc<AppState>>,
     args: NetworkLogArgs,
 ) -> AppResult<Value> {
-    state
-        .network_log_enabled
-        .store(args.enabled, std::sync::atomic::Ordering::Relaxed);
-    if !args.enabled
-        && let Ok(mut log) = state.event_log.lock()
-    {
-        log.clear();
-    }
-
-    if let Some(level) = args.level.as_deref() {
-        let valid = matches!(level, "essential" | "standard" | "detailed");
-        if valid && let Ok(mut l) = state.network_log_level.write() {
-            *l = level.to_string();
+    let request_fence = state.activity_request_fence();
+    let level_was_explicit = args.level.is_some();
+    let mut requested_level = match args.level {
+        Some(level) => validate_legacy_activity_level(&level)?,
+        None => state
+            .network_log_level
+            .read()
+            .map(|level| level.clone())
+            .unwrap_or_else(|_| "standard".to_string()),
+    };
+    let (status, payload) = {
+        let _identity_lifecycle = state.identity_switch_lock.lock().await;
+        let _activity_control = state.activity_control_lock.lock().await;
+        ensure_legacy_activity_request_fence(&state, request_fence)?;
+        let (capture_state, capture_profile) = state.activity.capture_state_profile();
+        requested_level = normalize_legacy_level_for_state(
+            &requested_level,
+            level_was_explicit,
+            capture_state,
+            capture_profile,
+        );
+        if !args.enabled {
+            state
+                .network_log_enabled
+                .store(false, std::sync::atomic::Ordering::Release);
         }
-    }
+        let status = reconcile_legacy_activity_capture(
+            &state.activity,
+            args.enabled,
+            legacy_capture_profile(&requested_level),
+        )
+        .await
+        .map_err(map_legacy_activity_error)?;
+        let effective_level = effective_legacy_activity_level(&requested_level, &status);
+        if let Ok(mut level) = state.network_log_level.write() {
+            *level = effective_level.clone();
+        }
+        state.network_log_enabled.store(
+            status.state() == ActivityCaptureState::Capturing,
+            std::sync::atomic::Ordering::Release,
+        );
+        let enabled = status.state() == ActivityCaptureState::Capturing;
+        let payload = json!({
+            "level": effective_level,
+            "enabled": enabled,
+            "restart_required": false,
+            "identity_generation": request_fence.identity_session_generation().to_string(),
+            "activity": status,
+        });
+        state.emit_to_all("network_log_level_changed", payload.clone());
+        (status, payload)
+    };
+    let enabled = status.state() == ActivityCaptureState::Capturing;
 
     tracing::debug!(
         "Network logging {}",
-        if args.enabled { "enabled" } else { "disabled" }
+        if enabled { "enabled" } else { "disabled" }
     );
 
-    if args.enabled {
-        emit_ingress_diagnostics_snapshot(state.inner()).await;
+    if enabled {
+        let diagnostics_fence = state.activity_request_fence();
+        emit_ingress_diagnostics_snapshot(state.inner(), diagnostics_fence).await;
     }
-
-    let level_out = state
-        .network_log_level
-        .read()
-        .map(|l| l.clone())
-        .unwrap_or_else(|_| "standard".into());
-    let payload = json!({
-        "level": level_out,
-        "enabled": args.enabled,
-        "restart_required": false,
-    });
-    state.emit_to_all("network_log_level_changed", payload.clone());
     Ok(payload)
 }
 
@@ -566,18 +625,277 @@ pub async fn set_network_log_level(
     state: State<'_, Arc<AppState>>,
     level: String,
 ) -> AppResult<Value> {
-    let level = sanitize_text(&level, 16);
-    let valid = matches!(level.as_str(), "essential" | "standard" | "detailed");
-    if !valid {
+    let request_fence = state.activity_request_fence();
+    let level = validate_legacy_activity_level(&level)?;
+    let (activity, effective_level, payload) = {
+        let _identity_lifecycle = state.identity_switch_lock.lock().await;
+        let _activity_control = state.activity_control_lock.lock().await;
+        ensure_legacy_activity_request_fence(&state, request_fence)?;
+        let target = legacy_capture_profile(&level);
+        let activity = set_legacy_activity_profile(&state.activity, target)
+            .await
+            .map_err(map_legacy_activity_error)?;
+        let effective_level = effective_legacy_activity_level(&level, &activity);
+        if let Ok(mut stored) = state.network_log_level.write() {
+            *stored = effective_level.clone();
+        }
+        let payload = json!({
+            "level": effective_level,
+            "restart_required": false,
+            "identity_generation": request_fence.identity_session_generation().to_string(),
+            "activity": activity,
+        });
+        state.emit_to_all("network_log_level_changed", payload.clone());
+        (activity, effective_level, payload)
+    };
+    tracing::debug!("Network log level set to: {}", effective_level);
+    let _ = activity;
+    Ok(payload)
+}
+
+fn ensure_legacy_activity_request_fence(
+    state: &AppState,
+    expected: crate::state::ActivityRequestFence,
+) -> AppResult<()> {
+    if state.is_current_activity_request_fence_after_identity_lock(expected) {
+        Ok(())
+    } else {
+        Err(AppError::conflict(
+            "The active session changed before the Activity request could run.",
+        ))
+    }
+}
+
+async fn set_legacy_activity_profile(
+    activity: &ActivityRecorder,
+    target: CaptureProfile,
+) -> Result<ratspeak_runtime::activity::ActivityStatusV1, ActivityRecorderError> {
+    let status = activity.status();
+    if status.state() == ActivityCaptureState::Capturing && status.profile() != Some(target) {
+        activity.set_profile(target, None).await
+    } else {
+        Ok(status)
+    }
+}
+
+fn validate_legacy_activity_level(level: &str) -> AppResult<String> {
+    let level = sanitize_text(level, 16);
+    if !matches!(level.as_str(), "essential" | "standard" | "detailed") {
         return Err(AppError::bad_request("Invalid log level"));
     }
-    if let Ok(mut l) = state.network_log_level.write() {
-        *l = level.clone();
+    Ok(level)
+}
+
+fn legacy_capture_profile(level: &str) -> CaptureProfile {
+    if level == "detailed" {
+        CaptureProfile::Trace
+    } else {
+        CaptureProfile::Normal
     }
-    tracing::debug!("Network log level set to: {}", level);
-    let payload = json!({ "level": level, "restart_required": false });
-    state.emit_to_all("network_log_level_changed", payload.clone());
-    Ok(payload)
+}
+
+fn normalize_legacy_level_for_state(
+    requested: &str,
+    was_explicit: bool,
+    state: ActivityCaptureState,
+    profile: Option<CaptureProfile>,
+) -> String {
+    if !was_explicit
+        && (state != ActivityCaptureState::Capturing || profile != Some(CaptureProfile::Trace))
+    {
+        "standard".to_string()
+    } else {
+        requested.to_string()
+    }
+}
+
+fn effective_legacy_activity_level(
+    requested: &str,
+    status: &ratspeak_runtime::activity::ActivityStatusV1,
+) -> String {
+    if requested == "detailed"
+        && (status.state() != ActivityCaptureState::Capturing
+            || status.profile() != Some(CaptureProfile::Trace))
+    {
+        "standard".to_string()
+    } else {
+        requested.to_string()
+    }
+}
+
+async fn reconcile_legacy_activity_capture(
+    activity: &ActivityRecorder,
+    enabled: bool,
+    target: CaptureProfile,
+) -> Result<ratspeak_runtime::activity::ActivityStatusV1, ActivityRecorderError> {
+    let initial = activity.status();
+    let initial_state = initial.state();
+    if !enabled {
+        return if initial_state == ActivityCaptureState::Capturing {
+            activity.stop().await
+        } else {
+            Ok(initial)
+        };
+    }
+
+    let resumed_or_started = match initial_state {
+        ActivityCaptureState::Off => activity.start().await?,
+        // Resume is deliberately continuous but always Normal. A historical
+        // stopped Trace profile or stale legacy Detailed choice must not
+        // silently re-enable Trace.
+        ActivityCaptureState::Stopped => return activity.resume().await,
+        ActivityCaptureState::Capturing => initial,
+    };
+    if resumed_or_started.profile() == Some(target) {
+        return Ok(resumed_or_started);
+    }
+    match activity.set_profile(target, None).await {
+        Ok(status) => Ok(status),
+        Err(error) => {
+            match initial_state {
+                ActivityCaptureState::Off => {
+                    let _ = activity.hard_reset().await;
+                }
+                ActivityCaptureState::Stopped => {
+                    let _ = activity.stop().await;
+                }
+                ActivityCaptureState::Capturing => {}
+            }
+            Err(error)
+        }
+    }
+}
+
+fn map_legacy_activity_error(error: ActivityRecorderError) -> AppError {
+    match error {
+        ActivityRecorderError::InvalidRequest => {
+            AppError::bad_request("Invalid Activity capture request")
+        }
+        ActivityRecorderError::InvalidTransition | ActivityRecorderError::Superseded => {
+            AppError::conflict("Activity capture state changed")
+        }
+        ActivityRecorderError::ControlBusy => {
+            AppError::conflict("Activity capture control is busy")
+        }
+        ActivityRecorderError::WorkerUnavailable
+        | ActivityRecorderError::GenerationExhausted
+        | ActivityRecorderError::RingUnavailable
+        | ActivityRecorderError::TimedOut => {
+            AppError::service_unavailable("Activity capture is unavailable")
+        }
+    }
+}
+
+#[cfg(test)]
+mod activity_compatibility_tests {
+    use ratspeak_runtime::activity::{ActivityReplayResultV1, ActivityTraceStateV1};
+
+    use super::*;
+
+    #[test]
+    fn legacy_levels_map_to_the_two_capture_profiles() {
+        assert_eq!(legacy_capture_profile("essential"), CaptureProfile::Normal);
+        assert_eq!(legacy_capture_profile("standard"), CaptureProfile::Normal);
+        assert_eq!(legacy_capture_profile("detailed"), CaptureProfile::Trace);
+        assert_eq!(
+            normalize_legacy_level_for_state("detailed", false, ActivityCaptureState::Off, None,),
+            "standard"
+        );
+        assert_eq!(
+            normalize_legacy_level_for_state("detailed", true, ActivityCaptureState::Off, None,),
+            "detailed"
+        );
+        assert_eq!(
+            normalize_legacy_level_for_state(
+                "detailed",
+                false,
+                ActivityCaptureState::Capturing,
+                Some(CaptureProfile::Normal),
+            ),
+            "standard"
+        );
+        assert_eq!(
+            normalize_legacy_level_for_state(
+                "detailed",
+                false,
+                ActivityCaptureState::Capturing,
+                Some(CaptureProfile::Trace),
+            ),
+            "detailed"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn enable_stop_resume_and_trace_preserve_the_typed_session() {
+        let activity = ActivityRecorder::new();
+        let started = reconcile_legacy_activity_capture(&activity, true, CaptureProfile::Normal)
+            .await
+            .unwrap();
+        let session = started.capture_session().unwrap().to_string();
+        assert_eq!(started.state(), ActivityCaptureState::Capturing);
+        assert_eq!(started.profile(), Some(CaptureProfile::Normal));
+
+        let stopped = reconcile_legacy_activity_capture(&activity, false, CaptureProfile::Normal)
+            .await
+            .unwrap();
+        assert_eq!(stopped.state(), ActivityCaptureState::Stopped);
+        assert_eq!(stopped.capture_session(), Some(session.as_str()));
+        let ActivityReplayResultV1::Page { page } = activity
+            .replay(session.clone(), None, 50, 64 * 1024)
+            .await
+            .unwrap()
+        else {
+            panic!("Stop must retain the typed session");
+        };
+        assert_eq!(page.events().len(), 2);
+
+        let still_stopped = set_legacy_activity_profile(&activity, CaptureProfile::Trace)
+            .await
+            .unwrap();
+        assert_eq!(still_stopped.state(), ActivityCaptureState::Stopped);
+        assert_eq!(still_stopped.profile(), Some(CaptureProfile::Normal));
+
+        let resumed = reconcile_legacy_activity_capture(&activity, true, CaptureProfile::Normal)
+            .await
+            .unwrap();
+        assert_eq!(resumed.state(), ActivityCaptureState::Capturing);
+        assert_eq!(resumed.capture_session(), Some(session.as_str()));
+        assert_eq!(resumed.profile(), Some(CaptureProfile::Normal));
+
+        let traced = set_legacy_activity_profile(&activity, CaptureProfile::Trace)
+            .await
+            .unwrap();
+        assert_eq!(traced.profile(), Some(CaptureProfile::Trace));
+        assert!(matches!(
+            traced.trace(),
+            Some(ActivityTraceStateV1::UntilStopped) | Some(ActivityTraceStateV1::Limited { .. })
+        ));
+
+        let stopped_trace =
+            reconcile_legacy_activity_capture(&activity, false, CaptureProfile::Trace)
+                .await
+                .unwrap();
+        assert_eq!(stopped_trace.state(), ActivityCaptureState::Stopped);
+        assert_eq!(stopped_trace.profile(), Some(CaptureProfile::Trace));
+        assert_eq!(stopped_trace.trace(), None);
+        assert_eq!(
+            effective_legacy_activity_level("detailed", &stopped_trace),
+            "standard"
+        );
+
+        let resumed_from_trace =
+            reconcile_legacy_activity_capture(&activity, true, CaptureProfile::Trace)
+                .await
+                .unwrap();
+        assert_eq!(resumed_from_trace.state(), ActivityCaptureState::Capturing);
+        assert_eq!(resumed_from_trace.profile(), Some(CaptureProfile::Normal));
+        assert_eq!(resumed_from_trace.trace(), None);
+        assert_eq!(
+            effective_legacy_activity_level("detailed", &resumed_from_trace),
+            "standard"
+        );
+        activity.shutdown().await.unwrap();
+    }
 }
 
 #[tauri::command]
@@ -617,10 +935,10 @@ pub async fn set_propagation_node(
     if mode == crate::propagation::PropagationMode::Manual {
         let path_request_node = runtime_node;
         tokio::task::spawn_blocking(move || {
-            if let Ok(mut lxmf) = st.lxmf.lock()
-                && let Some(mgr) = lxmf.as_mut()
-            {
-                mgr.set_runtime_propagation_node(runtime_node);
+            if let Ok(mut lxmf) = st.lxmf.lock() {
+                if let Some(mgr) = lxmf.as_mut() {
+                    mgr.set_runtime_propagation_node(runtime_node);
+                }
             }
         })
         .await
@@ -667,14 +985,18 @@ pub async fn sync_propagation(state: State<'_, Arc<AppState>>) -> AppResult<Valu
     }
 
     // Run failure handler if last run failed.
-    let prev_failed = if let Ok(lxmf) = state.lxmf.lock()
-        && let Some(mgr) = lxmf.as_ref()
-        && let Some(ref client) = mgr.propagation_client
-    {
-        client.state == PropagationClientState::Failed
-    } else {
-        false
-    };
+    let prev_failed = state
+        .lxmf
+        .lock()
+        .ok()
+        .and_then(|lxmf| {
+            lxmf.as_ref().and_then(|mgr| {
+                mgr.propagation_client
+                    .as_ref()
+                    .map(|client| client.state() == PropagationClientState::Failed)
+            })
+        })
+        .unwrap_or(false);
     if prev_failed {
         let st: Arc<AppState> = Arc::clone(&state);
         crate::propagation::handle_sync_failure(&st).await;
@@ -687,7 +1009,7 @@ pub async fn sync_propagation(state: State<'_, Arc<AppState>>) -> AppResult<Valu
         if let Some(mgr) = lxmf.as_mut() {
             if let Some(ref mut client) = mgr.propagation_client {
                 if matches!(
-                    client.state,
+                    client.state(),
                     PropagationClientState::Idle
                         | PropagationClientState::Complete
                         | PropagationClientState::Failed
@@ -708,7 +1030,10 @@ pub async fn sync_propagation(state: State<'_, Arc<AppState>>) -> AppResult<Valu
                         "success": true,
                         "started": false,
                         "downloaded": 0,
-                        "message": format!("Offline Inbox check already in progress: {:?}", client.state),
+                        "message": format!(
+                            "Offline Inbox check already in progress: {:?}",
+                            client.state()
+                        ),
                     })
                 }
             } else {
@@ -768,21 +1093,59 @@ async fn live_interface_summary(state: &Arc<AppState>) -> Option<(bool, u64)> {
     }
 }
 
+fn record_manual_announce_outcome(
+    state: &AppState,
+    fence: crate::state::ActivityRequestFence,
+    failure: Option<producer::AnnounceFailureReason>,
+) {
+    state.activity.record_event_fenced(
+        || state.is_current_activity_origin_fence(fence),
+        || {
+            let transition = match failure {
+                Some(reason) => producer::RnsAnnounceTransition::Failed {
+                    method: producer::AnnounceMethod::Manual,
+                    reason,
+                },
+                None => producer::RnsAnnounceTransition::Sent {
+                    method: producer::AnnounceMethod::Manual,
+                },
+            };
+            Ok(producer::rns_announce_activity(
+                producer::RnsAnnounceActivity {
+                    transition,
+                    interface: None,
+                },
+            ))
+        },
+    );
+}
+
 #[tauri::command]
 pub async fn trigger_announce(state: State<'_, Arc<AppState>>) -> AppResult<Value> {
-    let ready = state
+    let activity_fence = state.activity_request_fence();
+    let rns_ready = state
         .rns
         .read()
         .ok()
         .and_then(|r| r.as_ref().map(|_| ()))
-        .is_some()
+        .is_some();
+    let lxmf_ready = rns_ready
         && state
             .lxmf
             .lock()
             .ok()
             .and_then(|l| l.as_ref().map(|_| ()))
             .is_some();
-    if !ready {
+    if !rns_ready || !lxmf_ready {
+        record_manual_announce_outcome(
+            &state,
+            activity_fence,
+            Some(if rns_ready {
+                producer::AnnounceFailureReason::NotReady
+            } else {
+                producer::AnnounceFailureReason::TransportUnavailable
+            }),
+        );
         state.emit_to_all(
             "announce_triggered",
             json!({ "success": false, "error": "RNS or LXMF not initialized" }),
@@ -796,21 +1159,20 @@ pub async fn trigger_announce(state: State<'_, Arc<AppState>>) -> AppResult<Valu
         .or_else(|| crate::any_interface_online_cached(&state));
     if matches!(online, Some(false)) {
         tracing::warn!("manual announce skipped: no interfaces online");
+        record_manual_announce_outcome(
+            &state,
+            activity_fence,
+            Some(producer::AnnounceFailureReason::NoInterfaceTransmission),
+        );
         state.emit_to_all(
             "announce_triggered",
             json!({ "success": false, "error": "no_interfaces" }),
         );
         return Ok(json!(null));
     }
-    if state
-        .network_log_enabled
-        .load(std::sync::atomic::Ordering::Relaxed)
-    {
-        state.emit_network_event("announce", "Manual announce triggered", "", "detailed");
-    }
 
     let before_tx = before_summary.map(|(_, tx)| tx);
-    let mut report = crate::send_manual_announce_from_state(&state).await;
+    let mut report = crate::send_manual_announce_from_origin(&state, activity_fence).await;
     let mut retried = false;
     let mut sent_bytes = None;
 
@@ -823,7 +1185,7 @@ pub async fn trigger_announce(state: State<'_, Arc<AppState>>) -> AppResult<Valu
         if report.queued > 0 && sent_bytes == Some(0) {
             retried = true;
             tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
-            report = crate::send_manual_announce_from_state(&state).await;
+            report = crate::send_manual_announce_from_origin(&state, activity_fence).await;
             tokio::time::sleep(std::time::Duration::from_millis(450)).await;
             sent_bytes = live_interface_summary(&state)
                 .await
@@ -832,6 +1194,14 @@ pub async fn trigger_announce(state: State<'_, Arc<AppState>>) -> AppResult<Valu
     }
 
     if report.queued == 0 {
+        let failure = if report.packets == 0 {
+            producer::AnnounceFailureReason::NotReady
+        } else if report.failed > 0 {
+            producer::AnnounceFailureReason::QueueFailed
+        } else {
+            producer::AnnounceFailureReason::TransportUnavailable
+        };
+        record_manual_announce_outcome(&state, activity_fence, Some(failure));
         state.emit_to_all(
             "announce_triggered",
             json!({ "success": false, "error": "not_ready" }),
@@ -841,6 +1211,11 @@ pub async fn trigger_announce(state: State<'_, Arc<AppState>>) -> AppResult<Valu
 
     if sent_bytes == Some(0) {
         tracing::warn!("manual announce queued but no interface transmitted bytes");
+        record_manual_announce_outcome(
+            &state,
+            activity_fence,
+            Some(producer::AnnounceFailureReason::NoInterfaceTransmission),
+        );
         state.emit_to_all(
             "announce_triggered",
             json!({ "success": false, "error": "not_sent", "retried": retried }),
@@ -848,6 +1223,7 @@ pub async fn trigger_announce(state: State<'_, Arc<AppState>>) -> AppResult<Valu
         return Ok(json!({ "success": false, "error": "not_sent", "retried": retried }));
     }
 
+    record_manual_announce_outcome(&state, activity_fence, None);
     state.emit_to_all(
         "announce_triggered",
         json!({ "success": true, "retried": retried, "sent_bytes": sent_bytes }),
@@ -869,6 +1245,7 @@ pub async fn request_path(state: State<'_, Arc<AppState>>, hash: String) -> AppR
     let mut dest = [0u8; 16];
     dest.copy_from_slice(&bytes);
 
+    let activity_fence = state.activity_request_fence();
     let success = if let Ok(rns) = state.rns.read() {
         if let Some(mgr) = rns.as_ref() {
             mgr.handle
@@ -884,16 +1261,17 @@ pub async fn request_path(state: State<'_, Arc<AppState>>, hash: String) -> AppR
         false
     };
 
-    if success
-        && state
-            .network_log_enabled
-            .load(std::sync::atomic::Ordering::Relaxed)
-    {
-        state.emit_network_event(
-            "path",
-            &format!("Path requested for {}", &dest_hex[..8.min(dest_hex.len())]),
-            &dest_hex,
-            "detailed",
+    if success {
+        state.activity.record_event_fenced(
+            || state.is_current_activity_origin_fence(activity_fence),
+            || {
+                let destination = producer::DestinationHash::from_hex(&dest_hex)?;
+                Ok(producer::rns_path_requested(producer::RnsPathRequested {
+                    destination: Some(destination),
+                    count: None,
+                    method: producer::PathRequestMethod::Manual,
+                }))
+            },
         );
     }
     Ok(json!({ "hash": dest_hex, "success": success }))
@@ -901,6 +1279,7 @@ pub async fn request_path(state: State<'_, Arc<AppState>>, hash: String) -> AppR
 
 #[tauri::command]
 pub async fn request_all_paths(state: State<'_, Arc<AppState>>) -> AppResult<Value> {
+    let activity_fence = state.activity_request_fence();
     let identity_id = active_identity_id(&state);
     let st: Arc<AppState> = Arc::clone(&state);
     let id_c = identity_id.clone();
@@ -915,16 +1294,15 @@ pub async fn request_all_paths(state: State<'_, Arc<AppState>>) -> AppResult<Val
     })
     .await
     .unwrap_or(0);
-    if state
-        .network_log_enabled
-        .load(std::sync::atomic::Ordering::Relaxed)
-    {
-        state.emit_network_event(
-            "path",
-            &format!("Requested paths for {} contacts", count),
-            "",
-            "detailed",
-        );
-    }
+    state.activity.record_event_fenced(
+        || state.is_current_activity_origin_fence(activity_fence),
+        || {
+            Ok(producer::rns_path_requested(producer::RnsPathRequested {
+                destination: None,
+                count: Some(count as u64),
+                method: producer::PathRequestMethod::ContactRefresh,
+            }))
+        },
+    );
     Ok(json!({ "count": count, "success": true }))
 }

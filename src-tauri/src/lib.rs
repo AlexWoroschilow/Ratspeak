@@ -1,3 +1,10 @@
+mod channel_deep_link;
+#[cfg(any(target_os = "android", target_os = "ios", test))]
+#[cfg_attr(
+    all(test, not(any(target_os = "android", target_os = "ios"))),
+    allow(dead_code)
+)]
+mod mobile_native;
 mod paths;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -15,12 +22,6 @@ const TRAY_SHOW_ID: &str = "ratspeak_tray_show";
 ))]
 const TRAY_QUIT_ID: &str = "ratspeak_tray_quit";
 
-// WKWebView pointer used by iOS network-path + lifecycle JS injection.
-// Process-lifetime ObjC object; only passed back to objc_msgSend, never deref'd.
-#[cfg(target_os = "ios")]
-static WEBVIEW_PTR: std::sync::atomic::AtomicPtr<objc2::runtime::AnyObject> =
-    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
-
 // SAFETY: without this init, btleplug's global_adapter() panics on first use
 // and panic=abort terminates the app. Also stashes the JavaVM for BLE peer
 // advertising, BT Classic RFCOMM, and android_usb.
@@ -36,12 +37,18 @@ pub extern "system" fn JNI_OnLoad(
                 rns_interface::ble_rnode::mark_btleplug_initialized();
                 tracing::debug!("btleplug initialized from JNI_OnLoad");
             }
-            Err(e) => {
-                tracing::debug!(error = %e, "btleplug init failed from JNI_OnLoad");
+            Err(_) => {
+                tracing::debug!(
+                    reason = "btleplug_init_failed",
+                    "btleplug init failed from JNI_OnLoad"
+                );
             }
         },
-        Err(e) => {
-            tracing::debug!(error = %e, "failed to get JNI env in JNI_OnLoad");
+        Err(_) => {
+            tracing::debug!(
+                reason = "jni_env_unavailable",
+                "failed to get JNI env in JNI_OnLoad"
+            );
         }
     }
 
@@ -71,6 +78,10 @@ fn env_flag(name: &str) -> bool {
 
 fn diagnostics_enabled() -> bool {
     env_flag("RATSPEAK_DIAGNOSTICS")
+}
+
+fn diagnostic_metadata_allowed(metadata: &tracing::Metadata<'_>) -> bool {
+    ratspeak_tauri::diagnostics::metadata_allowed(metadata)
 }
 
 #[cfg(target_os = "linux")]
@@ -219,22 +230,64 @@ fn validate_http_url(raw: &str) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn open_external_url(url: String) -> Result<(), String> {
+async fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
     let clean = validate_http_url(&url)?;
+    open_platform_url(app, clean).await
+}
 
+#[tauri::command]
+async fn open_support_email(
+    app: tauri::AppHandle,
+    subject: String,
+    body: String,
+) -> Result<(), String> {
+    let subject = subject.trim();
+    if subject.is_empty() || subject.len() > 180 || body.len() > 8_000 {
+        return Err("Invalid support email".into());
+    }
+    if subject
+        .chars()
+        .any(|character| matches!(character, '\r' | '\n' | '\0'))
+        || body.contains('\0')
+    {
+        return Err("Invalid support email".into());
+    }
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("subject", subject)
+        .append_pair("body", &body)
+        .finish();
+    open_platform_url(app, format!("mailto:mail@ratspeak.org?{query}")).await
+}
+
+async fn open_platform_url(app: tauri::AppHandle, clean: String) -> Result<(), String> {
     #[cfg(target_os = "ios")]
     {
-        open_external_url_ios(&clean)
+        use std::time::Duration;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.run_on_main_thread(move || {
+            let _ = tx.send(open_external_url_ios(&clean));
+        })
+        .map_err(|error| format!("Could not open link: {error}"))?;
+
+        tauri::async_runtime::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(15)))
+            .await
+            .map_err(|error| format!("Link task failed: {error}"))?
+            .map_err(|_| "Timed out while opening the link".to_string())?
     }
 
     #[cfg(target_os = "android")]
     {
-        let _ = clean;
-        Err("Android external links are opened through the native WebView bridge".into())
+        let _ = (app, clean);
+        Err("Android links are opened through the native WebView bridge".into())
     }
 
-    #[cfg(all(not(any(target_os = "android", target_os = "ios")), target_os = "macos"))]
+    #[cfg(all(
+        not(any(target_os = "android", target_os = "ios")),
+        target_os = "macos"
+    ))]
     {
+        let _ = app;
         std::process::Command::new("open")
             .arg(&clean)
             .spawn()
@@ -242,8 +295,12 @@ fn open_external_url(url: String) -> Result<(), String> {
             .map_err(|e| format!("Failed to open link: {e}"))
     }
 
-    #[cfg(all(not(any(target_os = "android", target_os = "ios")), target_os = "windows"))]
+    #[cfg(all(
+        not(any(target_os = "android", target_os = "ios")),
+        target_os = "windows"
+    ))]
     {
+        let _ = app;
         std::process::Command::new("rundll32")
             .args(["url.dll,FileProtocolHandler", &clean])
             .spawn()
@@ -256,6 +313,7 @@ fn open_external_url(url: String) -> Result<(), String> {
         not(any(target_os = "macos", target_os = "windows"))
     ))]
     {
+        let _ = app;
         std::process::Command::new("xdg-open")
             .arg(&clean)
             .spawn()
@@ -271,8 +329,8 @@ fn open_external_url_ios(url: &str) -> Result<(), String> {
     use std::ffi::CString;
 
     unsafe {
-        let ns_string_class = AnyClass::get(c"NSString")
-            .ok_or_else(|| "NSString class not found".to_string())?;
+        let ns_string_class =
+            AnyClass::get(c"NSString").ok_or_else(|| "NSString class not found".to_string())?;
         let ns_url_class =
             AnyClass::get(c"NSURL").ok_or_else(|| "NSURL class not found".to_string())?;
         let ui_app_class = AnyClass::get(c"UIApplication")
@@ -298,6 +356,18 @@ fn open_external_url_ios(url: &str) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn open_mobile_app_settings() -> Result<(), String> {
+    #[cfg(target_os = "ios")]
+    {
+        open_external_url_ios("app-settings:")
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        Err("Mobile app settings are unavailable on this platform".to_string())
+    }
+}
+
+#[tauri::command]
 fn save_image_to_photos(filename: String, mime: String, data_base64: String) -> Result<(), String> {
     #[cfg(target_os = "ios")]
     {
@@ -312,13 +382,99 @@ fn save_image_to_photos(filename: String, mime: String, data_base64: String) -> 
 }
 
 #[tauri::command]
+async fn save_stored_attachment_native(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, std::sync::Arc<ratspeak_tauri::state::AppState>>,
+    stored_name: String,
+    prefer_photos: bool,
+    request_id: String,
+) -> Result<String, String> {
+    if request_id.len() > 128
+        || request_id.is_empty()
+        || !request_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err("Invalid native save request".into());
+    }
+    let (path, filename, mime) =
+        ratspeak_tauri::commands::messaging::received_file_export(&state, &stored_name)
+            .map_err(|_| "Stored attachment is unavailable".to_string())?;
+
+    #[cfg(target_os = "android")]
+    {
+        let _ = app;
+        if mobile_native::save_stored_file(
+            &path,
+            &filename,
+            &mime,
+            prefer_photos,
+            &request_id,
+        ) {
+            Ok("pending".into())
+        } else {
+            Ok("unsupported".into())
+        }
+    }
+
+    #[cfg(target_os = "ios")]
+    {
+        if prefer_photos && mime.starts_with("image/") {
+            save_image_file_to_photos_ios(&path)?;
+            return Ok("complete".into());
+        }
+        let export_path = prepare_file_export_ios(&path, &filename)?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.run_on_main_thread(move || {
+            let _ = tx.send(present_file_export_ios(&export_path));
+        })
+        .map_err(|error| format!("Could not open the file exporter: {error}"))?;
+        tauri::async_runtime::spawn_blocking(move || {
+            rx.recv_timeout(std::time::Duration::from_secs(10))
+        })
+        .await
+        .map_err(|_| "File exporter task failed".to_string())?
+        .map_err(|_| "File exporter did not open".to_string())??;
+        Ok("complete".into())
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let _ = (mime, prefer_photos);
+        let dialog_filename = filename.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.run_on_main_thread(move || {
+            let selection = rfd::FileDialog::new()
+                .set_file_name(dialog_filename)
+                .save_file();
+            let _ = tx.send(selection);
+        })
+        .map_err(|error| format!("Could not open the save dialog: {error}"))?;
+        let selection = tauri::async_runtime::spawn_blocking(move || {
+            rx.recv_timeout(std::time::Duration::from_secs(600))
+        })
+        .await
+        .map_err(|_| "Save dialog task failed".to_string())?
+        .map_err(|_| "Save dialog did not respond".to_string())?;
+        let Some(destination) = selection else {
+            return Ok("cancelled".into());
+        };
+        tauri::async_runtime::spawn_blocking(move || std::fs::copy(path, destination))
+            .await
+            .map_err(|_| "File export task failed".to_string())?
+            .map_err(|_| "Could not save the stored file".to_string())?;
+        Ok("complete".into())
+    }
+}
+
+#[tauri::command]
 async fn request_microphone_permission(_app: tauri::AppHandle) -> Result<bool, String> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
         use std::time::Duration;
 
         let (tx, rx) = std::sync::mpsc::channel();
-        _app.run_on_main_thread(move || request_microphone_permission_macos(tx))
+        _app.run_on_main_thread(move || request_microphone_permission_apple(tx))
             .map_err(|e| format!("Could not start microphone permission request: {e}"))?;
 
         tauri::async_runtime::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(120)))
@@ -327,18 +483,18 @@ async fn request_microphone_permission(_app: tauri::AppHandle) -> Result<bool, S
             .map_err(|_| "Timed out waiting for microphone permission".to_string())?
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     {
         Ok(true)
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 #[link(name = "AVFoundation", kind = "framework")]
 unsafe extern "C" {}
 
-#[cfg(target_os = "macos")]
-fn request_microphone_permission_macos(reply: std::sync::mpsc::Sender<Result<bool, String>>) {
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn request_microphone_permission_apple(reply: std::sync::mpsc::Sender<Result<bool, String>>) {
     use block2::RcBlock;
     use objc2::msg_send;
     use objc2::runtime::{AnyClass, AnyObject, Bool};
@@ -404,8 +560,8 @@ unsafe extern "C" {}
 
 #[cfg(target_os = "ios")]
 fn save_image_to_photos_ios(_filename: &str, mime: &str, data_base64: &str) -> Result<(), String> {
-    use base64::Engine;
     use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine;
     use block2::RcBlock;
     use objc2::msg_send;
     use objc2::runtime::{AnyClass, AnyObject};
@@ -463,17 +619,89 @@ fn save_image_to_photos_ios(_filename: &str, mime: &str, data_base64: &str) -> R
     Ok(())
 }
 
+#[cfg(target_os = "ios")]
+fn save_image_file_to_photos_ios(path: &std::path::Path) -> Result<(), String> {
+    use block2::RcBlock;
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use std::ffi::CString;
+    use std::ptr;
+
+    let path = path
+        .to_str()
+        .ok_or_else(|| "Stored image path is unavailable".to_string())?;
+    let path = CString::new(path).map_err(|_| "Stored image path is invalid".to_string())?;
+    unsafe {
+        let string_class =
+            AnyClass::get(c"NSString").ok_or_else(|| "NSString class not found".to_string())?;
+        let url_class =
+            AnyClass::get(c"NSURL").ok_or_else(|| "NSURL class not found".to_string())?;
+        let library_class = AnyClass::get(c"PHPhotoLibrary")
+            .ok_or_else(|| "PHPhotoLibrary class not found".to_string())?;
+        let request_class = AnyClass::get(c"PHAssetChangeRequest")
+            .ok_or_else(|| "PHAssetChangeRequest class not found".to_string())?;
+        let string: *mut AnyObject = msg_send![
+            string_class,
+            stringWithUTF8String: path.as_ptr()
+        ];
+        let url: *mut AnyObject = msg_send![url_class, fileURLWithPath: string];
+        let library: *mut AnyObject = msg_send![library_class, sharedPhotoLibrary];
+        if string.is_null() || url.is_null() || library.is_null() {
+            return Err("Photo library unavailable".into());
+        }
+        let changes = RcBlock::new(move || {
+            let _: *mut AnyObject = msg_send![
+                request_class,
+                creationRequestForAssetFromImageAtFileURL: url
+            ];
+        });
+        let mut error: *mut AnyObject = ptr::null_mut();
+        let ok: bool = msg_send![
+            library,
+            performChangesAndWait: &*changes,
+            error: &mut error
+        ];
+        if ok {
+            Ok(())
+        } else {
+            Err("Photo library denied or failed the save".into())
+        }
+    }
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn diagnostic_file_enabled() -> bool {
     diagnostics_enabled() && env_flag("RATSPEAK_DIAGNOSTIC_FILE")
 }
 
+#[derive(Default)]
+struct TracingGuard {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    file: Option<ratspeak_tauri::diagnostic_writer::DiagnosticFileRuntime>,
+}
+
+impl TracingGuard {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn dropped_counter(&self) -> Option<ratspeak_tauri::diagnostic_writer::DroppedLogLines> {
+        self.file.as_ref().map(|file| file.dropped_counter())
+    }
+
+    fn shutdown(&mut self) {
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        if let Some(file) = self.file.take() {
+            let _ = file.shutdown();
+        }
+    }
+}
+
 // Silent by default. Source/dev support diagnostics require
 // RATSPEAK_DIAGNOSTICS=1, and desktop file logs additionally require
 // RATSPEAK_DIAGNOSTIC_FILE=1. RUST_LOG only selects the filter after opt-in.
-fn init_tracing() {
+fn init_tracing() -> TracingGuard {
+    #[allow(unused_mut)]
+    let mut tracing_guard = TracingGuard::default();
     if !diagnostics_enabled() {
-        return;
+        return tracing_guard;
     }
 
     use tracing_subscriber::EnvFilter;
@@ -483,30 +711,41 @@ fn init_tracing() {
 
     #[cfg(target_os = "ios")]
     {
+        use tracing_subscriber::filter::filter_fn;
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
         let _ = tracing_subscriber::registry()
             .with(filter)
-            .with(tracing_oslog::OsLogger::new("org.ratspeak.ios", "default"))
+            .with(filter_fn(diagnostic_metadata_allowed))
+            .with(tracing_oslog::OsLogger::new(
+                "org.ratspeak.apple",
+                "default",
+            ))
             .try_init();
     }
 
     #[cfg(target_os = "android")]
     {
+        use tracing_subscriber::filter::filter_fn;
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
         match tracing_android::layer("RatspeakRust") {
             Ok(layer) => {
                 let _ = tracing_subscriber::registry()
                     .with(filter)
+                    .with(filter_fn(diagnostic_metadata_allowed))
                     .with(layer)
                     .try_init();
             }
             Err(_) => {
-                let _ = tracing_subscriber::fmt()
-                    .with_env_filter(filter)
-                    .with_target(false)
-                    .with_ansi(false)
+                let _ = tracing_subscriber::registry()
+                    .with(filter)
+                    .with(filter_fn(diagnostic_metadata_allowed))
+                    .with(
+                        tracing_subscriber::fmt::layer()
+                            .with_target(false)
+                            .with_ansi(false),
+                    )
                     .try_init();
             }
         }
@@ -514,42 +753,73 @@ fn init_tracing() {
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
+        use tracing_subscriber::filter::filter_fn;
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
 
         let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
         if diagnostic_file_enabled() {
-            let log_dir = dirs::data_local_dir()
-                .map(|d| d.join("Ratspeak").join("logs"))
-                .unwrap_or_else(|| std::path::PathBuf::from("."));
-            let _ = std::fs::create_dir_all(&log_dir);
-            let file_appender = tracing_appender::rolling::daily(&log_dir, "ratspeak.log");
-
+            let file_runtime = dirs::data_local_dir()
+                .ok_or_else(|| std::io::Error::other("local data directory unavailable"))
+                .and_then(|dir| {
+                    ratspeak_tauri::diagnostic_writer::DiagnosticFileRuntime::start(
+                        &dir.join("Ratspeak").join("logs"),
+                    )
+                });
+            match file_runtime {
+                Ok(file_runtime) => {
+                    let file_writer = file_runtime.make_writer();
+                    let _ = tracing_subscriber::registry()
+                        .with(filter)
+                        .with(filter_fn(diagnostic_metadata_allowed))
+                        .with(
+                            tracing_subscriber::fmt::layer()
+                                .with_target(false)
+                                .with_ansi(true)
+                                .with_writer(std::io::stderr),
+                        )
+                        .with(
+                            tracing_subscriber::fmt::layer()
+                                .with_target(true)
+                                .with_ansi(false)
+                                .with_writer(move || file_writer.record_writer()),
+                        )
+                        .try_init();
+                    tracing_guard.file = Some(file_runtime);
+                }
+                Err(_) => {
+                    let _ = tracing_subscriber::registry()
+                        .with(filter)
+                        .with(filter_fn(diagnostic_metadata_allowed))
+                        .with(
+                            tracing_subscriber::fmt::layer()
+                                .with_target(false)
+                                .with_ansi(true)
+                                .with_writer(std::io::stderr),
+                        )
+                        .try_init();
+                    tracing::warn!(
+                        reason = "file_writer_unavailable",
+                        "diagnostic file logging unavailable; continuing with stderr"
+                    );
+                }
+            }
+        } else {
             let _ = tracing_subscriber::registry()
                 .with(filter)
+                .with(filter_fn(diagnostic_metadata_allowed))
                 .with(
                     tracing_subscriber::fmt::layer()
                         .with_target(false)
                         .with_ansi(true)
                         .with_writer(std::io::stderr),
                 )
-                .with(
-                    tracing_subscriber::fmt::layer()
-                        .with_target(true)
-                        .with_ansi(false)
-                        .with_writer(file_appender),
-                )
-                .try_init();
-        } else {
-            let _ = tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .with_target(false)
-                .with_ansi(true)
-                .with_writer(std::io::stderr)
                 .try_init();
         }
     }
+
+    tracing_guard
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -561,17 +831,20 @@ pub fn run() {
     }
 
     let linux_webkit_dmabuf_workaround = apply_linux_webkit_rendering_workarounds();
-    init_tracing();
-    if linux_webkit_dmabuf_workaround {
-        tracing::info!("WebKitGTK < 2.46: disabled DMA-BUF renderer for Wayland startup");
-    }
 
-    let builder = tauri::Builder::default().plugin(tauri_plugin_notification::init());
+    let builder =
+        tauri::Builder::default().manage(channel_deep_link::NativeChannelShareInbox::default());
 
+    // Tauri requires single-instance to be the first plugin when it forwards
+    // secondary-process deep-link arguments into the primary process.
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
         show_main_window(app);
     }));
+
+    let builder = builder
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_notification::init());
 
     // Mobile haptics bridge — navigator.vibrate is a no-op in WKWebView so
     // iOS needs UIImpactFeedbackGenerator via this plugin.
@@ -582,12 +855,15 @@ pub fn run() {
         b
     };
 
-    builder
+    let app = builder
         .invoke_handler(tauri::generate_handler![
             open_external_url,
+            open_support_email,
             set_window_decorations,
             save_image_to_photos,
+            save_stored_attachment_native,
             request_microphone_permission,
+            channel_deep_link::take_native_channel_share,
             ratspeak_tauri::commands::system::api_version,
             ratspeak_tauri::commands::system::api_startup_progress,
             ratspeak_tauri::commands::system::api_setup_status,
@@ -597,17 +873,61 @@ pub fn run() {
             ratspeak_tauri::commands::network::api_propagation,
             ratspeak_tauri::commands::network::api_propagation_nodes,
             ratspeak_tauri::commands::network::api_hub_interfaces,
+            ratspeak_tauri::commands::activity::activity_status,
+            ratspeak_tauri::commands::activity::activity_start,
+            ratspeak_tauri::commands::activity::activity_stop,
+            ratspeak_tauri::commands::activity::activity_resume,
+            ratspeak_tauri::commands::activity::activity_set_profile,
+            ratspeak_tauri::commands::activity::activity_replay,
+            ratspeak_tauri::commands::activity::activity_clear,
+            ratspeak_tauri::commands::activity::activity_detail,
+            ratspeak_tauri::commands::activity::activity_reveal,
+            ratspeak_tauri::commands::activity::activity_safe_copy,
+            ratspeak_tauri::commands::channels::api_channels,
+            ratspeak_tauri::commands::channels::api_channel_history,
+            ratspeak_tauri::commands::channels::api_channel_participants,
+            ratspeak_tauri::commands::channels::api_channel_unread,
+            ratspeak_tauri::commands::channels::mark_channel_room_read,
+            ratspeak_tauri::commands::channels::set_channel_room_notification_level,
+            ratspeak_tauri::commands::channels::discover_channel_hubs,
+            ratspeak_tauri::commands::channels::refresh_channel_directory,
+            ratspeak_tauri::commands::channels::api_channel_share,
+            ratspeak_tauri::commands::channels::api_preview_channel_share,
+            ratspeak_tauri::commands::channels::connect_channel_hub,
+            ratspeak_tauri::commands::channels::disconnect_channel_hub,
+            ratspeak_tauri::commands::channels::join_channel,
+            ratspeak_tauri::commands::channels::part_channel,
+            ratspeak_tauri::commands::channels::send_channel_message,
+            ratspeak_tauri::commands::channels::api_saved_channel_hubs,
+            ratspeak_tauri::commands::channels::save_channel_hub,
+            ratspeak_tauri::commands::channels::remove_saved_channel_hub,
+            ratspeak_tauri::commands::channels::api_saved_channel_rooms,
+            ratspeak_tauri::commands::channels::api_channel_room_index,
+            ratspeak_tauri::commands::channels::save_channel_room,
+            ratspeak_tauri::commands::channels::remove_saved_channel_room,
+            ratspeak_tauri::commands::channel_hub::api_channel_hub,
+            ratspeak_tauri::commands::channel_hub::api_channel_hub_admin,
+            ratspeak_tauri::commands::channel_hub::channel_hub_admin_mutate,
+            ratspeak_tauri::commands::channel_hub::channel_hub_start,
+            ratspeak_tauri::commands::channel_hub::channel_hub_stop,
+            ratspeak_tauri::commands::channel_hub::set_channel_hosting_enabled,
+            ratspeak_tauri::commands::channel_hub::channel_hub_set_config,
             ratspeak_tauri::commands::messaging::api_conversation,
             ratspeak_tauri::commands::messaging::api_lxmf_conversations,
             ratspeak_tauri::commands::messaging::api_search_messages,
             ratspeak_tauri::commands::messaging::api_files,
             ratspeak_tauri::commands::messaging::api_lxmf_limits,
-            ratspeak_tauri::commands::messaging::api_file_download,
+            ratspeak_tauri::commands::messaging::api_file_metadata,
+            ratspeak_tauri::commands::messaging::api_file_read_chunk,
             ratspeak_tauri::commands::messaging::send_lxmf_message,
             ratspeak_tauri::commands::messaging::send_reaction,
             ratspeak_tauri::commands::messaging::send_lxmf_reply,
             ratspeak_tauri::commands::messaging::send_lxmf_propagated,
             ratspeak_tauri::commands::messaging::send_lxmf_with_attachment,
+            ratspeak_tauri::commands::messaging::begin_attachment_stage,
+            ratspeak_tauri::commands::messaging::append_attachment_stage,
+            ratspeak_tauri::commands::messaging::cancel_attachment_stage,
+            ratspeak_tauri::commands::messaging::send_lxmf_with_staged_attachment,
             ratspeak_tauri::commands::messaging::cancel_lxmf_message,
             ratspeak_tauri::commands::messaging::get_conversation,
             ratspeak_tauri::commands::messaging::mark_read,
@@ -628,8 +948,6 @@ pub fn run() {
             ratspeak_tauri::commands::contacts::purge_unverified_blackholes,
             ratspeak_tauri::commands::contacts::check_contact_status,
             ratspeak_tauri::commands::system::dismiss_alert,
-            ratspeak_tauri::commands::network::enable_network_log,
-            ratspeak_tauri::commands::network::set_network_log_level,
             ratspeak_tauri::commands::network::set_propagation_node,
             ratspeak_tauri::commands::network::set_propagation_mode,
             ratspeak_tauri::commands::network::set_propagation_hosting,
@@ -650,13 +968,22 @@ pub fn run() {
             ratspeak_tauri::commands::interfaces::set_hardware_lock_timeout,
             ratspeak_tauri::commands::interfaces::set_developer_mode,
             ratspeak_tauri::commands::interfaces::set_announce_ratspeak_usage,
+            ratspeak_tauri::commands::interfaces::set_activity_identity_protection,
+            ratspeak_tauri::commands::interfaces::set_hide_known_spam_peers,
+            ratspeak_tauri::commands::interfaces::set_lxmf_limit_1mb,
+            ratspeak_tauri::commands::interfaces::accept_public_channel_consent,
+            ratspeak_tauri::commands::interfaces::set_appearance,
+            ratspeak_tauri::commands::interfaces::set_native_theme,
+            ratspeak_tauri::commands::interfaces::set_text_scale,
             ratspeak_tauri::commands::interfaces::api_notification_settings,
             ratspeak_tauri::commands::interfaces::set_desktop_notifications,
+            open_mobile_app_settings,
             ratspeak_tauri::commands::interfaces::add_lora_interface,
             ratspeak_tauri::commands::interfaces::update_lora_interface,
             ratspeak_tauri::commands::interfaces::remove_lora_interface,
             ratspeak_tauri::commands::interfaces::pause_interface,
             ratspeak_tauri::commands::interfaces::resume_interface,
+            ratspeak_tauri::commands::interfaces::request_android_usb_permission,
             ratspeak_tauri::commands::interfaces::enable_auto_interface,
             ratspeak_tauri::commands::interfaces::disable_auto_interface,
             ratspeak_tauri::commands::interfaces::api_list_network_interfaces,
@@ -731,6 +1058,7 @@ pub fn run() {
             ratspeak_tauri::commands::ble::scan_ble_mesh_peers,
             ratspeak_tauri::commands::ble::scan_ble_devices,
             ratspeak_tauri::commands::ble::ble_rnode_bridge_ready,
+            ratspeak_tauri::commands::ble::ble_rnode_bridge_failed,
             ratspeak_tauri::commands::ble::cancel_ble_connect,
             ratspeak_tauri::commands::ble::disconnect_ble_rnode,
             ratspeak_tauri::commands::ble::submit_ble_rnode_passkey,
@@ -753,6 +1081,26 @@ pub fn run() {
             ratspeak_tauri::commands::voice::voice_set_microphone_muted,
             #[cfg(feature = "lxst-voice")]
             ratspeak_tauri::commands::voice::voice_restart_speaker,
+            #[cfg(feature = "lxst-voice")]
+            ratspeak_tauri::commands::voice::voice_memo_start,
+            #[cfg(feature = "lxst-voice")]
+            ratspeak_tauri::commands::voice::voice_memo_status,
+            #[cfg(feature = "lxst-voice")]
+            ratspeak_tauri::commands::voice::voice_memo_pause,
+            #[cfg(feature = "lxst-voice")]
+            ratspeak_tauri::commands::voice::voice_memo_stop,
+            #[cfg(feature = "lxst-voice")]
+            ratspeak_tauri::commands::voice::voice_memo_cancel,
+            #[cfg(feature = "lxst-voice")]
+            ratspeak_tauri::commands::voice::voice_memo_playback_session_start,
+            #[cfg(feature = "lxst-voice")]
+            ratspeak_tauri::commands::voice::voice_memo_playback_session_stop,
+            #[cfg(feature = "lxst-voice")]
+            ratspeak_tauri::commands::voice::voice_memo_decode_data,
+            #[cfg(feature = "lxst-voice")]
+            ratspeak_tauri::commands::voice::voice_memo_decode_stored,
+            #[cfg(feature = "lxst-voice")]
+            ratspeak_tauri::commands::voice::voice_memo_inspect_stored,
             // Hardware (PIV) identity commands — desktop only (pcsc).
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             ratspeak_tauri::commands::hardware::hw_detect,
@@ -782,7 +1130,7 @@ pub fn run() {
 
             let data_dir = paths::resolve_data_dir(&handle);
             std::fs::create_dir_all(&data_dir).ok();
-            tracing::debug!(path = %data_dir.display(), "resolved Ratspeak data directory");
+            tracing::debug!("resolved Ratspeak data directory");
 
             // setup() has no Tokio runtime; leak one for process-lifetime tasks.
             let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
@@ -808,7 +1156,9 @@ pub fn run() {
 
             std::mem::forget(rt);
 
-            app.manage(state);
+            app.manage(std::sync::Arc::clone(&state));
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            mobile_native::install(&state);
 
             // Programmatic window construction so we can attach on_download.
             let platform_script = if cfg!(any(target_os = "android", target_os = "ios")) {
@@ -879,9 +1229,9 @@ pub fn run() {
                             false
                         }
                     }
-                    DownloadEvent::Finished { url, success, .. } => {
+                    DownloadEvent::Finished { success, .. } => {
                         if !success {
-                            tracing::debug!(%url, "download failed");
+                            tracing::debug!(reason = "download_failed", "download failed");
                         }
                         true
                     }
@@ -890,6 +1240,7 @@ pub fn run() {
             });
 
             let _window = window.build()?;
+            channel_deep_link::install(app);
 
             #[cfg(all(
                 not(any(target_os = "android", target_os = "ios")),
@@ -905,9 +1256,8 @@ pub fn run() {
                 // sits flush under the compose bar (no prev/next/done toolbar).
                 unsafe {
                     use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
-                    use std::ffi::{c_char, CStr};
 
-                    let class_name = CStr::from_bytes_with_nul_unchecked(b"WKContentView\0");
+                    let class_name = c"WKContentView";
                     if let Some(cls) = AnyClass::get(class_name) {
                         let sel = objc2::sel!(inputAccessoryView);
 
@@ -927,7 +1277,7 @@ pub fn run() {
                                     -> *const AnyObject,
                         );
                         // ObjC type encoding: returns @, takes self (@), selector (:).
-                        let types = b"@@:\0".as_ptr() as *const c_char;
+                        let types = c"@@:".as_ptr();
                         objc2::ffi::class_replaceMethod(
                             cls as *const AnyClass as *mut AnyClass,
                             sel,
@@ -937,8 +1287,6 @@ pub fn run() {
                     }
                 }
 
-                // Stash the WKWebView pointer for nw_path_monitor + lifecycle
-                // JS injection without plumbing the Tauri handle through.
                 let _ = _window.with_webview(|webview| unsafe {
                     use objc2::rc::Retained;
                     use objc2::runtime::AnyObject;
@@ -946,8 +1294,6 @@ pub fn run() {
                     use objc2_ui_kit::UIScrollViewContentInsetAdjustmentBehavior;
 
                     let wk_webview_ptr = webview.inner() as *mut AnyObject;
-                    WEBVIEW_PTR.store(wk_webview_ptr, std::sync::atomic::Ordering::Release);
-
                     let wk_webview: &AnyObject = &*(wk_webview_ptr as *const AnyObject);
                     let scroll_view: Retained<UIScrollView> =
                         objc2::msg_send![wk_webview, scrollView];
@@ -956,50 +1302,73 @@ pub fn run() {
                     );
                 });
 
-                // NSNotificationCenter UIApplicationDidEnterBackground /
-                // DidBecomeActive — fires before the WKWebView JS event loop,
-                // so is_foreground stays accurate during paused fetches.
-                unsafe { register_ios_lifecycle_observers() };
-
                 // nw_path_monitor for wifi↔cellular handoff (WKWebView lacks
                 // navigator.connection).
                 unsafe { register_ios_network_observer() };
+                unsafe { register_ios_memory_warning_observer() };
             }
 
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("error while building Ratspeak")
-        .run(|app_handle, event| {
-            #[cfg(any(target_os = "ios", target_os = "android"))]
-            let _ = (&app_handle, &event);
+        .expect("error while building Ratspeak");
 
-            #[cfg(not(any(target_os = "ios", target_os = "android")))]
-            match event {
-                tauri::RunEvent::WindowEvent {
-                    label,
-                    event: tauri::WindowEvent::CloseRequested { api, .. },
-                    ..
-                } if label == "main" => {
-                    api.prevent_close();
-                    set_desktop_foreground(app_handle, false);
-                    if let Some(window) = app_handle.get_webview_window("main") {
-                        let _ = window.hide();
-                    }
+    // Initialize file diagnostics only after Builder::build has completed.
+    // The desktop single-instance plugin may exit a secondary process during
+    // build; that process must never touch or rotate the primary's logs.
+    let mut tracing_guard = init_tracing();
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    if let Some(dropped) = tracing_guard.dropped_counter() {
+        app.manage(dropped);
+    }
+    if linux_webkit_dmabuf_workaround {
+        tracing::info!("WebKitGTK < 2.46: disabled DMA-BUF renderer for Wayland startup");
+    }
+
+    app.run(|app_handle, event| {
+        #[cfg(any(target_os = "ios", target_os = "android"))]
+        let _ = app_handle;
+
+        #[cfg(any(target_os = "ios", target_os = "android"))]
+        match event {
+            tauri::RunEvent::WindowEvent {
+                event: tauri::WindowEvent::Suspended,
+                ..
+            } => mobile_native::submit_lifecycle(false),
+            tauri::RunEvent::WindowEvent {
+                event: tauri::WindowEvent::Resumed,
+                ..
+            } => mobile_native::submit_lifecycle(true),
+            _ => {}
+        }
+
+        #[cfg(not(any(target_os = "ios", target_os = "android")))]
+        match event {
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::CloseRequested { api, .. },
+                ..
+            } if label == "main" => {
+                api.prevent_close();
+                set_desktop_foreground(app_handle, false);
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    let _ = window.hide();
                 }
-                tauri::RunEvent::ExitRequested { .. } => {
-                    shutdown_desktop_core_for_exit(app_handle);
-                }
-                #[cfg(target_os = "macos")]
-                tauri::RunEvent::Reopen {
-                    has_visible_windows,
-                    ..
-                } if !has_visible_windows => {
-                    show_main_window(app_handle);
-                }
-                _ => {}
             }
-        });
+            tauri::RunEvent::ExitRequested { .. } => {
+                shutdown_desktop_core_for_exit(app_handle);
+            }
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen {
+                has_visible_windows,
+                ..
+            } if !has_visible_windows => {
+                show_main_window(app_handle);
+            }
+            _ => {}
+        }
+    });
+    tracing_guard.shutdown();
 }
 
 #[cfg(all(
@@ -1043,6 +1412,113 @@ fn install_desktop_tray(app: &mut tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "ios")]
+fn prepare_file_export_ios(
+    source: &std::path::Path,
+    filename: &str,
+) -> Result<std::path::PathBuf, String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = std::env::temp_dir().join("ratspeak-native-exports");
+    std::fs::create_dir_all(&root)
+        .map_err(|_| "Could not prepare the file exporter".to_string())?;
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+        .map_err(|_| "Could not secure the file exporter".to_string())?;
+
+    if let Ok(entries) = std::fs::read_dir(&root) {
+        let cutoff = std::time::SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(24 * 60 * 60));
+        for entry in entries.flatten() {
+            let stale = cutoff.is_some_and(|cutoff| {
+                entry
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .is_ok_and(|modified| modified < cutoff)
+            });
+            if stale {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let export_dir = root.join(format!("{}-{nonce}", std::process::id()));
+    std::fs::create_dir(&export_dir)
+        .map_err(|_| "Could not prepare the file exporter".to_string())?;
+    std::fs::set_permissions(&export_dir, std::fs::Permissions::from_mode(0o700))
+        .map_err(|_| "Could not secure the file exporter".to_string())?;
+    let export_path = export_dir.join(filename);
+    if std::fs::hard_link(source, &export_path).is_err() {
+        std::fs::copy(source, &export_path)
+            .map_err(|_| "Could not prepare the stored file for export".to_string())?;
+    }
+    std::fs::set_permissions(&export_path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|_| "Could not secure the exported file".to_string())?;
+    Ok(export_path)
+}
+
+#[cfg(target_os = "ios")]
+fn present_file_export_ios(path: &std::path::Path) -> Result<(), String> {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use std::ffi::CString;
+    use std::ptr;
+
+    let path = path
+        .to_str()
+        .ok_or_else(|| "Stored file path is unavailable".to_string())?;
+    let path = CString::new(path).map_err(|_| "Stored file path is invalid".to_string())?;
+    unsafe {
+        let string_class =
+            AnyClass::get(c"NSString").ok_or_else(|| "NSString class not found".to_string())?;
+        let url_class =
+            AnyClass::get(c"NSURL").ok_or_else(|| "NSURL class not found".to_string())?;
+        let array_class =
+            AnyClass::get(c"NSArray").ok_or_else(|| "NSArray class not found".to_string())?;
+        let picker_class = AnyClass::get(c"UIDocumentPickerViewController")
+            .ok_or_else(|| "File exporter is unavailable".to_string())?;
+        let application_class = AnyClass::get(c"UIApplication")
+            .ok_or_else(|| "UIApplication class not found".to_string())?;
+
+        let string: *mut AnyObject = msg_send![string_class, stringWithUTF8String: path.as_ptr()];
+        let url: *mut AnyObject = msg_send![url_class, fileURLWithPath: string];
+        let urls: *mut AnyObject = msg_send![array_class, arrayWithObject: url];
+        let allocated: *mut AnyObject = msg_send![picker_class, alloc];
+        let picker: *mut AnyObject =
+            msg_send![allocated, initForExportingURLs: urls, asCopy: true];
+        let application: *mut AnyObject = msg_send![application_class, sharedApplication];
+        let windows: *mut AnyObject = msg_send![application, windows];
+        let window: *mut AnyObject = msg_send![windows, firstObject];
+        let mut controller: *mut AnyObject = msg_send![window, rootViewController];
+        if string.is_null()
+            || url.is_null()
+            || urls.is_null()
+            || picker.is_null()
+            || controller.is_null()
+        {
+            return Err("File exporter is unavailable".to_string());
+        }
+        for _ in 0..8 {
+            let presented: *mut AnyObject = msg_send![controller, presentedViewController];
+            if presented.is_null() {
+                break;
+            }
+            controller = presented;
+        }
+        let completion: *mut AnyObject = ptr::null_mut();
+        let _: () = msg_send![
+            controller,
+            presentViewController: picker,
+            animated: true,
+            completion: completion
+        ];
+    }
+    Ok(())
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -1056,7 +1532,31 @@ fn show_main_window(app: &tauri::AppHandle) {
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn set_desktop_foreground(app: &tauri::AppHandle, foreground: bool) {
     if let Some(state) = app.try_state::<std::sync::Arc<ratspeak_tauri::state::AppState>>() {
-        ratspeak_tauri::commands::system::set_foreground_state(state.inner(), foreground);
+        let state = std::sync::Arc::clone(state.inner());
+        let transition = state.begin_foreground_transition();
+        if foreground {
+            tauri::async_runtime::spawn(async move {
+                let expiry = {
+                    let _identity_lifecycle = state.identity_switch_lock.lock().await;
+                    let _activity_control = state.activity_control_lock.lock().await;
+                    state.activity.expire_trace_if_due().await
+                };
+                if expiry.is_ok() {
+                    let _ = ratspeak_tauri::commands::system::set_foreground_state_if_current(
+                        &state, true, transition,
+                    );
+                } else {
+                    tracing::error!(
+                        reason = "activity_lifecycle_unavailable",
+                        "foreground resume held because Activity expiry could not be checked"
+                    );
+                }
+            });
+        } else {
+            let _ = ratspeak_tauri::commands::system::set_foreground_state_if_current(
+                &state, false, transition,
+            );
+        }
     }
 }
 
@@ -1065,11 +1565,24 @@ fn shutdown_desktop_core_for_exit(app: &tauri::AppHandle) {
     tauri::async_runtime::block_on(async {
         if let Some(state) = app.try_state::<std::sync::Arc<ratspeak_tauri::state::AppState>>() {
             let state = std::sync::Arc::clone(state.inner());
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                ratspeak_tauri::shutdown_rns_lxmf(&state),
-            )
-            .await;
+            let shutdown = async {
+                let _identity_lifecycle = state.identity_switch_lock.lock().await;
+                ratspeak_tauri::shutdown_rns_lxmf(&state).await?;
+                let _activity_control = state.activity_control_lock.lock().await;
+                state.activity.shutdown().await
+            };
+            match tokio::time::timeout(std::time::Duration::from_secs(5), shutdown).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::error!(%error, "desktop shutdown lifecycle boundary failed");
+                }
+                Err(_) => {
+                    tracing::error!(
+                        reason = "lifecycle_timeout",
+                        "desktop shutdown lifecycle boundary timed out"
+                    );
+                }
+            }
         }
 
         // Release the WinRT GattServiceProvider before exit so Windows does
@@ -1080,111 +1593,6 @@ fn shutdown_desktop_core_for_exit(app: &tauri::AppHandle) {
         )
         .await;
     });
-}
-
-/// Drive foreground/background transitions through `api_set_foreground` so the
-/// Rust core is the single entry point for lifecycle changes.
-#[cfg(target_os = "ios")]
-fn post_ios_lifecycle(foreground: bool) {
-    let js = format!(
-        "if (typeof RS !== 'undefined' && RS.invoke) {{ \
-         RS.invoke('api_set_foreground', {{ args: {{ foreground: {foreground} }} }}).catch(function() {{}}); }}"
-    );
-    inject_js(&js);
-}
-
-#[cfg(target_os = "ios")]
-fn inject_js(js: &str) {
-    use objc2::msg_send;
-    use objc2::runtime::{AnyClass, AnyObject};
-    use std::ffi::CString;
-    use std::sync::atomic::Ordering;
-
-    let webview = WEBVIEW_PTR.load(Ordering::Acquire);
-    if webview.is_null() {
-        return;
-    }
-    let cstring = match CString::new(js) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-
-    unsafe {
-        let ns_string_class = match AnyClass::get(c"NSString") {
-            Some(c) => c,
-            None => return,
-        };
-        let js_nsstring: *mut AnyObject =
-            msg_send![ns_string_class, stringWithUTF8String: cstring.as_ptr()];
-        if js_nsstring.is_null() {
-            return;
-        }
-
-        // SAFETY: WKWebView is main-thread-only; both callers
-        // (nw_path_monitor main queue, NSNotificationCenter main run loop)
-        // already run on the main thread.
-        let _: () = msg_send![
-            webview,
-            evaluateJavaScript: js_nsstring,
-            completionHandler: std::ptr::null::<AnyObject>(),
-        ];
-    }
-}
-
-#[cfg(target_os = "ios")]
-unsafe fn register_ios_lifecycle_observers() {
-    use block2::RcBlock;
-    use objc2::msg_send;
-    use objc2::runtime::{AnyClass, AnyObject};
-    use std::ffi::CStr;
-    use std::ptr;
-
-    let nc_class = match AnyClass::get(c"NSNotificationCenter") {
-        Some(c) => c,
-        None => {
-            tracing::debug!("NSNotificationCenter class not found");
-            return;
-        }
-    };
-    let center: *mut AnyObject = msg_send![nc_class, defaultCenter];
-    if center.is_null() {
-        return;
-    }
-
-    let ns_string_class = match AnyClass::get(c"NSString") {
-        Some(c) => c,
-        None => return,
-    };
-
-    let make_name = |name: &CStr| -> *mut AnyObject {
-        msg_send![ns_string_class, stringWithUTF8String: name.as_ptr()]
-    };
-
-    let bg_name = make_name(c"UIApplicationDidEnterBackgroundNotification");
-    let fg_name = make_name(c"UIApplicationDidBecomeActiveNotification");
-    if bg_name.is_null() || fg_name.is_null() {
-        return;
-    }
-
-    // NSNotificationCenter retains the block; RcBlock can drop at end of fn.
-    let bg_block = RcBlock::new(|_n: *mut AnyObject| post_ios_lifecycle(false));
-    let fg_block = RcBlock::new(|_n: *mut AnyObject| post_ios_lifecycle(true));
-
-    // Observers live for process lifetime; token discarded.
-    let _: *mut AnyObject = msg_send![
-        center,
-        addObserverForName: bg_name,
-        object: ptr::null::<AnyObject>(),
-        queue: ptr::null::<AnyObject>(),
-        usingBlock: &*bg_block,
-    ];
-    let _: *mut AnyObject = msg_send![
-        center,
-        addObserverForName: fg_name,
-        object: ptr::null::<AnyObject>(),
-        queue: ptr::null::<AnyObject>(),
-        usingBlock: &*fg_block,
-    ];
 }
 
 // NWPathMonitor is Swift-only (no ObjC class); bind the C ABI directly.
@@ -1238,16 +1646,6 @@ unsafe fn classify_path(path: *mut std::ffi::c_void) -> &'static str {
 }
 
 #[cfg(target_os = "ios")]
-fn inject_network_type_change_js(network_type: &str) {
-    // typeof guard covers the early-boot window before state.js loads.
-    let js = format!(
-        "if (typeof RS !== 'undefined' && RS.invoke) {{ \
-         RS.invoke('network_type_changed', {{ args: {{ network_type: '{network_type}' }} }}).catch(function() {{}}); }}"
-    );
-    inject_js(&js);
-}
-
-#[cfg(target_os = "ios")]
 unsafe fn register_ios_network_observer() {
     use block2::RcBlock;
 
@@ -1263,14 +1661,57 @@ unsafe fn register_ios_network_observer() {
             return;
         }
         let network_type = unsafe { classify_path(path) };
-        inject_network_type_change_js(network_type);
+        mobile_native::submit_native_network(network_type);
     });
     nw_path_monitor_set_update_handler(monitor, &*block as *const _ as *const std::ffi::c_void);
 
-    // Main queue so evaluateJavaScript runs on the main thread directly.
+    // Main queue keeps Network.framework callback ordering deterministic.
     let main_queue = std::ptr::addr_of!(_dispatch_main_q) as *mut std::ffi::c_void;
     nw_path_monitor_set_queue(monitor, main_queue);
 
     nw_path_monitor_start(monitor);
     // Dispatch queue retains the monitor; no nw_release needed.
+}
+
+#[cfg(target_os = "ios")]
+unsafe fn register_ios_memory_warning_observer() {
+    use block2::RcBlock;
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+
+    let Some(center_class) = AnyClass::get(c"NSNotificationCenter") else {
+        tracing::debug!(
+            reason = "notification_center_unavailable",
+            "iOS memory observer unavailable"
+        );
+        return;
+    };
+    let Some(string_class) = AnyClass::get(c"NSString") else {
+        tracing::debug!(reason = "nsstring_unavailable", "iOS memory observer unavailable");
+        return;
+    };
+    let center: *mut AnyObject = msg_send![center_class, defaultCenter];
+    let name: *mut AnyObject = msg_send![
+        string_class,
+        stringWithUTF8String: c"UIApplicationDidReceiveMemoryWarningNotification".as_ptr()
+    ];
+    if center.is_null() || name.is_null() {
+        return;
+    }
+    let block = RcBlock::new(|_notification: *mut AnyObject| {
+        mobile_native::submit_memory_pressure(true);
+    });
+    let observer: *mut AnyObject = msg_send![
+        center,
+        addObserverForName: name,
+        object: std::ptr::null_mut::<AnyObject>(),
+        queue: std::ptr::null_mut::<AnyObject>(),
+        usingBlock: &*block
+    ];
+    if observer.is_null() {
+        tracing::debug!(
+            reason = "observer_registration_failed",
+            "iOS memory observer unavailable"
+        );
+    }
 }

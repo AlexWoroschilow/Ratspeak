@@ -18,8 +18,8 @@ function _rsBootstrapOnLoad() {
             showHwUnlock(data.hw_locked, data.hw_locked_kind);
         }
     }).catch(function() {});
-    if (window.RS && RS.audioPlayback && typeof RS.audioPlayback.ensure === 'function') {
-        RS.audioPlayback.ensure({ installUnlock: true }).catch(function() {});
+    if (window.RS && RS.audioPlayback && typeof RS.audioPlayback.installUnlock === 'function') {
+        RS.audioPlayback.installUnlock();
     }
     RS.invoke('api_announces').then(function(data) {
         if (Array.isArray(data)) {
@@ -55,16 +55,56 @@ if (document.readyState === 'complete' || document.readyState === 'interactive')
 
 // Native notification tap routing. When the app is backgrounded and the user
 // taps a notification, deep-link to the originating conversation/game via the
-// `route` extra the backend attaches (lxmf:<hash> / lrgp:<session_id>).
-// Android-only in practice today: desktop notify-rust exposes no tap callback
-// and iOS notifications are stubbed pre-release (see ratspeak-tauri notifier.rs).
+// `route` extra the backend attaches (lxmf:<hash> / lrgp:<session_id> /
+// channels:<hub_hash>:<hex_utf8_room>).
+// Desktop notify-rust exposes no tap callback. Android carries the route in
+// `extra`; iOS notification 2.3.3 preserves it as `actionTypeId`.
+function _decodeChannelNotificationRoute(route) {
+    var match = /^channels:([0-9a-f]{32}):([0-9a-f]{2,512})$/.exec(String(route || ''));
+    if (!match || match[2].length % 2 !== 0) return null;
+    var bytes = new Uint8Array(match[2].length / 2);
+    for (var i = 0; i < bytes.length; i++) {
+        bytes[i] = parseInt(match[2].slice(i * 2, i * 2 + 2), 16);
+    }
+    var room;
+    try {
+        if (typeof TextDecoder === 'function') {
+            room = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+        } else {
+            var encoded = '';
+            for (var j = 0; j < bytes.length; j++) {
+                encoded += '%' + bytes[j].toString(16).padStart(2, '0');
+            }
+            room = decodeURIComponent(encoded);
+        }
+    } catch (_) {
+        return null;
+    }
+    if (!room || room !== room.trim() || /[\u0000-\u001f\u007f]/.test(room)) return null;
+    return { hub_destination_hash: match[1], room_name: room };
+}
+
 function _routeNotificationTap(payload) {
     if (!payload || typeof payload !== 'object') return;
     // Android delivers {inputValue, actionId, notification:{...,extra}}; a flat
     // shape (extra at top level) is tolerated for other backends.
     var extra = (payload.notification && payload.notification.extra) || payload.extra;
     var route = extra && extra.route;
+    if (typeof route !== 'string') {
+        var notification = payload.notification || payload;
+        route = notification && notification.actionTypeId;
+    }
     if (typeof route !== 'string') return;
+    if (route.indexOf('channels:') === 0) {
+        var channel = _decodeChannelNotificationRoute(route);
+        if (channel && typeof window.channelsOpenNotificationRoute === 'function') {
+            window.channelsOpenNotificationRoute(
+                channel.hub_destination_hash,
+                channel.room_name
+            );
+        }
+        return;
+    }
     var sep = route.indexOf(':');
     if (sep < 0) return;
     var kind = route.slice(0, sep);
@@ -248,47 +288,6 @@ RS.listen('announces_cleared', function() {
     if (typeof announceCache !== 'undefined') announceCache = [];
     if (typeof renderAnnounceList === 'function') renderAnnounceList();
     _reloadPeersAfterCacheClear();
-});
-
-var _eventRenderScheduled = false;
-function _scheduleEventRender() {
-    if (_eventRenderScheduled) return;
-    _eventRenderScheduled = true;
-    requestAnimationFrame(function() {
-        _eventRenderScheduled = false;
-        renderLog();
-        if (typeof renderCockpitEvents === 'function') renderCockpitEvents();
-    });
-}
-RS.listen('event', function(ev) {
-    if (!ev || typeof ev !== 'object') return;
-    // Throttle status entries to one every ~280s.
-    if (ev.type === 'status' || ev.category === 'status') {
-        var lastStatus = null;
-        for (var i = events.length - 1; i >= 0; i--) {
-            if (events[i].type === 'status' || events[i].category === 'status') {
-                lastStatus = events[i];
-                break;
-            }
-        }
-        var now = Date.now() / 1000;
-        if (!lastStatus || (now - lastStatus.timestamp) >= 280) {
-            events.push(ev);
-            if (events.length > MAX_EVENTS) events.shift();
-        }
-    } else {
-        events.push(ev);
-        if (events.length > MAX_EVENTS) events.shift();
-    }
-    // Coalesce paints — a busy hub floods 200+ announce_summaries per second.
-    _scheduleEventRender();
-});
-
-RS.listen('event_log', function(batch) {
-    events = events.concat(batch);
-    if (events.length > MAX_EVENTS) events = events.slice(-MAX_EVENTS);
-    renderLog();
-    if (typeof renderCockpitEvents === 'function') renderCockpitEvents();
 });
 
 function _remapOpStatus(step) {
@@ -878,11 +877,6 @@ RS.listen('ble_scan_results', function(data) {
     }
 });
 
-// Opt-in: set window._bleDiag = true in DevTools.
-RS.listen('ble_diag', function(data) {
-    if (window._bleDiag) window.RS.diag('log', '[ble_diag]', data && data.msg);
-});
-
 // AutoInterface JoinFailed; current producer is Apple multicast-without-entitlement.
 RS.listen('auto_unavailable', function(data) {
     if (!data) return;
@@ -1028,105 +1022,49 @@ RS.listen('ble_rnode_pairing_finished', function(data) {
     _bleRnodeDismissModal(record);
 });
 
-// Android-only: interface teardown must close the Kotlin GATT link, or the
-// RNode stays connected and never advertises again.
-RS.listen('ble_rnode_disconnect_native', function() {
-    if (typeof window.RatspeakAndroid !== 'undefined' &&
-        typeof window.RatspeakAndroid.disconnectBleDevice === 'function') {
-        try { window.RatspeakAndroid.disconnectBleDevice(); } catch (_) {}
-    }
-});
-
-// Android-only: Rust asks Kotlin to open GATT + TCP bridge first.
-RS.listen('ble_rnode_connect_native', function(data) {
-    if (typeof window.RatspeakAndroid === 'undefined' ||
-        typeof window.RatspeakAndroid.connectBleDevice !== 'function') {
-        RS.invoke('ble_rnode_bridge_ready', {
-            args: { tcp_port: 0 }
-        }).catch(function() {});
+// Android hardware lifecycle is owned by Rust + the application-scoped native
+// supervisor. The WebView observes closed product state only.
+RS.listen('mobile_hardware_state', function(data) {
+    data = data || {};
+    if (typeof applyMobileHardwareState === 'function') applyMobileHardwareState(data);
+    if (data.kind === 'usb_rnode') {
+        var usbProgress = window._activeProgressDialog;
+        if (data.state === 'detached') {
+            showToast('USB RNode disconnected. Reconnect it, then resume the interface.', 'toast-yellow', 5000);
+        } else if (data.state === 'permission_needed') {
+            showToast('USB permission is required to reconnect the RNode.', 'toast-yellow', 5000);
+        } else if (data.state === 'permission_granted' && usbProgress && usbProgress.isOpen()) {
+            usbProgress.update('USB permission granted. Reconnecting...');
+        }
         return;
     }
-
-    // Bonding can take a while; phase updates keep the dialog meaningful.
-    var PHASE_MESSAGES = {
-        starting: 'Starting BLE connection...',
-        connecting: 'Connecting to RNode (GATT)...',
-        connecting_retry: 'Retrying paired BLE reconnect...',
-        mtu: 'Negotiating MTU...',
-        discovering: 'Discovering services...',
-        bonding: "Pairing...\nThis may take a moment. Don't unplug or restart your device.",
-        pairing_settle: 'Pairing complete — reconnecting securely...',
-        subscribing: 'Enabling notifications...',
-        bridge: 'Opening TCP bridge...',
-        ready: 'Connected — linking radio...',
+    if (data.kind !== 'ble_rnode') return;
+    var messages = {
+        connecting: 'Connecting to RNode...',
+        reconnecting: 'RNode unavailable — reconnecting...',
+        connected: 'RNode connected',
+        disabled: 'RNode disconnected',
+        conflict: 'Only one Bluetooth RNode can be active on Android.',
     };
-    window._onBleConnectProgress = function(phase) {
-        var pd = window._activeProgressDialog;
-        if (pd && pd.isOpen() && PHASE_MESSAGES[phase]) {
-            pd.update(PHASE_MESSAGES[phase]);
-        }
-    };
-
-    window._onBleConnectResult = function(result) {
-        window._onBleConnectResult = null;
-        window._onBleConnectProgress = null;
-        if (result.success) {
-            RS.invoke('ble_rnode_bridge_ready', {
-                args: {
-                    tcp_port: data.tcp_port,
-                    name: data.name,
-                    port: 'ble://' + data.address,
-                    frequency: data.frequency,
-                    bandwidth: data.bandwidth,
-                    spreading_factor: data.spreading_factor,
-                    coding_rate: data.coding_rate,
-                    tx_power: data.tx_power,
-                    mode: data.mode,
-                    airtime_limit_short: data.airtime_limit_short,
-                    airtime_limit_long: data.airtime_limit_long,
-                }
-            }).catch(function() {});
-        } else {
-            var errRaw = result.error || 'Unknown error';
-            var pairingMode = errRaw.indexOf('ERR_PAIRING_MODE') === 0;
-            var staleBond = errRaw.indexOf('ERR_STALE_BOND') === 0;
-            var errMsg = pairingMode
-                ? 'Pairing failed. Fresh installs are ready briefly after boot; otherwise hold P or OK on the RNode, then retry.'
-                : staleBond
-                    ? 'Paired BLE reconnect failed. Android may have a stale pairing for this RNode; remove it from Android Bluetooth settings, put the RNode in pairing mode, then pair again.'
-                : 'BLE connect failed: ' + errRaw;
-            if (typeof window.RatspeakAndroid !== 'undefined' &&
-                typeof window.RatspeakAndroid.disconnectBleDevice === 'function') {
-                try { window.RatspeakAndroid.disconnectBleDevice(); } catch (_) {}
-            }
-            if (data.rollback_on_error && data.name) {
-                RS.invoke('cancel_ble_connect', { name: data.name }).catch(function() {});
-            }
-            var pd = window._activeProgressDialog;
-            if (pd && pd.isOpen()) {
-                pd.error(errMsg);
-                if (pd.onClose) {
-                    pd.onClose(function() {
-                        if (window._activeProgressDialog === pd) window._activeProgressDialog = null;
-                        if (data.rollback_on_error && typeof openRnodeModal === 'function') {
-                            openRnodeModal('ble');
-                        }
-                    });
-                }
-            } else {
-                showToast(errMsg, 'toast-red', 5000);
-                if (data.rollback_on_error && typeof openRnodeModal === 'function') {
-                    openRnodeModal('ble');
-                }
-            }
-        }
-    };
-
-    if (window._activeProgressDialog && window._activeProgressDialog.isOpen()) {
-        window._activeProgressDialog.update('Connecting to RNode...\nFresh installs may already be ready; otherwise hold P or OK to allow pairing.');
+    var message = messages[data.state];
+    var pd = window._activeProgressDialog;
+    if (data.state === 'failed') {
+        var failures = {
+            bluetooth_off: 'Turn on Bluetooth to reconnect the RNode.',
+            permission_needed: 'Bluetooth permission is required to use the RNode.',
+            pairing_required: 'Put the RNode in pairing mode, then retry.',
+            bond_timeout: 'Pairing timed out. Put the RNode in pairing mode, then retry.',
+            stale_bond: 'Remove the saved Android pairing, then pair the RNode again.',
+            bridge_unavailable: 'The Bluetooth RNode service is unavailable.',
+            radio_disconnected: 'The RNode disconnected. Ratspeak will keep trying.',
+            connect_failed: 'The RNode could not connect.',
+        };
+        message = failures[data.reason] || failures.connect_failed;
+        if (pd && pd.isOpen()) pd.error(message);
+        else showToast(message, 'toast-red', 5000);
+        return;
     }
-
-    window.RatspeakAndroid.connectBleDevice(data.address, data.tcp_port);
+    if (pd && pd.isOpen() && message) pd.update(message);
 });
 
 RS.listen('clone_warning', function(data) {

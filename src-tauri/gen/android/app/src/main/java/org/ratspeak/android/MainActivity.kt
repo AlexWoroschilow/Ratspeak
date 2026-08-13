@@ -4,7 +4,6 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.NotificationManager
-import android.app.PendingIntent
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.BluetoothLeScanner
@@ -12,11 +11,9 @@ import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.ActivityNotFoundException
-import android.content.BroadcastReceiver
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
@@ -25,11 +22,7 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
 import android.net.Uri
-import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
-import android.net.ConnectivityManager
-import android.net.Network
-import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -47,6 +40,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.edit
+import androidx.core.graphics.toColorInt
+import androidx.core.net.toUri
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -54,6 +50,8 @@ import androidx.webkit.WebViewCompat
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileInputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.math.PI
@@ -64,9 +62,7 @@ import kotlin.math.sin
 class MainActivity : TauriActivity() {
     companion object {
         private const val BLE_PERMISSION_REQUEST_CODE = 1001
-        private const val NOTIFICATION_PERMISSION_REQUEST_CODE = 1002
         private const val MEDIA_PERMISSION_REQUEST_CODE = 1003
-        private const val USB_PERMISSION_ACTION = "org.ratspeak.android.USB_PERMISSION"
         private const val MAX_IDENTITY_IMPORT_BYTES = 1024 * 1024
         private const val CALL_RINGTONE_SAMPLE_RATE = 44100
         private const val CALL_RINGTONE_LOOP_MS = 3200L
@@ -81,6 +77,11 @@ class MainActivity : TauriActivity() {
         private const val CALL_RINGTONE_OUTGOING_ATTACK_MS = 9L
         private const val CALL_RINGTONE_INCOMING_RELEASE_MS = 52L
         private const val CALL_RINGTONE_OUTGOING_RELEASE_MS = 64L
+        private const val CALL_TIMEOUT_CUE_MS = 520L
+        private const val CALL_TIMEOUT_CUE_VOLUME = 0.20
+        private const val CALL_TIMEOUT_CUE_GLIDE_CENTS = -6.0
+        private const val CALL_TIMEOUT_CUE_ATTACK_MS = 7L
+        private const val CALL_TIMEOUT_CUE_RELEASE_MS = 58L
         private val CALL_RINGTONE_INCOMING_START_MS = longArrayOf(0L, 150L, 300L, 780L, 920L, 1070L)
         private val CALL_RINGTONE_INCOMING_FREQ_HZ = doubleArrayOf(
             CALL_RINGTONE_E5_HZ,
@@ -101,6 +102,14 @@ class MainActivity : TauriActivity() {
         )
         private val CALL_RINGTONE_OUTGOING_DURATION_MS = longArrayOf(118L, 190L, 96L, 160L)
         private val CALL_RINGTONE_OUTGOING_NOTE_GAIN = doubleArrayOf(0.82, 0.88, 0.68, 0.72)
+        private val CALL_TIMEOUT_CUE_START_MS = longArrayOf(0L, 112L, 238L)
+        private val CALL_TIMEOUT_CUE_FREQ_HZ = doubleArrayOf(
+            CALL_RINGTONE_B5_HZ,
+            CALL_RINGTONE_G5_HZ,
+            CALL_RINGTONE_E5_HZ
+        )
+        private val CALL_TIMEOUT_CUE_DURATION_MS = longArrayOf(88L, 104L, 168L)
+        private val CALL_TIMEOUT_CUE_NOTE_GAIN = doubleArrayOf(0.82, 0.74, 0.68)
         private val CALL_RINGTONE_INCOMING_PARTIALS = doubleArrayOf(0.74, 0.18, 0.08)
         private val CALL_RINGTONE_OUTGOING_PARTIALS = doubleArrayOf(0.80, 0.15, 0.05)
         // Standard Bluetooth MAC-48 address format: 6 hex octets separated
@@ -108,16 +117,14 @@ class MainActivity : TauriActivity() {
         // hand the string to BluetoothAdapter.getRemoteDevice, which throws
         // IllegalArgumentException on malformed input.
         private val BLE_MAC_RE = Regex("^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
+        private val BLE_OPERATION_RE = Regex("^[0-9A-Fa-f]{32}$")
     }
     private var webViewRef: WebView? = null
     private var appBackCallback: OnBackPressedCallback? = null
     private val handler = Handler(Looper.getMainLooper())
-    private var bleGatt: RatspeakBleGatt? = null
     private var pendingTop = 0
     private var pendingBottom = 0
     private var pendingNavigate: String? = null
-    private var usbPermissionReceiver: BroadcastReceiver? = null
-    private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var pendingIdentityExport: PendingIdentityExport? = null
     private var pendingGenericFileSave: PendingFileSave? = null
     private var pendingMediaRequestId: String? = null
@@ -127,24 +134,25 @@ class MainActivity : TauriActivity() {
     private var callRingtoneMode: String? = null
     private var callRingtoneTrack: AudioTrack? = null
     private var callRingtoneFocusRequest: Any? = null
-    private var callAudioFocusRequest: Any? = null
-    private var callProximityWakeLock: PowerManager.WakeLock? = null
-    private var callAudioRouteActive = false
-    private var callAudioRouteName: String? = null
+    private var voiceMemoAudioFocusRequest: Any? = null
     private val callRingtoneFocusListener = AudioManager.OnAudioFocusChangeListener { change ->
         if (change == AudioManager.AUDIOFOCUS_LOSS || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
             handler.post { stopNativeCallRingtone() }
         }
     }
-    private val callAudioFocusListener = AudioManager.OnAudioFocusChangeListener { }
-    @Volatile private var lastNetworkType: String = ""
-    @Volatile private var serviceMulticastEnabled = false
+    private val voiceMemoAudioFocusListener = AudioManager.OnAudioFocusChangeListener { change ->
+        if (change == AudioManager.AUDIOFOCUS_LOSS ||
+            change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
+            handler.post { dispatchVoiceMemoAudioInterruption() }
+        }
+    }
 
     private data class PendingIdentityExport(val fileName: String, val bytes: ByteArray)
     private data class PendingFileSave(
         val requestId: String,
         val fileName: String,
-        val bytes: ByteArray,
+        val bytes: ByteArray?,
+        val privateFile: File?,
         val mimeType: String
     )
 
@@ -165,19 +173,7 @@ class MainActivity : TauriActivity() {
 
     override fun onWebViewCreate(webView: WebView) {
         super.onWebViewCreate(webView)
-        // Local app assets are served through WebViewAssetLoader. Same-version
-        // APK reinstalls during development can otherwise keep stale HTML/CSS.
-        try {
-            webView.clearCache(true)
-        } catch (e: Exception) {
-            Log.d("Ratspeak", "clearCache: ${e.javaClass.simpleName}: ${e.message}")
-        }
-        // Allow the loading page (served over https://tauri.localhost/) to fetch
-        // the embedded HTTP backend at http://127.0.0.1:<port>. Without this,
-        // Android WebView blocks the request as mixed content (default on API 21+).
-        webView.settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-        // Incoming call ringtones are app audio, not microphone capture. Allow
-        // Web Audio playback after startup notification permission handling.
+        // Incoming call ringtones are app audio, not microphone capture.
         webView.settings.mediaPlaybackRequiresUserGesture = false
         webViewRef = webView
         installAppBackNavigation()
@@ -255,8 +251,12 @@ class MainActivity : TauriActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Tauri setup can start Rust and restore saved BLE interfaces inside
+        // super.onCreate(), so install the Application context first.
+        RatspeakNativeBridge.initialize(applicationContext)
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        RatspeakAndroidObservers.attach(this)
 
         // Check for notification navigation intent
         handleNavigateIntent(intent)
@@ -266,7 +266,7 @@ class MainActivity : TauriActivity() {
             android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
             android.content.res.Configuration.UI_MODE_NIGHT_YES
         val bgColor = if (isDarkMode) "#18171a" else "#FAF7F3"
-        window.decorView.setBackgroundColor(android.graphics.Color.parseColor(bgColor))
+        window.decorView.setBackgroundColor(bgColor.toColorInt())
 
         setTransparentSystemBars()
 
@@ -295,24 +295,8 @@ class MainActivity : TauriActivity() {
 
         // Start foreground service
         val serviceIntent = Intent(this, RatspeakService::class.java)
-        startForegroundService(serviceIntent)
+        ContextCompat.startForegroundService(this, serviceIntent)
 
-        // Android 13+ gates notifications behind a runtime permission. Without
-        // it, NotificationManager.notify() silently drops — including message
-        // notifications emitted by the Rust/Tauri notification backend. Request it at
-        // startup, once, so the prompt lands before the first inbound message.
-        // BLE permissions are requested on-demand via the JS bridge and use a
-        // different request code, so the two dialogs don't overlap.
-        requestNotificationPermissionIfNeeded()
-
-        registerNetworkCallback()
-    }
-
-    private fun requestNotificationPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
-        val perm = Manifest.permission.POST_NOTIFICATIONS
-        if (ContextCompat.checkSelfPermission(this, perm) == PackageManager.PERMISSION_GRANTED) return
-        ActivityCompat.requestPermissions(this, arrayOf(perm), NOTIFICATION_PERMISSION_REQUEST_CODE)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -320,9 +304,23 @@ class MainActivity : TauriActivity() {
         handleNavigateIntent(intent)
     }
 
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        // UI_HIDDEN (20) is a lifecycle edge, not memory pressure; treating
+        // it as pressure would cancel staging while the system picker opens.
+        RatspeakMobilePolicy.attachmentMemoryPressure(level)?.let {
+            RatspeakNativeBridge.publishMemoryPressure(it)
+        }
+    }
+
+    override fun onLowMemory() {
+        super.onLowMemory()
+        RatspeakNativeBridge.publishMemoryPressure(true)
+    }
+
     override fun onResume() {
         super.onResume()
-        postLifecycleState(true)
+        RatspeakPlatformSupervisor.replay()
         // ACTION_REFRESH clears per-sender notifications in RatspeakService
         // and kicks the poll loop so lastKnownUnread is current before the
         // user reads messages to zero.
@@ -331,8 +329,7 @@ class MainActivity : TauriActivity() {
 
     override fun onPause() {
         super.onPause()
-        // Signal background state to Rust backend (fallback for JS visibilitychange)
-        postLifecycleState(false)
+        stopNativeVoiceMemoAudioSession()
         refreshServicePoll()
     }
 
@@ -353,125 +350,32 @@ class MainActivity : TauriActivity() {
         // Both bars transparent; WebView CSS renders the safe areas.
         window.statusBarColor = android.graphics.Color.TRANSPARENT
         window.navigationBarColor = android.graphics.Color.TRANSPARENT
-        window.isNavigationBarContrastEnforced = false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+        }
+    }
+
+    private fun applySystemBarColorMode(mode: String) {
+        if (mode != "light" && mode != "dark") return
+        val isLight = mode == "light"
+        handler.post {
+            WindowCompat.getInsetsController(window, window.decorView).apply {
+                isAppearanceLightStatusBars = isLight
+                isAppearanceLightNavigationBars = isLight
+            }
+        }
     }
 
     override fun onDestroy() {
-        // The foreground service (RatspeakService) owns mesh lifetime, but the BLE
-        // GATT handle lives on this Activity. If the Activity is destroyed, close
-        // the GATT link cleanly so we don't leak a stale BluetoothGatt into the
-        // OS stack.
-        try { bleGatt?.disconnect() } catch (_: Exception) {}
-        bleGatt = null
-        usbPermissionReceiver?.let {
-            try { unregisterReceiver(it) } catch (_: Exception) {}
-        }
-        usbPermissionReceiver = null
-        networkCallback?.let {
-            try {
-                getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it)
-            } catch (_: Exception) {}
-        }
-        networkCallback = null
-        releaseCallProximityWakeLock(waitForNoProximity = false)
+        RatspeakAndroidObservers.detach(this)
+        // Ringtone and voice-memo sessions are UI-owned. Established-call
+        // routing and playback are process-owned and intentionally survive an
+        // Activity recreation.
+        stopNativeCallRingtone()
+        stopNativeVoiceMemoAudioSession()
+        RatspeakCallAudio.cancelInteractivePrime(this)
+        if (!RatspeakCallAudio.isActive()) RatspeakVoiceAudio.stop()
         super.onDestroy()
-    }
-
-    /**
-     * Register a default-network callback so the Rust core re-evaluates Auto
-     * transport mode whenever the OS reports a network change (wifi↔cellular
-     * handoff, gain/loss). We invoke `network_type_changed` via the Tauri
-     * IPC bridge — ConnectivityManager fires on the actual network transition
-     * rather than the WebView's lagging navigator.connection proxy.
-     *
-     * The iOS side mirrors this with NWPathMonitor in src-tauri/src/lib.rs.
-     */
-    private fun registerNetworkCallback() {
-        if (networkCallback != null) return
-        val cm = try {
-            getSystemService(ConnectivityManager::class.java)
-        } catch (_: Exception) { null } ?: return
-
-        val cb = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) {
-                emitIfChanged(cm.getNetworkCapabilities(network))
-            }
-
-            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
-                emitIfChanged(caps)
-            }
-
-            override fun onLost(network: Network) {
-                emitIfChanged(null)
-            }
-
-            private fun emitIfChanged(caps: NetworkCapabilities?) {
-                val type = classifyTransport(caps)
-                if (type == lastNetworkType) return
-                lastNetworkType = type
-                updateServiceMulticastLock(type == "wifi")
-                injectNetworkTypeChange(type)
-            }
-        }
-        try {
-            cm.registerDefaultNetworkCallback(cb)
-            networkCallback = cb
-        } catch (_: Exception) {}
-    }
-
-    private fun classifyTransport(caps: NetworkCapabilities?): String {
-        if (caps == null) return "none"
-        return when {
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
-            else -> "unknown"
-        }
-    }
-
-    private fun updateServiceMulticastLock(enable: Boolean) {
-        if (serviceMulticastEnabled == enable) return
-        serviceMulticastEnabled = enable
-        try {
-            val intent = Intent(this, RatspeakService::class.java).apply {
-                action = if (enable) {
-                    RatspeakService.ACTION_ENABLE_MULTICAST
-                } else {
-                    RatspeakService.ACTION_DISABLE_MULTICAST
-                }
-            }
-            startService(intent)
-        } catch (_: Exception) {}
-    }
-
-    /**
-     * Route the path-change through Tauri IPC so the Rust core's
-     * `network_type_changed` command can re-evaluate Auto transport mode.
-     * `typeof RS !== 'undefined'` guards the early-boot window before
-     * state.js has defined the IPC wrapper.
-     */
-    private fun injectNetworkTypeChange(networkType: String) {
-        webViewRef?.post {
-            webViewRef?.evaluateJavascript(
-                "if (typeof RS !== 'undefined' && RS.invoke) { " +
-                    "RS.invoke('network_type_changed', { args: { network_type: '$networkType' } }).catch(function(){}); }",
-                null
-            )
-        }
-    }
-
-    /** Route the foreground/background transition through Tauri IPC — the core's
-     *  `api_set_foreground` command handles everything else. WebView JS is the
-     *  one-line bridge from native Activity callbacks to the Tauri runtime.
-     */
-    private fun postLifecycleState(foreground: Boolean) {
-        webViewRef?.post {
-            webViewRef?.evaluateJavascript(
-                "if (typeof RS !== 'undefined' && RS.invoke) { " +
-                    "RS.invoke('api_set_foreground', { args: { foreground: $foreground } }).catch(function(){}); }",
-                null
-            )
-        }
     }
 
     private fun handleNavigateIntent(intent: Intent?) {
@@ -517,9 +421,8 @@ class MainActivity : TauriActivity() {
 
     /**
      * Poll the WebView's data-theme attribute and update system bar icon colors.
-     * Runs every 3s for 30s after page load to catch theme changes during init,
-     * then stops. User-initiated theme changes after that are cosmetic-only for
-     * the status bar until next app restart.
+     * Runs every 3s for 30s after page load as an initialization fallback.
+     * Later user changes arrive immediately through setColorMode().
      */
     private fun startThemePolling() {
         var pollCount = 0
@@ -533,15 +436,7 @@ class MainActivity : TauriActivity() {
                 ) { value ->
                     // evaluateJavascript returns JSON-quoted string e.g. "\"dark\""
                     val theme = value?.trim()?.removeSurrounding("\"") ?: ""
-                    if (theme == "light" || theme == "dark") {
-                        val isLight = theme == "light"
-                        handler.post {
-                            WindowCompat.getInsetsController(window, window.decorView).apply {
-                                isAppearanceLightStatusBars = isLight
-                                isAppearanceLightNavigationBars = isLight
-                            }
-                        }
-                    }
+                    applySystemBarColorMode(theme)
                 }
                 handler.postDelayed(this, 3000)
             }
@@ -630,7 +525,11 @@ class MainActivity : TauriActivity() {
     }
 
     private fun normalizedCallRingtoneMode(mode: String): String {
-        return if (mode.equals("incoming", ignoreCase = true)) "incoming" else "outgoing"
+        return when {
+            mode.equals("incoming", ignoreCase = true) -> "incoming"
+            mode.equals("timeout", ignoreCase = true) -> "timeout"
+            else -> "outgoing"
+        }
     }
 
     private fun startNativeCallRingtone(mode: String): Boolean {
@@ -663,7 +562,7 @@ class MainActivity : TauriActivity() {
         }
         callRingtoneTrack = null
         abandonCallRingtoneAudioFocus()
-        if (!callAudioRouteActive) {
+        if (!RatspeakCallAudio.isActive()) {
             volumeControlStream = AudioManager.USE_DEFAULT_STREAM_TYPE
             restoreCallAudioRoute()
         }
@@ -709,43 +608,55 @@ class MainActivity : TauriActivity() {
         }
     }
 
-    private fun requestCallAudioFocus() {
-        val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
-        val attributes = AudioAttributes.Builder()
-            .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-            .build()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val existing = callAudioFocusRequest as? AudioFocusRequest
-            if (existing != null) return
-            val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
-                .setAudioAttributes(attributes)
-                .setOnAudioFocusChangeListener(callAudioFocusListener, handler)
+    private fun startNativeVoiceMemoAudioSession(): Boolean {
+        if (RatspeakCallAudio.isActive() || callRingtoneMode != null) return false
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return false
+        val result = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val attributes = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                 .build()
-            callAudioFocusRequest = request
-            audioManager.requestAudioFocus(request)
+            val existing = voiceMemoAudioFocusRequest as? AudioFocusRequest
+            if (existing != null) return true
+            val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
+                .setAudioAttributes(attributes)
+                .setOnAudioFocusChangeListener(voiceMemoAudioFocusListener, handler)
+                .build()
+            val focusResult = audioManager.requestAudioFocus(request)
+            if (focusResult == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+                voiceMemoAudioFocusRequest = request
+            }
+            focusResult
         } else {
             @Suppress("DEPRECATION")
             audioManager.requestAudioFocus(
-                callAudioFocusListener,
-                AudioManager.STREAM_VOICE_CALL,
-                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
+                voiceMemoAudioFocusListener,
+                AudioManager.STREAM_MUSIC,
+                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE
             )
         }
+        return result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
     }
 
-    private fun abandonCallAudioFocus() {
+    private fun stopNativeVoiceMemoAudioSession() {
         val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val request = callAudioFocusRequest as? AudioFocusRequest
+            val request = voiceMemoAudioFocusRequest as? AudioFocusRequest
             if (request != null) {
                 audioManager.abandonAudioFocusRequest(request)
-                callAudioFocusRequest = null
+                voiceMemoAudioFocusRequest = null
                 return
             }
         }
         @Suppress("DEPRECATION")
-        audioManager.abandonAudioFocus(callAudioFocusListener)
+        audioManager.abandonAudioFocus(voiceMemoAudioFocusListener)
+    }
+
+    private fun dispatchVoiceMemoAudioInterruption() {
+        webViewRef?.evaluateJavascript(
+            "window.RS && window.RS.voiceMemos && window.RS.voiceMemos.handleAudioInterruption && window.RS.voiceMemos.handleAudioInterruption();",
+            null
+        )
     }
 
     private fun callRingtoneAudioAttributes(mode: String): AudioAttributes {
@@ -763,33 +674,37 @@ class MainActivity : TauriActivity() {
     private fun configureCallRingtoneRoute(mode: String) {
         val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
         if (mode == "incoming") {
-            if (!callAudioRouteActive) {
+            if (!RatspeakCallAudio.isActive()) {
                 restoreCallAudioRoute()
                 audioManager.mode = AudioManager.MODE_RINGTONE
             }
             return
         }
-        configureCommunicationRoute(preferEarpiece = true)
+        if (!RatspeakCallAudio.isActive()) {
+            configureCommunicationRoute(preferEarpiece = true)
+        }
     }
 
-    private fun startNativeCallAudioRoute(role: String) {
-        val routeName = if (role.equals("speaker", ignoreCase = true)) "speaker" else "earpiece"
-        callAudioRouteActive = true
-        callAudioRouteName = routeName
+    private fun primeNativeCallAudioRoute(role: String) {
+        stopNativeVoiceMemoAudioSession()
         volumeControlStream = AudioManager.STREAM_VOICE_CALL
-        requestCallAudioFocus()
-        val preferEarpiece = routeName != "speaker"
-        configureCommunicationRoute(preferEarpiece)
-        syncCallProximityWakeLock(preferEarpiece)
+        if (!RatspeakCallAudio.primeInteractive(applicationContext, role)) {
+            volumeControlStream = AudioManager.USE_DEFAULT_STREAM_TYPE
+            Log.d("Ratspeak", "LXST pending call audio route could not start")
+        }
     }
 
-    private fun stopNativeCallAudioRoute() {
-        callAudioRouteActive = false
-        callAudioRouteName = null
-        releaseCallProximityWakeLock()
-        restoreCallAudioRoute()
+    private fun updateNativeCallAudioRoute(role: String, sessionToken: String) {
+        volumeControlStream = AudioManager.STREAM_VOICE_CALL
+        if (!RatspeakCallAudio.updateRouteForSession(applicationContext, sessionToken, role)) {
+            volumeControlStream = AudioManager.USE_DEFAULT_STREAM_TYPE
+            Log.d("Ratspeak", "Rejected stale LXST call audio route update")
+        }
+    }
+
+    private fun stopNativeCallAudioRoute(waitForNoProximity: Boolean = true) {
+        RatspeakCallAudio.stop(applicationContext, waitForNoProximity)
         volumeControlStream = AudioManager.USE_DEFAULT_STREAM_TYPE
-        abandonCallAudioFocus()
     }
 
     private fun configureCommunicationRoute(preferEarpiece: Boolean) {
@@ -823,7 +738,6 @@ class MainActivity : TauriActivity() {
     }
 
     private fun restoreCallAudioRoute() {
-        releaseCallProximityWakeLock()
         val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
         @Suppress("DEPRECATION")
         audioManager.isSpeakerphoneOn = false
@@ -872,128 +786,84 @@ class MainActivity : TauriActivity() {
             ?: devices.firstOrNull { it.isSink && it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
     }
 
-    private fun syncCallProximityWakeLock(preferEarpiece: Boolean) {
-        if (preferEarpiece) {
-            acquireCallProximityWakeLock()
-        } else {
-            releaseCallProximityWakeLock()
-        }
-    }
-
-    private fun acquireCallProximityWakeLock() {
-        val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
-        if (!powerManager.isWakeLockLevelSupported(PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK)) return
-        val lock = callProximityWakeLock ?: try {
-            powerManager
-                .newWakeLock(
-                    PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK,
-                    "Ratspeak:LXSTProximity"
-                )
-                .apply { setReferenceCounted(false) }
-                .also { callProximityWakeLock = it }
-        } catch (_: Throwable) {
-            null
-        } ?: return
-        if (!lock.isHeld) {
-            try { lock.acquire() } catch (_: Throwable) {}
-        }
-    }
-
-    private fun releaseCallProximityWakeLock(waitForNoProximity: Boolean = true) {
-        val lock = callProximityWakeLock ?: return
-        try {
-            if (lock.isHeld) {
-                if (waitForNoProximity) {
-                    lock.release(PowerManager.RELEASE_FLAG_WAIT_FOR_NO_PROXIMITY)
-                } else {
-                    lock.release()
-                }
-            }
-        } catch (_: Throwable) {}
-        callProximityWakeLock = null
-    }
-
-    private fun callRingtoneSequenceMs(): Long {
-        return CALL_RINGTONE_LOOP_MS
+    private fun callRingtoneSequenceMs(mode: String): Long {
+        return if (mode == "timeout") CALL_TIMEOUT_CUE_MS else CALL_RINGTONE_LOOP_MS
     }
 
     private fun callRingtoneNoteCount(mode: String): Int {
-        return if (mode == "incoming") {
-            CALL_RINGTONE_INCOMING_FREQ_HZ.size
-        } else {
-            CALL_RINGTONE_OUTGOING_FREQ_HZ.size
+        return when (mode) {
+            "incoming" -> CALL_RINGTONE_INCOMING_FREQ_HZ.size
+            "timeout" -> CALL_TIMEOUT_CUE_FREQ_HZ.size
+            else -> CALL_RINGTONE_OUTGOING_FREQ_HZ.size
         }
     }
 
     private fun callRingtoneNoteStartMs(mode: String, noteIndex: Int): Long {
-        return if (mode == "incoming") {
-            CALL_RINGTONE_INCOMING_START_MS[noteIndex]
-        } else {
-            CALL_RINGTONE_OUTGOING_START_MS[noteIndex]
+        return when (mode) {
+            "incoming" -> CALL_RINGTONE_INCOMING_START_MS[noteIndex]
+            "timeout" -> CALL_TIMEOUT_CUE_START_MS[noteIndex]
+            else -> CALL_RINGTONE_OUTGOING_START_MS[noteIndex]
         }
     }
 
     private fun callRingtoneNoteFrequency(mode: String, noteIndex: Int): Double {
-        return if (mode == "incoming") {
-            CALL_RINGTONE_INCOMING_FREQ_HZ[noteIndex]
-        } else {
-            CALL_RINGTONE_OUTGOING_FREQ_HZ[noteIndex]
+        return when (mode) {
+            "incoming" -> CALL_RINGTONE_INCOMING_FREQ_HZ[noteIndex]
+            "timeout" -> CALL_TIMEOUT_CUE_FREQ_HZ[noteIndex]
+            else -> CALL_RINGTONE_OUTGOING_FREQ_HZ[noteIndex]
         }
     }
 
     private fun callRingtoneNoteDurationMs(mode: String, noteIndex: Int): Long {
-        return if (mode == "incoming") {
-            CALL_RINGTONE_INCOMING_DURATION_MS[noteIndex]
-        } else {
-            CALL_RINGTONE_OUTGOING_DURATION_MS[noteIndex]
+        return when (mode) {
+            "incoming" -> CALL_RINGTONE_INCOMING_DURATION_MS[noteIndex]
+            "timeout" -> CALL_TIMEOUT_CUE_DURATION_MS[noteIndex]
+            else -> CALL_RINGTONE_OUTGOING_DURATION_MS[noteIndex]
         }
     }
 
     private fun callRingtoneNoteGain(mode: String, noteIndex: Int): Double {
-        return if (mode == "incoming") {
-            CALL_RINGTONE_INCOMING_NOTE_GAIN[noteIndex]
-        } else {
-            CALL_RINGTONE_OUTGOING_NOTE_GAIN[noteIndex]
+        return when (mode) {
+            "incoming" -> CALL_RINGTONE_INCOMING_NOTE_GAIN[noteIndex]
+            "timeout" -> CALL_TIMEOUT_CUE_NOTE_GAIN[noteIndex]
+            else -> CALL_RINGTONE_OUTGOING_NOTE_GAIN[noteIndex]
         }
     }
 
     private fun callRingtonePartials(mode: String): DoubleArray {
-        return if (mode == "incoming") {
-            CALL_RINGTONE_INCOMING_PARTIALS
-        } else {
-            CALL_RINGTONE_OUTGOING_PARTIALS
-        }
+        return if (mode == "incoming") CALL_RINGTONE_INCOMING_PARTIALS
+        else CALL_RINGTONE_OUTGOING_PARTIALS
     }
 
     private fun callRingtoneVolume(mode: String): Double {
-        return if (mode == "incoming") {
-            CALL_RINGTONE_INCOMING_VOLUME
-        } else {
-            CALL_RINGTONE_OUTGOING_VOLUME
+        return when (mode) {
+            "incoming" -> CALL_RINGTONE_INCOMING_VOLUME
+            "timeout" -> CALL_TIMEOUT_CUE_VOLUME
+            else -> CALL_RINGTONE_OUTGOING_VOLUME
         }
     }
 
     private fun callRingtoneGlideCents(mode: String): Double {
-        return if (mode == "incoming") {
-            CALL_RINGTONE_INCOMING_GLIDE_CENTS
-        } else {
-            CALL_RINGTONE_OUTGOING_GLIDE_CENTS
+        return when (mode) {
+            "incoming" -> CALL_RINGTONE_INCOMING_GLIDE_CENTS
+            "timeout" -> CALL_TIMEOUT_CUE_GLIDE_CENTS
+            else -> CALL_RINGTONE_OUTGOING_GLIDE_CENTS
         }
     }
 
     private fun callRingtoneAttackMs(mode: String): Long {
-        return if (mode == "incoming") {
-            CALL_RINGTONE_INCOMING_ATTACK_MS
-        } else {
-            CALL_RINGTONE_OUTGOING_ATTACK_MS
+        return when (mode) {
+            "incoming" -> CALL_RINGTONE_INCOMING_ATTACK_MS
+            "timeout" -> CALL_TIMEOUT_CUE_ATTACK_MS
+            else -> CALL_RINGTONE_OUTGOING_ATTACK_MS
         }
     }
 
     private fun callRingtoneReleaseMs(mode: String): Long {
-        return if (mode == "incoming") {
-            CALL_RINGTONE_INCOMING_RELEASE_MS
-        } else {
-            CALL_RINGTONE_OUTGOING_RELEASE_MS
+        return when (mode) {
+            "incoming" -> CALL_RINGTONE_INCOMING_RELEASE_MS
+            "timeout" -> CALL_TIMEOUT_CUE_RELEASE_MS
+            else -> CALL_RINGTONE_OUTGOING_RELEASE_MS
         }
     }
 
@@ -1023,9 +893,18 @@ class MainActivity : TauriActivity() {
                 try { track.release() } catch (_: Throwable) {}
                 return false
             }
-            track.setLoopPoints(0, frameCount, -1)
+            if (mode != "timeout") {
+                track.setLoopPoints(0, frameCount, -1)
+            }
             callRingtoneTrack = track
             track.play()
+            if (mode == "timeout") {
+                handler.postDelayed({
+                    if (callRingtoneGeneration == generation && callRingtoneMode == "timeout") {
+                        stopNativeCallRingtone()
+                    }
+                }, CALL_TIMEOUT_CUE_MS + 80L)
+            }
             return track.playState == AudioTrack.PLAYSTATE_PLAYING
         } catch (_: Throwable) {
             if (callRingtoneTrack === track) callRingtoneTrack = null
@@ -1037,7 +916,7 @@ class MainActivity : TauriActivity() {
     private fun buildNativeCallRingtonePcm(mode: String): ByteArray {
         val volume = callRingtoneVolume(mode)
         val partials = callRingtonePartials(mode)
-        val totalSamples = ((CALL_RINGTONE_SAMPLE_RATE * callRingtoneSequenceMs()) / 1000L)
+        val totalSamples = ((CALL_RINGTONE_SAMPLE_RATE * callRingtoneSequenceMs(mode)) / 1000L)
             .toInt()
             .coerceAtLeast(1)
         val samples = DoubleArray(totalSamples)
@@ -1150,11 +1029,6 @@ class MainActivity : TauriActivity() {
                     null
                 )
             }
-        } else if (requestCode == NOTIFICATION_PERMISSION_REQUEST_CODE) {
-            // No action required — RatspeakService polls notifyManager directly
-            // and will silently fail until the user re-grants via system
-            // settings. Future work: expose a settings toggle and re-prompt
-            // through shouldShowRequestPermissionRationale().
         } else if (requestCode == MEDIA_PERMISSION_REQUEST_CODE) {
             val requestId = pendingMediaRequestId ?: ""
             val audio = pendingMediaRequestAudio
@@ -1166,6 +1040,13 @@ class MainActivity : TauriActivity() {
                 it == PackageManager.PERMISSION_GRANTED
             }
             dispatchMediaPermissionResult(requestId, audio, camera, granted, null)
+        } else if (requestCode == 1002) {
+            handler.post {
+                webViewRef?.evaluateJavascript(
+                    "document.dispatchEvent(new CustomEvent('rs-notification-permission-changed'));",
+                    null,
+                )
+            }
         }
     }
 
@@ -1248,13 +1129,12 @@ class MainActivity : TauriActivity() {
                 if (name.isEmpty()) continue // Skip unnamed devices
 
                 val serviceUuids = result.scanRecord?.serviceUuids ?: emptyList()
-                // Require NUS service UUID *and* "RNode" name prefix so generic
-                // Nordic-UART devices (Bangle.js, Adafruit demos, hobby boards)
-                // don't pollute the picker. Name fallback still covers scan-response
-                // quirks where service UUIDs are missing from the initial advert.
+                // NUS is sufficient protocol evidence, including custom-named
+                // RNode firmware. Retain the name only as an advertisement
+                // fallback when the service list is absent.
                 val hasNus = serviceUuids.contains(NUS_SERVICE_UUID)
                 val nameMatch = name.startsWith("RNode")
-                val isRnode = (hasNus && nameMatch) || (serviceUuids.isEmpty() && nameMatch)
+                val isRnode = hasNus || (serviceUuids.isEmpty() && nameMatch)
                 if (!isRnode) continue
 
                 val device = JSONObject().apply {
@@ -1397,7 +1277,7 @@ class MainActivity : TauriActivity() {
         val safeName = sanitizeDownloadFileName(fileName, mimeType)
         handler.post {
             try {
-                pendingGenericFileSave = PendingFileSave(requestId, safeName, bytes, mimeType)
+                pendingGenericFileSave = PendingFileSave(requestId, safeName, bytes, null, mimeType)
                 val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
                     addCategory(Intent.CATEGORY_OPENABLE)
                     type = mimeType.takeIf { it.isNotBlank() } ?: "application/octet-stream"
@@ -1434,7 +1314,15 @@ class MainActivity : TauriActivity() {
             try {
                 val stream = contentResolver.openOutputStream(uri)
                     ?: throw IllegalStateException("Could not open selected destination")
-                stream.use { it.write(pending.bytes) }
+                stream.use { output ->
+                    val bytes = pending.bytes
+                    if (bytes != null) {
+                        output.write(bytes)
+                    } else {
+                        FileInputStream(pending.privateFile ?: error("Private file is unavailable"))
+                            .use { input -> input.copyTo(output, 64 * 1024) }
+                    }
+                }
                 dispatchFileSaveResult(pending.requestId, true, uri.toString(), null)
             } catch (e: Throwable) {
                 dispatchFileSaveResult(
@@ -1494,6 +1382,92 @@ class MainActivity : TauriActivity() {
                 )
             }
         }, "ratspeak-photo-save").start()
+    }
+
+    internal fun onSaveStoredFile(
+        privatePath: String,
+        fileName: String,
+        mimeType: String,
+        preferPhotos: Boolean,
+        requestId: String,
+    ): Boolean {
+        if (!Regex("^[A-Za-z0-9._-]{1,128}$").matches(requestId)) return false
+        if (mimeType.length > 200 || mimeType.any { it < ' ' }) return false
+        val source = try { File(privatePath).canonicalFile } catch (_: Throwable) { return false }
+        val privateRoot = try { filesDir.canonicalFile } catch (_: Throwable) { return false }
+        val privatePrefix = privateRoot.path + File.separator
+        if (!source.isFile || !source.path.startsWith(privatePrefix)) return false
+        val safeName = sanitizeDownloadFileName(fileName, mimeType)
+        if (preferPhotos && mimeType.startsWith("image/", ignoreCase = true)) {
+            saveStoredImageToMediaStore(requestId, safeName, source, mimeType)
+        } else {
+            launchGenericStoredFileSave(requestId, safeName, source, mimeType)
+        }
+        return true
+    }
+
+    private fun launchGenericStoredFileSave(
+        requestId: String,
+        fileName: String,
+        source: File,
+        mimeType: String,
+    ) {
+        handler.post {
+            try {
+                pendingGenericFileSave = PendingFileSave(requestId, fileName, null, source, mimeType)
+                val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = mimeType.takeIf { it.isNotBlank() } ?: "application/octet-stream"
+                    putExtra(Intent.EXTRA_TITLE, fileName)
+                }
+                genericFileDocumentLauncher.launch(intent)
+            } catch (_: ActivityNotFoundException) {
+                pendingGenericFileSave = null
+                dispatchFileSaveResult(requestId, false, null, "No file picker available on this device")
+            } catch (_: Throwable) {
+                pendingGenericFileSave = null
+                dispatchFileSaveResult(requestId, false, null, "Unable to open save picker")
+            }
+        }
+    }
+
+    private fun saveStoredImageToMediaStore(
+        requestId: String,
+        fileName: String,
+        source: File,
+        mimeType: String,
+    ) {
+        Thread({
+            var uri: Uri? = null
+            try {
+                val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                } else {
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                }
+                val values = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+                    put(MediaStore.Images.Media.MIME_TYPE, mimeType)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Ratspeak")
+                        put(MediaStore.Images.Media.IS_PENDING, 1)
+                    }
+                }
+                uri = contentResolver.insert(collection, values)
+                    ?: throw IllegalStateException("Could not create image in Photos")
+                contentResolver.openOutputStream(uri)?.use { output ->
+                    FileInputStream(source).use { input -> input.copyTo(output, 64 * 1024) }
+                } ?: throw IllegalStateException("Could not open image destination")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val done = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
+                    contentResolver.update(uri, done, null, null)
+                }
+                dispatchFileSaveResult(requestId, true, uri.toString(), null)
+            } catch (_: Throwable) {
+                if (uri != null) try { contentResolver.delete(uri, null, null) } catch (_: Throwable) {}
+                dispatchFileSaveResult(requestId, false, null, "Failed to save image")
+            }
+        }, "ratspeak-photo-stream-save").start()
     }
 
     private fun dispatchFileSaveResult(
@@ -1618,6 +1592,11 @@ class MainActivity : TauriActivity() {
      */
     inner class BlePermissionBridge {
         @JavascriptInterface
+        fun setColorMode(mode: String) {
+            applySystemBarColorMode(mode)
+        }
+
+        @JavascriptInterface
         fun exportIdentityBackup(fileName: String, backupBase64: String) {
             val safeName = sanitizeIdentityBackupFileName(fileName)
             val bytes = try {
@@ -1691,7 +1670,7 @@ class MainActivity : TauriActivity() {
 
         @JavascriptInterface
         fun openExternalUrl(url: String): Boolean {
-            val parsed = try { Uri.parse(url.trim()) } catch (_: Throwable) { return false }
+            val parsed = try { url.trim().toUri() } catch (_: Throwable) { return false }
             val scheme = parsed.scheme?.lowercase() ?: return false
             if (scheme != "http" && scheme != "https") return false
             val intent = Intent(Intent.ACTION_VIEW, parsed).apply {
@@ -1700,6 +1679,30 @@ class MainActivity : TauriActivity() {
             return try {
                 startActivity(intent)
                 true
+            } catch (_: Throwable) {
+                false
+            }
+        }
+
+        @JavascriptInterface
+        fun openSupportEmail(subject: String, body: String): Boolean {
+            val cleanSubject = subject.trim()
+            if (cleanSubject.isEmpty() || cleanSubject.length > 180 || body.length > 8_000) {
+                return false
+            }
+            if (cleanSubject.any { it == '\r' || it == '\n' || it == '\u0000' } || body.contains('\u0000')) {
+                return false
+            }
+            val uri = "mailto:mail@ratspeak.org".toUri().buildUpon()
+                .appendQueryParameter("subject", cleanSubject)
+                .appendQueryParameter("body", body)
+                .build()
+            val intent = Intent(Intent.ACTION_SENDTO, uri)
+            return try {
+                startActivity(intent)
+                true
+            } catch (_: ActivityNotFoundException) {
+                false
             } catch (_: Throwable) {
                 false
             }
@@ -1772,6 +1775,51 @@ class MainActivity : TauriActivity() {
         }
 
         @JavascriptInterface
+        fun notificationAuthorizationStatus(): String {
+            val status = RatspeakNativeBridge.notificationAuthorizationStatus()
+            if (status != "denied" || Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                return status
+            }
+            val asked = getSharedPreferences("ratspeak_mobile_permissions", Context.MODE_PRIVATE)
+                .getBoolean("notifications_requested", false)
+            return if (asked) "denied" else "prompt"
+        }
+
+        @JavascriptInterface
+        fun openNotificationSettings(): Boolean {
+            return RatspeakNativeBridge.openNotificationSettings()
+        }
+
+        @JavascriptInterface
+        fun requestNotificationPermission() {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                ContextCompat.checkSelfPermission(
+                    this@MainActivity,
+                    Manifest.permission.POST_NOTIFICATIONS,
+                ) == PackageManager.PERMISSION_GRANTED
+            ) return
+            handler.post {
+                getSharedPreferences("ratspeak_mobile_permissions", Context.MODE_PRIVATE)
+                    .edit { putBoolean("notifications_requested", true) }
+                ActivityCompat.requestPermissions(
+                    this@MainActivity,
+                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                    1002,
+                )
+            }
+        }
+
+        @JavascriptInterface
+        fun batteryOptimizationStatus(): String {
+            return RatspeakNativeBridge.batteryOptimizationStatus()
+        }
+
+        @JavascriptInterface
+        fun requestBatteryOptimizationExemption(): Boolean {
+            return RatspeakNativeBridge.requestBatteryOptimizationExemption()
+        }
+
+        @JavascriptInterface
         fun requestMediaPermissions(audio: Boolean, camera: Boolean, requestId: String) {
             val permissions = getMediaPermissions(audio, camera)
             if (permissions.isEmpty() || this@MainActivity.hasMediaPermissions(audio, camera)) {
@@ -1810,9 +1858,23 @@ class MainActivity : TauriActivity() {
         }
 
         @JavascriptInterface
-        fun startCallAudioRoute(role: String) {
+        fun playCallTimeoutCue(): Boolean {
+            return this@MainActivity.runOnMainForBoolean {
+                this@MainActivity.startNativeCallRingtone("timeout")
+            }
+        }
+
+        @JavascriptInterface
+        fun primeCallAudioRoute(role: String) {
             handler.post {
-                this@MainActivity.startNativeCallAudioRoute(role)
+                this@MainActivity.primeNativeCallAudioRoute(role)
+            }
+        }
+
+        @JavascriptInterface
+        fun startCallAudioRoute(role: String, sessionToken: String) {
+            handler.post {
+                this@MainActivity.updateNativeCallAudioRoute(role, sessionToken)
             }
         }
 
@@ -1820,6 +1882,20 @@ class MainActivity : TauriActivity() {
         fun stopCallAudioRoute() {
             handler.post {
                 this@MainActivity.stopNativeCallAudioRoute()
+            }
+        }
+
+        @JavascriptInterface
+        fun startVoiceMemoAudioSession(): Boolean {
+            return this@MainActivity.runOnMainForBoolean {
+                this@MainActivity.startNativeVoiceMemoAudioSession()
+            }
+        }
+
+        @JavascriptInterface
+        fun stopVoiceMemoAudioSession() {
+            handler.post {
+                this@MainActivity.stopNativeVoiceMemoAudioSession()
             }
         }
 
@@ -1838,84 +1914,11 @@ class MainActivity : TauriActivity() {
             }
         }
 
-        /**
-         * Connect to a BLE device and start the TCP bridge.
-         * Result delivered via window._onBleConnectResult(json).
-         * On success, json.port contains the local TCP port for Rust to connect to.
-         */
-        @JavascriptInterface
-        fun connectBleDevice(address: String, localPort: Int) {
-            if (!BLE_MAC_RE.matches(address)) {
-                // Bail before touching BluetoothAdapter.getRemoteDevice, which
-                // would throw IllegalArgumentException buried in Logcat. A
-                // structured early error makes the frontend able to show a
-                // meaningful toast.
-                val errJson = JSONObject()
-                    .put("success", false)
-                    .put("port", localPort)
-                    .put("error", "Invalid BLE address format (expected XX:XX:XX:XX:XX:XX)")
-                handler.post {
-                    webViewRef?.evaluateJavascript(
-                        "if(typeof window._onBleConnectResult==='function')window._onBleConnectResult($errJson);",
-                        null
-                    )
-                }
-                return
-            }
-            Thread({
-                // Disconnect any existing connection
-                bleGatt?.disconnect()
-                val gatt = RatspeakBleGatt(this@MainActivity)
-                bleGatt = gatt
-                // Let the bridge push phase updates to JS during the multi-step connect.
-                gatt.attachWebView(webViewRef)
-
-                val error = gatt.connect(address, localPort)
-                if (error != null) {
-                    gatt.disconnect()
-                    if (bleGatt === gatt) bleGatt = null
-                }
-                val result = JSONObject().apply {
-                    put("success", error == null)
-                    put("port", localPort)
-                    if (error != null) put("error", error)
-                }
-                handler.post {
-                    webViewRef?.evaluateJavascript(
-                        "if(typeof window._onBleConnectResult==='function')window._onBleConnectResult($result);",
-                        null
-                    )
-                }
-
-                // If connection succeeded, start forwarding (blocks until disconnected)
-                if (error == null) {
-                    gatt.startForwarding()
-                }
-            }, "ble-gatt-connect").start()
-        }
-
-        /**
-         * Disconnect the active BLE GATT connection and tear down the TCP bridge.
-         */
-        @JavascriptInterface
-        fun disconnectBleDevice() {
-            Thread({
-                bleGatt?.disconnect()
-                bleGatt = null
-            }, "ble-gatt-disconnect").start()
-        }
-
-        private fun bytesToHex(b: ByteArray): String {
-            val sb = StringBuilder(b.size * 2)
-            for (byte in b) sb.append("%02x".format(byte.toInt() and 0xFF))
-            return sb.toString()
-        }
-
         // ---- USB-OTG permission bridge ----
         //
-        // USB permissions on Android are per-app + per-device and must be
-        // requested via PendingIntent+BroadcastReceiver on the Activity.
-        // Rust-side JNI cannot do this itself. The flow is:
+        // USB permissions are requested only from this visible user action;
+        // the process Service owns the non-exported result receiver and OS
+        // attach/detach observation. The flow is:
         //   1. JS calls hasUsbPermission(deviceName) — synchronous probe.
         //   2. If false, JS calls requestUsbPermission(deviceName).
         //   3. The system shows a permission dialog.
@@ -1932,52 +1935,7 @@ class MainActivity : TauriActivity() {
 
         @JavascriptInterface
         fun requestUsbPermission(deviceName: String) {
-            handler.post {
-                val um = getSystemService(Context.USB_SERVICE) as? UsbManager
-                if (um == null) {
-                    dispatchUsbResult(deviceName, false, "USB service unavailable")
-                    return@post
-                }
-                val device = um.deviceList[deviceName]
-                if (device == null) {
-                    dispatchUsbResult(deviceName, false, "Device not found: $deviceName")
-                    return@post
-                }
-                if (um.hasPermission(device)) {
-                    dispatchUsbResult(deviceName, true, null)
-                    return@post
-                }
-
-                // Register a one-shot receiver if we don't already have one.
-                if (usbPermissionReceiver == null) {
-                    val receiver = object : BroadcastReceiver() {
-                        override fun onReceive(ctx: Context, intent: Intent) {
-                            if (intent.action != USB_PERMISSION_ACTION) return
-                            val d: UsbDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
-                            } else {
-                                @Suppress("DEPRECATION")
-                                intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
-                            }
-                            val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
-                            val name = d?.deviceName ?: ""
-                            dispatchUsbResult(name, granted, null)
-                        }
-                    }
-                    val filter = IntentFilter(USB_PERMISSION_ACTION)
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
-                    } else {
-                        registerReceiver(receiver, filter)
-                    }
-                    usbPermissionReceiver = receiver
-                }
-
-                val pendingFlags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                val permIntent = Intent(USB_PERMISSION_ACTION).setPackage(packageName)
-                val pending = PendingIntent.getBroadcast(this@MainActivity, 0, permIntent, pendingFlags)
-                um.requestPermission(device, pending)
-            }
+            handler.post { RatspeakPlatformSupervisor.requestUsbPermission(deviceName) }
         }
 
         @JavascriptInterface
@@ -2014,6 +1972,35 @@ class MainActivity : TauriActivity() {
             webViewRef?.evaluateJavascript(
                 "if(typeof window._onUsbPermissionResult==='function')window._onUsbPermissionResult($json);",
                 null
+            )
+        }
+    }
+
+    internal fun onNativeBleProgress(token: String, generation: Long, phase: String) {
+        if (!BLE_OPERATION_RE.matches(token) || generation < 0) return
+        val payload = JSONObject()
+            .put("activity_operation", token)
+            .put("native_generation", generation.toString())
+            .put("phase", phase)
+        handler.post {
+            webViewRef?.evaluateJavascript(
+                "if(typeof window._onBleConnectProgress==='function')window._onBleConnectProgress($payload);",
+                null,
+            )
+        }
+    }
+
+    internal fun onNativeUsbPermission(deviceName: String, granted: Boolean, error: String?) {
+        dispatchUsbResult(deviceName, granted, error)
+    }
+
+    internal fun onNativeUsbSelectorPermission(granted: Boolean, errorCode: String?) {
+        val payload = JSONObject().put("granted", granted)
+        if (errorCode != null) payload.put("error_code", errorCode)
+        handler.post {
+            webViewRef?.evaluateJavascript(
+                "if(typeof window._onUsbSelectorPermissionResult==='function')window._onUsbSelectorPermissionResult($payload);",
+                null,
             )
         }
     }

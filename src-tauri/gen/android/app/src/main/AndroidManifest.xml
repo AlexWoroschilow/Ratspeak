@@ -1,11 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.CAMERA" />
@@ -15,7 +17,10 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
 
     <!-- BLE permissions (API 31+ / Android 12+) -->
-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="s" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     <!-- BLE permissions (legacy, API 30 and below) -->
@@ -26,9 +31,14 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
     <!-- Declare BLE hardware feature (not required, graceful degradation) -->
+    <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
+    <uses-feature android:name="android.hardware.location.gps" android:required="false" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <uses-feature android:name="android.hardware.wifi" android:required="false" />
 
     <!-- USB-OTG host mode (required to talk to RNode over USB-C) — not
          required at install time so phones without OTG still install. -->
@@ -38,17 +48,28 @@
     <uses-feature android:name="android.software.leanback" android:required="false" />
 
     <application
+        android:banner="@mipmap/ic_launcher"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:theme="@style/Theme.ratspeak"
         android:usesCleartextTraffic="${usesCleartextTraffic}">
         <activity
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
+            android:screenOrientation="portrait"
             android:windowSoftInputMode="adjustResize"
             android:launchMode="singleTask"
             android:label="@string/main_activity_title"
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            tools:ignore="DiscouragedApi,LockedOrientationActivity">
+            <!-- Ratspeak's mobile information architecture is portrait-only for
+                 now. Android 16 otherwise ignores orientation requests on
+                 sw600dp displays, so retain compatibility mode until the
+                 landscape/large-screen experience is intentionally designed. -->
+            <property
+                android:name="android.window.PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY"
+                android:value="true" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -66,23 +87,24 @@
             <meta-data
                 android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
                 android:resource="@xml/usb_device_filter" />
+            <!-- Keep mobile scheme registration static. Build-time plugin
+                 rewriting can mutate platform files during native build/sign
+                 phases, so mobile configs intentionally omit deep-link setup. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <!-- ChromeOS ARC++ uses a different action for deep links -->
+                <action android:name="org.chromium.arc.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="ratspeak" />
+                <data android:host="channel" />
+            </intent-filter>
         </activity>
 
         <service
             android:name=".RatspeakService"
-            android:foregroundServiceType="specialUse"
-            android:exported="false">
-            <!-- Android 14+ requires every specialUse FGS to declare its
-                 subtype. Without this <property>, startForeground() throws
-                 InvalidForegroundServiceTypeException and the service dies,
-                 killing the unread-count poll that drives message
-                 notifications. Value string is shown to Play-store review
-                 when we submit; 'ratspeak_mesh_relay' matches the app's
-                 actual purpose (off-grid mesh messaging relay). -->
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="ratspeak_mesh_relay" />
-        </service>
+            android:foregroundServiceType="connectedDevice|microphone"
+            android:exported="false" />
 
         <provider
           android:name="androidx.core.content.FileProvider"

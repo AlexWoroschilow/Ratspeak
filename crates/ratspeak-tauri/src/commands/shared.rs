@@ -10,7 +10,6 @@ use serde_json::{Value, json};
 
 use crate::db;
 use crate::helpers::{active_identity_id, validate_hex};
-use crate::lxmf::resolve_destination;
 use crate::state::AppState;
 
 use ratspeak_core::LXMF_DELIVERY_APP_NAME as LXMF_APP_NAME;
@@ -53,30 +52,127 @@ pub(crate) fn with_rns_config_lock<T>(state: &AppState, f: impl FnOnce() -> T) -
     f()
 }
 
-// Interface names whose most recent `add_lora_interface` created a brand-new
-// config entry. Connect-failure rollback (`cancel_ble_connect`) may only
-// delete these; reconnects of pre-existing radios must survive a failed or
-// cancelled connect.
-static FRESH_LORA_ADDS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+// Config-scoped interface names whose most recent `add_lora_interface`
+// created a brand-new entry. Rollback may only delete these; identity
+// switches and reconnects of pre-existing radios must never cross-consume a
+// marker. Markers are deliberately short-lived and bounded because a
+// successful connection has no rollback consumer.
+const FRESH_LORA_ADD_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+const MAX_FRESH_LORA_ADDS: usize = 256;
+pub(crate) type FreshLoraAddMarker = u64;
+type FreshLoraAddKey = (PathBuf, String);
 
-pub(crate) fn mark_lora_add_freshness(name: &str, fresh: bool) {
-    let mut set = FRESH_LORA_ADDS
+#[derive(Clone, Copy)]
+struct FreshLoraAddEntry {
+    marker: FreshLoraAddMarker,
+    marked_at: std::time::Instant,
+}
+
+type FreshLoraAddRegistry = std::collections::HashMap<FreshLoraAddKey, FreshLoraAddEntry>;
+
+static FRESH_LORA_ADDS: std::sync::LazyLock<std::sync::Mutex<FreshLoraAddRegistry>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+static NEXT_FRESH_LORA_ADD_MARKER: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
+fn prune_fresh_lora_adds(registry: &mut FreshLoraAddRegistry, now: std::time::Instant) {
+    registry.retain(|_, entry| now.saturating_duration_since(entry.marked_at) < FRESH_LORA_ADD_TTL);
+}
+
+fn mark_lora_add_freshness_in(
+    registry: &mut FreshLoraAddRegistry,
+    config_dir: &Path,
+    name: &str,
+    fresh: bool,
+    now: std::time::Instant,
+) -> Option<FreshLoraAddMarker> {
+    prune_fresh_lora_adds(registry, now);
+    let key = (config_dir.to_path_buf(), name.to_string());
+    if !fresh {
+        registry.remove(&key);
+        return None;
+    }
+
+    if !registry.contains_key(&key) && registry.len() >= MAX_FRESH_LORA_ADDS {
+        if let Some(oldest) = registry
+            .iter()
+            .min_by_key(|(_, entry)| entry.marked_at)
+            .map(|(key, _)| key.clone())
+        {
+            registry.remove(&oldest);
+        }
+    }
+    let marker = NEXT_FRESH_LORA_ADD_MARKER
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .wrapping_add(1);
+    registry.insert(
+        key,
+        FreshLoraAddEntry {
+            marker,
+            marked_at: now,
+        },
+    );
+    Some(marker)
+}
+
+pub(crate) fn mark_lora_add_freshness(
+    config_dir: &Path,
+    name: &str,
+    fresh: bool,
+) -> Option<FreshLoraAddMarker> {
+    let mut registry = FRESH_LORA_ADDS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if fresh {
-        set.insert(name.to_string());
-    } else {
-        set.remove(name);
-    }
+    mark_lora_add_freshness_in(
+        &mut registry,
+        config_dir,
+        name,
+        fresh,
+        std::time::Instant::now(),
+    )
 }
 
 #[cfg_attr(not(feature = "ble"), allow(dead_code))]
-pub(crate) fn take_fresh_lora_add(name: &str) -> bool {
-    FRESH_LORA_ADDS
+pub(crate) fn take_fresh_lora_add(
+    config_dir: &Path,
+    name: &str,
+    expected_marker: FreshLoraAddMarker,
+) -> bool {
+    let mut registry = FRESH_LORA_ADDS
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(name)
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    prune_fresh_lora_adds(&mut registry, std::time::Instant::now());
+    let key = (config_dir.to_path_buf(), name.to_string());
+    if registry
+        .get(&key)
+        .is_some_and(|entry| entry.marker == expected_marker)
+    {
+        registry.remove(&key);
+        true
+    } else {
+        false
+    }
+}
+
+pub(crate) fn clear_fresh_lora_add_marker(
+    state: &AppState,
+    config_dir: &Path,
+    name: &str,
+    marker: FreshLoraAddMarker,
+) -> bool {
+    with_rns_config_lock(state, || take_fresh_lora_add(config_dir, name, marker))
+}
+
+pub(crate) fn rollback_fresh_lora_add_marker(
+    state: &AppState,
+    config_dir: &Path,
+    name: &str,
+    marker: FreshLoraAddMarker,
+) -> Option<crate::rns_config::RemoveInterfaceOutcome> {
+    with_rns_config_lock(state, || {
+        take_fresh_lora_add(config_dir, name, marker)
+            .then(|| crate::rns_config::remove_interface_checked(config_dir, name))
+    })
 }
 
 pub(crate) fn remove_stored_file_refs(
@@ -88,7 +184,10 @@ pub(crate) fn remove_stored_file_refs(
             continue;
         }
         let Some(sanitized) = ratspeak_runtime::lxmf::sanitize_stored_file_name(&file_ref) else {
-            tracing::warn!(stored_name = %file_ref, "skipping unsafe stored attachment path");
+            tracing::warn!(
+                reason = "unsafe_stored_name",
+                "skipping unsafe stored attachment path"
+            );
             continue;
         };
         std::fs::remove_file(files_dir.join(sanitized)).ok();
@@ -243,6 +342,19 @@ pub(crate) fn hub_interfaces_payload(state: &AppState, mut ifaces: Value) -> Val
     let enabled = configured_enabled && !suppressed;
 
     if let Some(obj) = ifaces.as_object_mut() {
+        if let Some(rnodes) = obj.get_mut("rnode").and_then(Value::as_array_mut) {
+            for rnode in rnodes {
+                if let Some(fields) = rnode.as_object_mut() {
+                    // Stable USB selectors are private runtime identity. The
+                    // WebView only receives the opaque configured port needed
+                    // by the existing device picker; recovery is keyed by the
+                    // sanitized interface name through a Rust command.
+                    fields.remove("usb_vendor_id");
+                    fields.remove("usb_product_id");
+                    fields.remove("usb_serial_number");
+                }
+            }
+        }
         obj.insert(
             "transport".to_string(),
             json!({
@@ -251,6 +363,10 @@ pub(crate) fn hub_interfaces_payload(state: &AppState, mut ifaces: Value) -> Val
                 "configured_enabled": configured_enabled,
                 "suppressed": suppressed,
             }),
+        );
+        obj.insert(
+            "mobile_hardware".to_string(),
+            state.mobile_hardware_state_snapshot(),
         );
     }
     ifaces
@@ -328,50 +444,31 @@ pub(crate) async fn hydrate_contact_identity_for_send(state: &AppState, dest_has
     public_key.copy_from_slice(&pubkey_bytes);
 
     let Ok(identity) = Identity::from_public_key(&public_key) else {
-        tracing::warn!(dest = %dest_hash, "contact identity public key is invalid");
+        tracing::warn!(
+            reason = "invalid_public_key",
+            "contact identity public key is invalid"
+        );
         return false;
     };
     let expected_lxmf =
         Destination::hash_from_name_and_identity(LXMF_APP_NAME, Some(&identity.hash));
     if hex::encode(expected_lxmf) != dest_hash {
         tracing::warn!(
-            dest = %dest_hash,
-            expected = %hex::encode(expected_lxmf),
+            reason = "destination_mismatch",
             "contact identity public key does not match LXMF destination"
         );
         return false;
     }
 
-    if let Ok(mut lxmf) = state.lxmf.lock()
-        && let Some(mgr) = lxmf.as_mut()
-    {
-        mgr.update_remote_crypto(&dest_hash, &public_key, None);
-        mgr.save_crypto_state();
-        tracing::debug!(dest = %dest_hash, "hydrated LXMF identity from contact card");
+    if let Ok(mut lxmf) = state.lxmf.lock() {
+        if let Some(mgr) = lxmf.as_mut() {
+            mgr.update_remote_crypto(&dest_hash, &public_key, None);
+            mgr.save_crypto_state();
+        }
+        tracing::debug!("hydrated LXMF identity from contact card");
         return true;
     }
     false
-}
-
-// Extracts transport_tx then calls resolve_destination outside the lock
-// (clippy::await_holding_lock). Failure does not block sending.
-pub(crate) async fn resolve_before_send(state: &AppState, dest_hash: &str) {
-    let _ = hydrate_contact_identity_for_send(state, dest_hash).await;
-
-    let transport_tx = {
-        if let Ok(lxmf) = state.lxmf.lock() {
-            lxmf.as_ref()
-                .and_then(|mgr| mgr.router.transport_tx.clone())
-        } else {
-            None
-        }
-    };
-
-    if let Some(tx) = transport_tx
-        && !resolve_destination(state, dest_hash, &tx).await
-    {
-        tracing::warn!(dest = %dest_hash, "could not resolve destination, sending anyway");
-    }
 }
 
 pub(crate) use ratspeak_core::hex_to_array16;
@@ -413,25 +510,33 @@ fn json_to_rmpv(v: &Value) -> rmpv::Value {
     }
 }
 
-/// `delivery_state = Some` stamps metadata; `None` preserves existing.
-pub(crate) async fn save_session_from_state(
-    state: &AppState,
-    session_id: &str,
-    identity_id: &str,
-    app_id: &str,
-    contact_hash: &str,
-    session_state: &std::collections::HashMap<String, serde_json::Value>,
-    delivery_state: Option<&str>,
-) {
+pub(crate) struct SessionStateSave<'a> {
+    pub(crate) session_id: &'a str,
+    pub(crate) identity_id: &'a str,
+    pub(crate) app_id: &'a str,
+    pub(crate) app_version: u32,
+    pub(crate) contact_hash: &'a str,
+    pub(crate) session_state: &'a std::collections::HashMap<String, serde_json::Value>,
+    /// `Some` stamps delivery metadata; `None` preserves the existing value.
+    pub(crate) delivery_state: Option<&'a str>,
+}
+
+pub(crate) async fn save_session_from_state(state: &AppState, save: SessionStateSave<'_>) {
+    let SessionStateSave {
+        session_id,
+        identity_id,
+        app_id,
+        app_version,
+        contact_hash,
+        session_state,
+        delivery_state,
+    } = save;
     // Empty session_id is unaddressable; bail loudly.
     if session_id.is_empty() {
         tracing::warn!(
             target: "ttt_trace",
             step = "save_session.empty_sid_rejected",
-            app_id = %app_id,
-            identity_id = %identity_id,
-            contact_hash = %contact_hash,
-            delivery_state = ?delivery_state,
+            reason = "empty_session_id",
             "refusing to persist app_session with empty session_id"
         );
         return;
@@ -466,7 +571,7 @@ pub(crate) async fn save_session_from_state(
         session_id: session_id.to_string(),
         identity_id: identity_id.to_string(),
         app_id: app_id.to_string(),
-        app_version: 1,
+        app_version,
         contact_hash: contact_hash.to_string(),
         initiator: initiator.to_string(),
         status: status.to_string(),
@@ -533,13 +638,42 @@ pub(crate) fn emit_op_status_broadcast(
     );
 }
 
-pub(crate) async fn disable_ble_peer_inner(state: &Arc<AppState>) {
+pub(crate) async fn disable_ble_peer_inner(state: &Arc<AppState>) -> bool {
     // Serialize against enable: without this a rapid toggle (or an expiry
     // firing mid-enable) races the spawn, leaving either a zombie "enabled"
     // interface or a torn-down new session. The enable task holds the same
     // lock for its whole duration, so this waits for any in-flight enable.
     let _enable_guard = state.ble_peer_enable_lock.lock().await;
+    disable_ble_peer_inner_locked(state).await
+}
+
+pub(crate) async fn disable_ble_peer_inner_if_expiry(
+    state: &Arc<AppState>,
+    expected_expires_at: u64,
+) -> bool {
+    let _enable_guard = state.ble_peer_enable_lock.lock().await;
+    let still_this_request = db::spawn_db(state.db.clone(), move |p| {
+        let enabled = db::get_setting(&p, "ble_peer_enabled").is_some_and(|value| value == "1");
+        let current_expires_at = db::get_setting(&p, "ble_peer_expires_at")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        enabled && current_expires_at == expected_expires_at
+    })
+    .await
+    .unwrap_or(false);
+    if !still_this_request {
+        return false;
+    }
+    disable_ble_peer_inner_locked(state).await
+}
+
+async fn disable_ble_peer_inner_locked(state: &Arc<AppState>) -> bool {
     tracing::info!("disable_ble_peer_inner: start");
+    let was_requested = db::spawn_db(state.db.clone(), |p| {
+        db::get_setting(&p, "ble_peer_enabled").is_some_and(|enabled| enabled == "1")
+    })
+    .await
+    .unwrap_or(false);
     let _ = db::spawn_db(state.db.clone(), |p| {
         db::set_setting(&p, "ble_peer_enabled", "0");
         db::set_setting(&p, "ble_peer_expires_at", "0");
@@ -564,9 +698,10 @@ pub(crate) async fn disable_ble_peer_inner(state: &Arc<AppState>) {
             .ok()
             .and_then(|r| r.as_ref().map(|mgr| mgr.handle.clone()))
     };
+    let mut had_live_interface = false;
     if let Some(handle) = rns_handle {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        if handle
+        let stats = if handle
             .transport_tx
             .send(rns_transport::messages::TransportMessage::Rpc {
                 query: rns_transport::messages::TransportQuery::GetInterfaceStats,
@@ -574,9 +709,17 @@ pub(crate) async fn disable_ble_peer_inner(state: &Arc<AppState>) {
             })
             .await
             .is_ok()
-            && let Ok(rns_transport::messages::TransportQueryResponse::InterfaceStats(stats)) =
-                resp_rx.await
         {
+            match resp_rx.await {
+                Ok(rns_transport::messages::TransportQueryResponse::InterfaceStats(stats)) => {
+                    Some(stats)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(stats) = stats {
             #[cfg(feature = "ble")]
             let mut torn_down = false;
             let iface_count = stats.len();
@@ -586,6 +729,7 @@ pub(crate) async fn disable_ble_peer_inner(state: &Arc<AppState>) {
             );
             for iface in stats {
                 if iface.name == "Bluetooth Peer" || iface.name == "BLE Mesh" {
+                    had_live_interface = true;
                     tracing::info!(
                         id = iface.id,
                         "disable_ble_peer_inner: tearing down Bluetooth Peer interface"
@@ -624,6 +768,7 @@ pub(crate) async fn disable_ble_peer_inner(state: &Arc<AppState>) {
         rns_interface::ble_peer::stop_ble_peer_interface().await;
     }
     tracing::info!("disable_ble_peer_inner: done");
+    was_requested || had_live_interface
 }
 
 #[cfg(test)]
@@ -651,19 +796,206 @@ mod tests {
 
     #[test]
     fn fresh_lora_add_marker_gates_rollback_and_consumes_once() {
+        let first_identity = tempfile::tempdir().unwrap();
+        let second_identity = tempfile::tempdir().unwrap();
+
         // Fresh add: rollback allowed exactly once.
-        mark_lora_add_freshness("Marker Radio Fresh", true);
-        assert!(take_fresh_lora_add("Marker Radio Fresh"));
-        assert!(!take_fresh_lora_add("Marker Radio Fresh"));
+        let fresh_marker =
+            mark_lora_add_freshness(first_identity.path(), "Marker Radio Fresh", true).unwrap();
+        assert!(take_fresh_lora_add(
+            first_identity.path(),
+            "Marker Radio Fresh",
+            fresh_marker,
+        ));
+        assert!(!take_fresh_lora_add(
+            first_identity.path(),
+            "Marker Radio Fresh",
+            fresh_marker,
+        ));
 
         // Re-add of an existing entry clears any stale fresh marker, so a
         // failed reconnect never deletes pre-existing config.
-        mark_lora_add_freshness("Marker Radio Existing", true);
-        mark_lora_add_freshness("Marker Radio Existing", false);
-        assert!(!take_fresh_lora_add("Marker Radio Existing"));
+        let stale_marker =
+            mark_lora_add_freshness(first_identity.path(), "Marker Radio Existing", true).unwrap();
+        mark_lora_add_freshness(first_identity.path(), "Marker Radio Existing", false);
+        assert!(!take_fresh_lora_add(
+            first_identity.path(),
+            "Marker Radio Existing",
+            stale_marker,
+        ));
 
-        // Resume/cancel paths that never went through add are not deletable.
-        assert!(!take_fresh_lora_add("Marker Radio Never Added"));
+        // Resume/cancel paths that never captured an exact marker are not
+        // deletable.
+        assert!(!take_fresh_lora_add(
+            first_identity.path(),
+            "Marker Radio Never Added",
+            u64::MAX,
+        ));
+
+        // Identical interface names in different identity config directories
+        // cannot consume or clear each other's rollback authorization.
+        let first_marker =
+            mark_lora_add_freshness(first_identity.path(), "Shared Radio Name", true).unwrap();
+        mark_lora_add_freshness(second_identity.path(), "Shared Radio Name", false);
+        assert!(!take_fresh_lora_add(
+            second_identity.path(),
+            "Shared Radio Name",
+            first_marker,
+        ));
+        assert!(take_fresh_lora_add(
+            first_identity.path(),
+            "Shared Radio Name",
+            first_marker,
+        ));
+
+        // A same-name replacement in one config gets a new version. A's late
+        // success/failure cannot clear or consume B's rollback authorization.
+        let marker_a =
+            mark_lora_add_freshness(first_identity.path(), "Versioned Radio", true).unwrap();
+        let marker_b =
+            mark_lora_add_freshness(first_identity.path(), "Versioned Radio", true).unwrap();
+        assert!(!take_fresh_lora_add(
+            first_identity.path(),
+            "Versioned Radio",
+            marker_a,
+        ));
+        assert!(take_fresh_lora_add(
+            first_identity.path(),
+            "Versioned Radio",
+            marker_b,
+        ));
+    }
+
+    #[test]
+    fn fresh_lora_add_registry_expires_and_stays_bounded() {
+        let now = std::time::Instant::now();
+        let mut registry = FreshLoraAddRegistry::new();
+        registry.insert(
+            (
+                PathBuf::from("/expired-config"),
+                "Expired Radio".to_string(),
+            ),
+            FreshLoraAddEntry {
+                marker: 1,
+                marked_at: now,
+            },
+        );
+        prune_fresh_lora_adds(
+            &mut registry,
+            now + FRESH_LORA_ADD_TTL + std::time::Duration::from_secs(1),
+        );
+        assert!(registry.is_empty());
+
+        for index in 0..(MAX_FRESH_LORA_ADDS + 20) {
+            let _ = mark_lora_add_freshness_in(
+                &mut registry,
+                Path::new("/bounded-config"),
+                &format!("Radio {index}"),
+                true,
+                now,
+            );
+        }
+        assert_eq!(registry.len(), MAX_FRESH_LORA_ADDS);
+    }
+
+    #[test]
+    fn fresh_lora_success_and_edit_clear_delete_authorization() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = DashboardConfig::from_env_and_defaults(temp.path().to_path_buf());
+        let state = state_for_config(config);
+        let config_dir = temp.path().join("rns");
+        crate::rns_config::write_config(
+            &config_dir,
+            "[interfaces]\n  [[Shared Radio]]\n    type = RNodeInterface\n    port = ble://AA:BB:CC:DD:EE:FF\n",
+        );
+
+        let success_marker = with_rns_config_lock(&state, || {
+            mark_lora_add_freshness(&config_dir, "Shared Radio", true).unwrap()
+        });
+        assert!(clear_fresh_lora_add_marker(
+            &state,
+            &config_dir,
+            "Shared Radio",
+            success_marker,
+        ));
+        assert!(
+            rollback_fresh_lora_add_marker(&state, &config_dir, "Shared Radio", success_marker,)
+                .is_none()
+        );
+
+        let edit_marker = with_rns_config_lock(&state, || {
+            let marker = mark_lora_add_freshness(&config_dir, "Shared Radio", true).unwrap();
+            let _ = mark_lora_add_freshness(&config_dir, "Shared Radio", false);
+            marker
+        });
+        assert!(
+            rollback_fresh_lora_add_marker(&state, &config_dir, "Shared Radio", edit_marker)
+                .is_none()
+        );
+        assert!(
+            crate::rns_config::read_config(&config_dir)
+                .unwrap()
+                .contains("[[Shared Radio]]")
+        );
+    }
+
+    #[test]
+    fn stale_same_name_marker_cannot_delete_replacement_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = DashboardConfig::from_env_and_defaults(temp.path().to_path_buf());
+        let state = state_for_config(config);
+        let config_dir = temp.path().join("rns");
+        crate::rns_config::write_config(
+            &config_dir,
+            "[interfaces]\n  [[Shared Radio]]\n    type = RNodeInterface\n    port = ble://AA:BB:CC:DD:EE:FF\n",
+        );
+
+        let marker_a = with_rns_config_lock(&state, || {
+            mark_lora_add_freshness(&config_dir, "Shared Radio", true).unwrap()
+        });
+        let marker_b = with_rns_config_lock(&state, || {
+            mark_lora_add_freshness(&config_dir, "Shared Radio", true).unwrap()
+        });
+
+        assert!(
+            rollback_fresh_lora_add_marker(&state, &config_dir, "Shared Radio", marker_a).is_none()
+        );
+        assert!(
+            crate::rns_config::read_config(&config_dir)
+                .unwrap()
+                .contains("[[Shared Radio]]")
+        );
+        assert!(clear_fresh_lora_add_marker(
+            &state,
+            &config_dir,
+            "Shared Radio",
+            marker_b,
+        ));
+    }
+
+    #[tokio::test]
+    async fn ble_peer_expiry_only_disables_the_exact_requested_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = DashboardConfig::from_env_and_defaults(temp.path().to_path_buf());
+        let state = Arc::new(state_for_config(config));
+        db::set_setting(&state.db, "ble_peer_enabled", "1");
+        db::set_setting(&state.db, "ble_peer_expires_at", "200");
+
+        assert!(!disable_ble_peer_inner_if_expiry(&state, 100).await);
+        assert_eq!(
+            db::get_setting(&state.db, "ble_peer_enabled").as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            db::get_setting(&state.db, "ble_peer_expires_at").as_deref(),
+            Some("200")
+        );
+
+        assert!(disable_ble_peer_inner_if_expiry(&state, 200).await);
+        assert_eq!(
+            db::get_setting(&state.db, "ble_peer_enabled").as_deref(),
+            Some("0")
+        );
     }
 
     #[test]
