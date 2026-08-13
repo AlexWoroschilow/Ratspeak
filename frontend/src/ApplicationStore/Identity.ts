@@ -77,7 +77,7 @@ export interface IdentityInfo {
 
 
 export interface IdentityExport {
-    bytes: BlobPart;
+    bytes: Uint8Array;
     base64: string;
     fileName: string;
     mimeType: string;
@@ -206,9 +206,9 @@ export class Identity {
         });
     }
 
-    async getPayloadBackupBase64(identity: IdentityInfo): Promise<IdentityExport> {
+    async getPayloadBackupBase64(identity: IdentityInfo, passcode: string): Promise<IdentityExport> {
         return new Promise((resolve: (payload: IdentityExport) => void, reject) => {
-            invoke<IdentityExport>('api_export_identity_backup_base64', {hashHex: identity.hash})
+            invoke<IdentityExport>('api_export_identity_backup_base64', {hashHex: identity.hash, passcode: passcode})
                 .then((data: any) => {
                     return resolve({
                         bytes: this.base64ToBytes(data.backup_base64),

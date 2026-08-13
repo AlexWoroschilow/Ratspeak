@@ -136,12 +136,18 @@ export class IdentityCreate extends React.Component<IdentityCreateProps, Identit
 
                         <div className="identity-passcode-fields" id="identity-create-passcode-fields"
                              hidden={!passcodeEnabled}>
-                            <div className="modal-field"><label>PIN</label><input type="password" id="identity-create-passcode-new" className="modal-input" maxLength={128}
-                                                                                  autoComplete="off" placeholder="At least 6 characters"
-                                                                                  value={passcode} onChange={this.handlePasscodeChange}/></div>
-                            <div className="modal-field"><label>Confirm PIN</label><input type="password" id="identity-create-passcode-confirm" className="modal-input"
-                                                                                          maxLength={128} autoComplete="off"
-                                                                                          value={confirmPasscode} onChange={this.handleConfirmPasscodeChange}/></div>
+                            <div className="modal-field">
+                                <label>PIN</label>
+                                <input type="password" id="identity-create-passcode-new" className="modal-input" maxLength={128}
+                                       autoComplete="off" placeholder="At least 6 characters"
+                                       value={passcode} onChange={this.handlePasscodeChange}/>
+                            </div>
+                            <div className="modal-field">
+                                <label>Confirm PIN</label>
+                                <input type="password" id="identity-create-passcode-confirm" className="modal-input"
+                                       maxLength={128} autoComplete="off"
+                                       value={confirmPasscode} onChange={this.handleConfirmPasscodeChange}/>
+                            </div>
                         </div>
                         <div className="modal-error" id="identity-create-passcode-error"
                              style={{display: error ? "block" : "none"}}>{error}

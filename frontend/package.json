@@ -39,6 +39,8 @@
     "@creativebulma/bulma-tooltip": "^1.2.0",
     "@swc/core": "^1.15.43",
     "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.2",
+    "@tauri-apps/plugin-fs": "^2.5.1",
     "@tauri-apps/plugin-log": "^2.9.0",
     "axios": "^1.18.1",
     "buffer": "^6.0.3",
