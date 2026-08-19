@@ -46,6 +46,8 @@
 //
 import {invoke} from "@tauri-apps/api/core";
 import {makeAutoObservable} from "mobx";
+import {Peer} from "./Peers";
+import {info} from "@tauri-apps/plugin-log";
 
 export interface AppSettings {
     auto_announce_interval: number;
@@ -84,27 +86,27 @@ export class Settings {
     }
 
     async setDesktopNotifications(enabled: boolean): Promise<{ enabled: boolean }> {
-        return await invoke('set_desktop_notifications', { enabled });
+        return await invoke('set_desktop_notifications', {enabled});
     }
 
     async setAnnounceRatspeakUsage(enabled: boolean): Promise<{ enabled: boolean }> {
-        return await invoke('set_announce_ratspeak_usage', { enabled });
+        return await invoke('set_announce_ratspeak_usage', {enabled});
     }
 
     async setAutoAnnounce(interval: number): Promise<{ interval: number }> {
-        return await invoke('set_auto_announce', { interval });
+        return await invoke('set_auto_announce', {interval});
     }
 
     async setHardwareLockTimeout(seconds: number): Promise<{ hardware_session_timeout: number }> {
-        return await invoke('set_hardware_lock_timeout', { seconds });
+        return await invoke('set_hardware_lock_timeout', {seconds});
     }
 
     async setDeveloperMode(enabled: boolean): Promise<{ developer_mode: boolean }> {
-        return await invoke('set_developer_mode', { enabled });
+        return await invoke('set_developer_mode', {enabled});
     }
 
     async setPeersSort(sort: 'name' | 'hops' | 'last_seen'): Promise<{ sort: string }> {
-        return await invoke('set_peers_sort', { sort });
+        return await invoke('set_peers_sort', {sort});
     }
 
     async getHubInterfaces(): Promise<any> {
@@ -116,6 +118,16 @@ export class Settings {
     }
 
     async clearPaths(): Promise<{ cleared: number }> {
+        return new Promise((resolve: (value: any) => void, reject: (value: any) => void) => {
+            invoke<any>('api_clear_paths')
+                .then((data: { cleared: number }) => {
+                    return resolve(data);
+                })
+                .catch((error: any) => {
+                    return reject(new Error("Failed: api_get_peers_snapshot"))
+                });
+        });
+
         return await invoke('api_clear_paths');
     }
 

@@ -63,7 +63,7 @@ export class Contacts {
         this.collection = collection;
     }
 
-    async fetchContacts() {
+    async fetchContacts(): Promise<PeerEnriched[]> {
         return new Promise((resolve: (value: Array<PeerEnriched>) => void, reject) => {
             invoke<Array<PeerEnriched>>('api_contacts')
                 .then((collection: Array<Peer>) => {

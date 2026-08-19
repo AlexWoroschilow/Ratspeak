@@ -6,6 +6,7 @@ import {Contacts} from "./ApplicationStore/Contacts";
 import {Identity} from "./ApplicationStore/Identity";
 import {Messages} from "./ApplicationStore/Messages";
 import {info} from "@tauri-apps/plugin-log";
+import {Settings} from "./ApplicationStore/Settings";
 
 //
 // Based on the investigation of the `@dashboard/static/js/setup.js` and `@dashboard/static/js/tauri_events.js` files, here are the `RS.invoke` methods related to the initial application setup:
@@ -77,6 +78,7 @@ export class ApplicationStore {
     public contacts: Contacts;
     public identity: Identity;
     public messages: Messages;
+    public settings: Settings;
 
     constructor() {
         this.network = new Network(this);
@@ -84,6 +86,7 @@ export class ApplicationStore {
         this.contacts = new Contacts(this.peers);
         this.identity = new Identity();
         this.messages = new Messages();
+        this.settings = new Settings();
 
         makeAutoObservable(this);
 
@@ -146,3 +149,4 @@ export const peers = store?.peers;
 export const contacts = store?.contacts;
 export const identity = store?.identity;
 export const messages = store?.messages;
+export const settings = store?.settings;

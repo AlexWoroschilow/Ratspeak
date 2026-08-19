@@ -18,7 +18,15 @@ import {NetworkLocal} from "./Application/NetworkLocal";
 import {NetworkRadio} from "./Application/NetworkRadio";
 import {NetworkHost} from "./Application/NetworkHost";
 import {Setup} from "./Application/Setup";
-import {contacts, identity, messages, network, peers, store} from "./ApplicationStore";
+import {
+    contacts,
+    identity,
+    messages,
+    network,
+    peers,
+    settings,
+    store
+} from "./ApplicationStore";
 
 import "./Application.scss";
 import {NetworkActivity} from "./Application/NetworkActivity";
@@ -74,7 +82,8 @@ export class Application extends React.Component<ApplicationProps, ApplicationSt
                 peers={peers}
                 contacts={contacts}
                 identity={identity}
-                messages={messages}>
+                messages={messages}
+                settings={settings}>
 
                 <HashRouter>
                     <Routes>

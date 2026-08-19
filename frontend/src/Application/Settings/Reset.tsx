@@ -1,18 +1,37 @@
 "use strict";
 import React from "react";
+import {inject, observer} from "mobx-react";
+import {Settings as SettingsStore} from "../../ApplicationStore/Settings";
+import {Paths} from "./Reset/Paths";
 
 interface ResetProps {
+    settings?: SettingsStore | undefined;
+
 }
 
 interface ResetState {
 }
 
+@inject("settings")
+@observer
 export class Reset extends React.Component<ResetProps, ResetState> {
     constructor(props: ResetProps) {
         super(props);
     }
 
+
+    onClearPath() {
+        const {settings} = this.props;
+
+        return new Promise((resolve, reject) => {
+            settings?.clearPaths?.()
+                .then(resolve)
+                .catch(reject)
+        });
+    }
+
     render() {
+        const {settings} = this.props;
 
         return <>
             <section className="settings-detail-pane" aria-labelledby="settings-detail-title">
@@ -28,12 +47,7 @@ export class Reset extends React.Component<ResetProps, ResetState> {
                                 </div>
                             </div>
                             <div className="rs-dialog-choices">
-                                <span className="rs-dialog-choice">
-                                    <span className="rs-dialog-choice-text">
-                                        <span className="rs-dialog-choice-label">Clear Paths</span>
-                                        <span className="rs-dialog-choice-hint">Cached network routes</span>
-                                    </span>
-                                </span>
+                                <Paths onProcess={this.onClearPath.bind(this)}/>
                                 <span className="rs-dialog-choice">
                                     <span className="rs-dialog-choice-text">
                                         <span className="rs-dialog-choice-label">Clear Announces</span>
