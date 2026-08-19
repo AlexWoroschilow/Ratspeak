@@ -3,12 +3,15 @@ import React from "react";
 import {inject, observer} from "mobx-react";
 import {Settings as SettingsStore} from "../../../ApplicationStore/Settings";
 
-interface PathsProps {
+interface ConfirmationProps {
     settings?: SettingsStore | undefined;
+    title: string;
+    description: string;
+    message: string;
     onProcess: () => Promise<any>;
 }
 
-interface PathsCacheState {
+interface ConfirmationState {
     isStarted: boolean;
     isConfirmed: boolean;
     error?: string | undefined;
@@ -17,8 +20,8 @@ interface PathsCacheState {
 
 @inject("settings")
 @observer
-export class Paths extends React.Component<PathsProps, PathsCacheState> {
-    constructor(props: PathsProps) {
+export class Confirmation extends React.Component<ConfirmationProps, ConfirmationState> {
+    constructor(props: ConfirmationProps) {
         super(props);
 
         this.state = {
@@ -41,35 +44,39 @@ export class Paths extends React.Component<PathsProps, PathsCacheState> {
         });
     }
 
+    onProcessSuccessful(data: any) {
+        this.setState({
+            message: this.props.message,
+            isStarted: false,
+            isConfirmed: true
+        });
+
+        let timeout = setTimeout(() => {
+            this.setState({message: undefined});
+            clearTimeout(timeout);
+        }, 3000);
+    }
+
+    onProcessFailed(error: string) {
+        this.setState({
+            error: error,
+            isStarted: false,
+            isConfirmed: true
+        });
+
+        let timeout = setTimeout(() => {
+            this.setState({error: undefined});
+            clearTimeout(timeout);
+        }, 5000);
+    }
+
     onProcess() {
         const {onProcess} = this.props;
 
         const action = onProcess?.();
 
-        action?.then?.((data: any) => {
-            this.setState({
-                message: "Successfully processed",
-                isStarted: false,
-                isConfirmed: true
-            });
-
-            let timeout = setTimeout(() => {
-                this.setState({message: undefined});
-                clearTimeout(timeout);
-            }, 3000);
-
-        })?.catch?.((error: string) => {
-            this.setState({
-                error: error,
-                isStarted: false,
-                isConfirmed: true
-            });
-
-            let timeout = setTimeout(() => {
-                this.setState({error: undefined});
-                clearTimeout(timeout);
-            }, 5000);
-        });
+        action?.then?.(this.onProcessSuccessful.bind(this))
+            ?.catch?.(this.onProcessFailed.bind(this));
 
         this.setState({
             error: undefined,
@@ -99,13 +106,15 @@ export class Paths extends React.Component<PathsProps, PathsCacheState> {
                 <span className="rs-dialog-choice" onClick={this.onStart.bind(this)}>
 
                     <span className="rs-dialog-choice-text">
-                        <span className="rs-dialog-choice-label">Clear Paths</span>
+                        <span className="rs-dialog-choice-label">
+                            {this.props.title}
+                        </span>
 
 
                         {!this.state.isStarted && <>
-                                <span className="rs-dialog-choice-hint">
-                                Cached network routes
-                                </span>
+                            <span className="rs-dialog-choice-hint">
+                                {this.props.description}
+                            </span>
                         </>}
 
                         {this.state.isStarted && <>

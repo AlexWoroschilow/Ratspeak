@@ -46,7 +46,6 @@
 //
 import {invoke} from "@tauri-apps/api/core";
 import {makeAutoObservable} from "mobx";
-import {Peer} from "./Peers";
 import {info} from "@tauri-apps/plugin-log";
 
 export interface AppSettings {
@@ -123,24 +122,40 @@ export class Settings {
                 .then((data: { cleared: number }) => {
                     return resolve(data);
                 })
-                .catch((error: any) => {
-                    return reject(new Error("Failed: api_get_peers_snapshot"))
-                });
+                .catch(reject);
         });
-
-        return await invoke('api_clear_paths');
     }
 
     async clearAnnounces(): Promise<{ recent_cleared: number, peers_cleared: number }> {
-        return await invoke('api_clear_announces');
+        return new Promise((resolve: (value: any) => void, reject: (value: any) => void) => {
+            invoke<any>('api_clear_announces')
+                .then((data: { peers_cleared: number, recent_cleared: number }) => {
+                    return resolve(data);
+                })
+                .catch(reject);
+        });
     }
 
     async clearMessages(): Promise<void> {
-        return await invoke('api_clear_messages');
+        return new Promise((resolve: (value: any) => void, reject: (value: any) => void) => {
+            invoke<any>('api_clear_messages')
+                .then((data: any) => {
+                    return resolve(data);
+                })
+                .catch(reject);
+        });
     }
 
     async clearContacts(): Promise<void> {
-        return await invoke('api_clear_contacts');
+        return new Promise((resolve: (value: any) => void, reject: (value: any) => void) => {
+            invoke<any>('api_clear_contacts')
+                .then((data: any) => {
+                    // info(`${JSON.stringify(data)}`)
+                    return resolve(data);
+                })
+                .catch(reject);
+        });
+
     }
 
     async resetDatabase(): Promise<void> {

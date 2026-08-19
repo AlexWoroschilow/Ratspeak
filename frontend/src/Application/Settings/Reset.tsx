@@ -2,7 +2,7 @@
 import React from "react";
 import {inject, observer} from "mobx-react";
 import {Settings as SettingsStore} from "../../ApplicationStore/Settings";
-import {Paths} from "./Reset/Paths";
+import {Confirmation} from "./Reset/Confirmation";
 
 interface ResetProps {
     settings?: SettingsStore | undefined;
@@ -19,8 +19,50 @@ export class Reset extends React.Component<ResetProps, ResetState> {
         super(props);
     }
 
+    onClearMessages() {
+        const {settings} = this.props;
 
-    onClearPath() {
+        return new Promise((resolve, reject) => {
+            settings?.clearMessages?.()
+                .then(resolve)
+                .catch(reject)
+        });
+    }
+
+    onClearContacts() {
+        const {settings} = this.props;
+
+        return new Promise((resolve, reject) => {
+            settings?.clearPaths?.()
+                .then(resolve)
+                .catch(reject)
+        });
+    }
+
+
+    onClearEverything() {
+        const {settings} = this.props;
+
+        return new Promise((resolve, reject) => {
+            settings?.clearPaths?.()
+                .then(resolve)
+                .catch(reject)
+        });
+    }
+
+
+    onClearAnnounces() {
+        const {settings} = this.props;
+
+        return new Promise((resolve, reject) => {
+            settings?.clearAnnounces?.()
+                .then(resolve)
+                .catch(reject)
+        });
+    }
+
+
+    onClearPathes() {
         const {settings} = this.props;
 
         return new Promise((resolve, reject) => {
@@ -47,13 +89,18 @@ export class Reset extends React.Component<ResetProps, ResetState> {
                                 </div>
                             </div>
                             <div className="rs-dialog-choices">
-                                <Paths onProcess={this.onClearPath.bind(this)}/>
-                                <span className="rs-dialog-choice">
-                                    <span className="rs-dialog-choice-text">
-                                        <span className="rs-dialog-choice-label">Clear Announces</span>
-                                        <span className="rs-dialog-choice-hint">Announce history</span>
-                                    </span>
-                                </span>
+                                <Confirmation
+                                    title={"Clear Paths"}
+                                    description={"Cached network routes"}
+                                    message={"The Pathes were successfully cleared"}
+                                    onProcess={this.onClearPathes.bind(this)}/>
+
+                                <Confirmation
+                                    title={"Clear Announces"}
+                                    description={"Announce history"}
+                                    message={"The Announces were successfully cleared"}
+                                    onProcess={this.onClearAnnounces.bind(this)}/>
+
                             </div>
 
                             <div className="settings-row">
@@ -63,24 +110,17 @@ export class Reset extends React.Component<ResetProps, ResetState> {
                                 </div>
                             </div>
                             <div className="rs-dialog-choices">
-                                <span className="rs-dialog-choice">
-                                    <span className="rs-dialog-choice-text">
-                                        <span className="rs-dialog-choice-label">Delete Messages</span>
-                                        <span className="rs-dialog-choice-hint">All conversation history</span>
-                                    </span>
-                                </span>
-                                <span className="rs-dialog-choice">
-                                    <span className="rs-dialog-choice-text">
-                                        <span className="rs-dialog-choice-label">Delete Contacts</span>
-                                        <span className="rs-dialog-choice-hint">All saved contacts</span>
-                                    </span>
-                                </span>
-                                <span className="rs-dialog-choice">
-                                    <span className="rs-dialog-choice-text">
-                                        <span className="rs-dialog-choice-label">Delete All Data</span>
-                                        <span className="rs-dialog-choice-hint">Messages and contacts</span>
-                                    </span>
-                                </span>
+                                <Confirmation
+                                    title={"Delete Messages"}
+                                    description={"All conversation history"}
+                                    message={"The conversation history was successfully cleared"}
+                                    onProcess={this.onClearMessages.bind(this)}/>
+
+                                <Confirmation
+                                    title={"Delete Contacts"}
+                                    description={"All saved contacts"}
+                                    message={"The contacts were successfully cleared"}
+                                    onProcess={this.onClearContacts.bind(this)}/>
                             </div>
 
                             <div className="settings-row">
@@ -90,12 +130,11 @@ export class Reset extends React.Component<ResetProps, ResetState> {
                                 </div>
                             </div>
                             <div className="rs-dialog-choices">
-                                <span className="rs-dialog-choice">
-                                    <span className="rs-dialog-choice-text">
-                                        <span className="rs-dialog-choice-label">Reset Everything</span>
-                                        <span className="rs-dialog-choice-hint">Permanently removes everything.</span>
-                                    </span>
-                                </span>
+                                <Confirmation
+                                    title={"Reset Everything"}
+                                    description={"Permanently removes everything"}
+                                    message={"The Factory Reset was successful"}
+                                    onProcess={this.onClearEverything.bind(this)}/>
                             </div>
                         </div>
                     </div>
