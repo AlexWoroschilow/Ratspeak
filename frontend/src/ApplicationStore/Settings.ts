@@ -100,10 +100,6 @@ export class Settings {
         return await invoke('set_hardware_lock_timeout', {seconds});
     }
 
-    async setDeveloperMode(enabled: boolean): Promise<{ developer_mode: boolean }> {
-        return await invoke('set_developer_mode', {enabled});
-    }
-
     async setPeersSort(sort: 'name' | 'hops' | 'last_seen'): Promise<{ sort: string }> {
         return await invoke('set_peers_sort', {sort});
     }
@@ -115,6 +111,11 @@ export class Settings {
     async triggerAnnounce(): Promise<any> {
         return await invoke('trigger_announce');
     }
+
+    async setDeveloperMode(enabled: boolean): Promise<{ developer_mode: boolean }> {
+        return await invoke('set_developer_mode', {enabled});
+    }
+
 
     async clearPaths(): Promise<{ cleared: number }> {
         return new Promise((resolve: (value: any) => void, reject: (value: any) => void) => {
