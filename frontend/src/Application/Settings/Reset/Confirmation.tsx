@@ -7,6 +7,7 @@ interface ConfirmationProps {
     settings?: SettingsStore | undefined;
     title: string;
     description: string;
+    confirmation?: string;
     message: string;
     onProcess: () => Promise<any>;
 }
@@ -119,7 +120,7 @@ export class Confirmation extends React.Component<ConfirmationProps, Confirmatio
 
                         {this.state.isStarted && <>
                             <span className="rs-dialog-choice-hint">
-                                Are you sure?
+                                {this?.props?.confirmation || "Are you sure?"}
                             </span>
                             <span className="rs-dialog-choice-hint">
                                 <button className="nr-btn nr-btn-xs" onClick={() => {

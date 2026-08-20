@@ -1,5 +1,6 @@
 "use strict";
 import React from "react";
+import {Switcher} from "../components/Switcher";
 
 interface PrivacyProps {
 }
@@ -27,10 +28,7 @@ export class Privacy extends React.Component<PrivacyProps, PrivacyState> {
                                     <span className="settings-row-label">Announce Ratspeak usage</span>
                                     <span className="settings-row-desc">Let others know you support games, calls, and extra features.</span>
                                 </div>
-                                <label className="prop-toggle" aria-label="Announce Ratspeak usage">
-                                    <input type="checkbox" id="announce-ratspeak-usage-toggle" defaultChecked/>
-                                    <span className="prop-slider"></span>
-                                </label>
+                                <Switcher/>
                             </div>
                         </div>
                     </div>

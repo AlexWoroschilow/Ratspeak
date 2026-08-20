@@ -1,5 +1,6 @@
 "use strict";
 import React from "react";
+import {Switcher} from "../components/Switcher";
 
 interface InboxProps {
 }
@@ -36,15 +37,20 @@ export class Inbox extends React.Component<InboxProps, InboxState> {
                                 <div className="inline-hint relay-intro">When contacts can't reach you directly, your Offline Inbox stores their messages until you come back
                                     online.
                                 </div>
-                                <div className="relay-mode-toggle" role="tablist">
-                                    <button type="button" className="relay-mode-btn" data-mode="off" style={{flex: 1, padding: "6px 12px"}}>Off</button>
-                                    <button type="button" className="relay-mode-btn relay-mode-btn-active" data-mode="auto" style={{flex: 1, padding: "6px 12px"}}>Auto</button>
-                                    <button type="button" className="relay-mode-btn" data-mode="manual" style={{flex: 1, padding: "6px 12px"}}>Manual</button>
-                                </div>
-                                <label className="settings-row" style={{borderBottom: "none", cursor: "pointer"}}>
-                                    <div className="settings-row-info"><span className="settings-row-label">Favor Ratspeak inbox nodes</span><span className="settings-row-desc">Prefer reachable Ratspeak inbox nodes, with fallback when none can be reached.</span>
+
+                                <Switcher states={[
+                                    {value: "on", name: "On"},
+                                    {value: "auto", name: "Auto", isDefault: true},
+                                    {value: "off", name: "Off"},
+                                ]}/>
+                                <label className="settings-row">
+                                    <div className="settings-row-info">
+                                        <span className="settings-row-label">Favor Ratspeak inbox nodes</span><span className="settings-row-desc">Prefer reachable Ratspeak inbox nodes, with fallback when none can be reached.</span>
                                     </div>
-                                    <input type="checkbox" id="prop-favor-static-toggle" defaultChecked/></label>
+
+                                    <Switcher/>
+                                </label>
+
                                 <div className="relay-card relay-card-empty">
                                     <div className="inline-hint">Looking for a reachable Offline Inbox…</div>
                                 </div>
@@ -53,18 +59,22 @@ export class Inbox extends React.Component<InboxProps, InboxState> {
                                     <div className="settings-row propagation-settings-row">
                                         <div className="settings-row-info"><span className="settings-row-label">Host inbox node</span><span className="settings-row-desc">Store offline LXMF messages for other people using this device.</span>
                                         </div>
-                                        <label className="prop-toggle"><input type="checkbox" id="prop-host-toggle"/><span className="prop-slider"></span></label></div>
+                                        <Switcher/>
+                                    </div>
                                 </div>
                                 <details className="relay-advanced-block relay-details">
                                     <summary>Message stamp protection</summary>
                                     <div className="settings-row propagation-settings-row">
-                                        <div className="settings-row-info"><span className="settings-row-label">Require stamps</span><span className="settings-row-desc">Advertise and require proof-of-work on messages sent directly to you.</span>
+                                        <div className="settings-row-info"><span className="settings-row-label">Require stamps</span>
+                                            <span className="settings-row-desc">Advertise and require proof-of-work on messages sent directly to you.</span>
                                         </div>
-                                        <label className="prop-toggle"><input type="checkbox" id="stamp-enforce-toggle"/><span className="prop-slider"></span></label></div>
+                                        <Switcher/>
+                                    </div>
                                     <div className="settings-row propagation-settings-row" style={{borderBottom: "none"}}>
-                                        <div className="settings-row-info"><span className="settings-row-label">Required work</span><span className="settings-row-desc">Higher values make spam harder but slow down senders.</span>
+                                        <div className="settings-row-info">
+                                            <span className="settings-row-label">Required work</span><span className="settings-row-desc">Higher values make spam harder but slow down senders.</span>
                                         </div>
-                                        <button className="selector-badge" id="stamp-cost-btn">Off</button>
+                                        <Switcher/>
                                     </div>
                                 </details>
                             </div>

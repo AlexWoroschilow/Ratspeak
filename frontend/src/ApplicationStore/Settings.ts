@@ -136,33 +136,38 @@ export class Settings {
         });
     }
 
-    async clearMessages(): Promise<void> {
-        return new Promise((resolve: (value: any) => void, reject: (value: any) => void) => {
-            invoke<any>('api_clear_messages')
-                .then((data: any) => {
-                    return resolve(data);
-                })
+    async clearMessages(): Promise<null> {
+        return new Promise((resolve: (value: null) => void, reject: (value: any) => void) => {
+            invoke<null>('api_clear_messages')
+                .then(resolve)
                 .catch(reject);
         });
     }
 
-    async clearContacts(): Promise<void> {
+    async clearContacts(): Promise<null> {
+        return new Promise((resolve: (value: null) => void, reject: (value: any) => void) => {
+            invoke<null>('api_clear_contacts')
+                .then(resolve)
+                .catch(reject);
+        });
+    }
+
+    async resetDatabase(): Promise<null> {
+        return new Promise((resolve: (value: null) => void, reject: (value: any) => void) => {
+            invoke<null>('api_reset_database')
+                .then(resolve)
+                .catch(reject);
+        });
+    }
+
+    async factoryReset(): Promise<any> {
         return new Promise((resolve: (value: any) => void, reject: (value: any) => void) => {
-            invoke<any>('api_clear_contacts')
+            invoke<any>('api_factory_reset')
                 .then((data: any) => {
-                    // info(`${JSON.stringify(data)}`)
+                    info(`${JSON.stringify(data)}`)
                     return resolve(data);
                 })
                 .catch(reject);
         });
-
-    }
-
-    async resetDatabase(): Promise<void> {
-        return await invoke('api_reset_database');
-    }
-
-    async factoryReset(): Promise<{ message: string }> {
-        return await invoke('api_factory_reset');
     }
 }

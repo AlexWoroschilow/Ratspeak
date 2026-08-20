@@ -1,5 +1,6 @@
 "use strict";
 import React from "react";
+import {Switcher} from "../components/Switcher";
 
 interface GeneralProps {
 }
@@ -58,43 +59,28 @@ export class General extends React.Component<GeneralProps, GeneralState> {
                                     <span className="settings-row-label">Vibration</span>
                                     <span className="settings-row-desc">Enable haptic feedback for taps and gestures</span>
                                 </div>
-                                <label className="prop-toggle" aria-label="Enable vibration">
-                                    <input type="checkbox" id="haptics-enabled-toggle"/>
-                                    <span className="prop-slider"></span>
-                                </label>
+                                <Switcher/>
                             </div>
                             <div className="settings-row" id="settings-row-notifications">
                                 <div className="settings-row-info">
                                     <span className="settings-row-label">Desktop Notifications</span>
                                     <span className="settings-row-desc">Show a system notification when a new message arrives while Ratspeak is in the background</span>
                                 </div>
-                                <label className="prop-toggle" aria-label="Desktop Notifications">
-                                    <input type="checkbox" id="desktop-notifications-toggle" defaultChecked/>
-                                    <span className="prop-slider"></span>
-                                </label>
-                            </div>
-                            <div className="settings-row" style={{borderBottom: "none"}}>
-                                <div className="settings-row-info">
-                                    <span className="settings-row-label">Block List</span>
-                                    <span className="settings-row-desc">Manage blocked users</span>
-                                </div>
-                                <button className="selector-badge selector-badge-no-caret" id="settings-blocked-count">Manage</button>
+                                <Switcher/>
                             </div>
                             <div className="settings-row">
                                 <div className="settings-row-info">
                                     <span className="settings-row-label">Developer Mode</span>
                                     <span className="settings-row-desc">Show advanced developer settings when available.</span>
                                 </div>
-                                <div className="settings-radio-group" role="radiogroup" aria-label="Developer Mode">
-                                    <label className="settings-radio-option">
-                                        <input type="radio" name="settings-developer-mode" id="settings-developer-mode-off" value="off" defaultChecked/>
-                                        <span>Off</span>
-                                    </label>
-                                    <label className="settings-radio-option">
-                                        <input type="radio" name="settings-developer-mode" id="settings-developer-mode-on" value="on"/>
-                                        <span>On</span>
-                                    </label>
+                                <Switcher/>
+                            </div>
+                            <div className="settings-row">
+                                <div className="settings-row-info">
+                                    <span className="settings-row-label">Block List</span>
+                                    <span className="settings-row-desc">Manage blocked users</span>
                                 </div>
+                                <button className="selector-badge selector-badge-no-caret" id="settings-blocked-count">Manage</button>
                             </div>
 
                         </div>

@@ -33,7 +33,17 @@ export class Reset extends React.Component<ResetProps, ResetState> {
         const {settings} = this.props;
 
         return new Promise((resolve, reject) => {
-            settings?.clearPaths?.()
+            settings?.clearContacts?.()
+                .then(resolve)
+                .catch(reject)
+        });
+    }
+
+    onClearDatabase() {
+        const {settings} = this.props;
+
+        return new Promise((resolve, reject) => {
+            settings?.resetDatabase?.()
                 .then(resolve)
                 .catch(reject)
         });
@@ -44,7 +54,7 @@ export class Reset extends React.Component<ResetProps, ResetState> {
         const {settings} = this.props;
 
         return new Promise((resolve, reject) => {
-            settings?.clearPaths?.()
+            settings?.factoryReset?.()
                 .then(resolve)
                 .catch(reject)
         });
@@ -113,14 +123,23 @@ export class Reset extends React.Component<ResetProps, ResetState> {
                                 <Confirmation
                                     title={"Delete Messages"}
                                     description={"All conversation history"}
+                                    confirmation={"Are you sure you want to clear the conversation history?"}
                                     message={"The conversation history was successfully cleared"}
                                     onProcess={this.onClearMessages.bind(this)}/>
 
                                 <Confirmation
                                     title={"Delete Contacts"}
                                     description={"All saved contacts"}
+                                    confirmation={"Are you sure you want to clear all saved contacts?"}
                                     message={"The contacts were successfully cleared"}
                                     onProcess={this.onClearContacts.bind(this)}/>
+
+                                <Confirmation
+                                    title={"Reset database"}
+                                    description={"Clear all messages and contacts."}
+                                    confirmation={"Are you sure you want to clear all messages and contacts?"}
+                                    message={"All messages and contacts cleared"}
+                                    onProcess={this.onClearDatabase.bind(this)}/>
                             </div>
 
                             <div className="settings-row">
@@ -133,6 +152,7 @@ export class Reset extends React.Component<ResetProps, ResetState> {
                                 <Confirmation
                                     title={"Reset Everything"}
                                     description={"Permanently removes everything"}
+                                    confirmation={"Are you absolutely sure? All identities and data will be permanently deleted."}
                                     message={"The Factory Reset was successful"}
                                     onProcess={this.onClearEverything.bind(this)}/>
                             </div>

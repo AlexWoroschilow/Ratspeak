@@ -1,5 +1,6 @@
 "use strict";
 import React from "react";
+import {Switcher} from "../components/Switcher";
 
 interface NetworkProps {
 }
@@ -26,7 +27,7 @@ export class Network extends React.Component<NetworkProps, PrivacyNetwork> {
                                     <span className="settings-row-label">Transport Mode</span>
                                     <span className="settings-row-desc">Relay packets for other nodes on the network</span>
                                 </div>
-                                <button className="selector-badge" id="transport-mode-select">OFF</button>
+                                <Switcher/>
                             </div>
                             <div className="settings-row">
                                 <div className="settings-row-info">
