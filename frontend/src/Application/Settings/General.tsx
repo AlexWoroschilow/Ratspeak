@@ -2,7 +2,7 @@
 import React from "react";
 import {Switcher, SwitchFailed, SwitchSuccessful} from "../components/Switcher";
 import {inject, observer} from "mobx-react";
-import {DeveloperMode, GeneralSettings, NotificationSettings, Settings as SettingsStore} from "../../ApplicationStore/Settings";
+import {DeveloperMode, GeneralSettings, HapticsSettings, NotificationSettings, Settings as SettingsStore} from "../../ApplicationStore/Settings";
 import {info} from "@tauri-apps/plugin-log";
 
 interface GeneralProps {
@@ -12,6 +12,7 @@ interface GeneralProps {
 interface GeneralState {
     notifications?: number | undefined;
     developer_mode?: number | undefined;
+    haptics_enabled?: number | undefined;
 }
 
 @inject("settings")
@@ -23,6 +24,7 @@ export class General extends React.Component<GeneralProps, GeneralState> {
         this.state = {
             notifications: undefined,
             developer_mode: undefined,
+            haptics_enabled: undefined,
         }
     }
 
@@ -30,7 +32,10 @@ export class General extends React.Component<GeneralProps, GeneralState> {
         const {settings} = this.props;
 
         settings?.getAppSettings?.()?.then?.((settings: GeneralSettings) => {
-            this.setState({developer_mode: settings?.developer_mode ? 1 : 0});
+            this.setState({
+                developer_mode: settings?.developer_mode ? 1 : 0,
+                haptics_enabled: settings?.haptics_enabled ? 1 : 0,
+            });
         });
 
         settings?.getNotificationSettings?.()?.then?.((settings: NotificationSettings) => {
@@ -60,8 +65,30 @@ export class General extends React.Component<GeneralProps, GeneralState> {
         return new Promise((resolve: (value: SwitchSuccessful) => void, reject: (reason: SwitchFailed) => void) => {
             settings?.setDeveloperMode?.(enabled == 1)
                 .then((settings: DeveloperMode) => {
-                    info(`${JSON.stringify(settings)}`);
-                    this.setState({developer_mode: settings.developer_mode ? 1 : 0});
+
+                    this.setState({
+                        developer_mode: settings.developer_mode ? 1 : 0
+                    });
+
+                    return resolve({message: `Successful!`} as SwitchSuccessful);
+                })
+                .catch((error: any) => {
+                    return reject({error: `Failed!`} as SwitchFailed);
+                });
+        });
+    }
+
+    onChangedHaptics(enabled: string | number): Promise<SwitchSuccessful> {
+        const {settings} = this.props;
+
+        return new Promise((resolve: (value: SwitchSuccessful) => void, reject: (reason: SwitchFailed) => void) => {
+            settings?.setHapticsSettings?.(enabled == 1)
+                .then((settings: HapticsSettings) => {
+
+                    this.setState({
+                        haptics_enabled: settings.enabled ? 1 : 0
+                    });
+
                     return resolve({message: `Successful!`} as SwitchSuccessful);
                 })
                 .catch((error: any) => {
@@ -72,8 +99,7 @@ export class General extends React.Component<GeneralProps, GeneralState> {
 
 
     render() {
-        let {notifications, developer_mode} = this.state;
-        info(`???: ${notifications} / ${developer_mode}`);
+        let {notifications, developer_mode, haptics_enabled} = this.state;
 
         return <>
             <section className="settings-detail-pane" aria-labelledby="settings-detail-title">
@@ -119,7 +145,7 @@ export class General extends React.Component<GeneralProps, GeneralState> {
                                     <span className="settings-row-label">Vibration</span>
                                     <span className="settings-row-desc">Enable haptic feedback for taps and gestures</span>
                                 </div>
-                                <Switcher/>
+                                <Switcher value={haptics_enabled} onChanged={this.onChangedHaptics.bind(this)}/>
                             </div>
                             <div className="settings-row" id="settings-row-notifications">
                                 <div className="settings-row-info">

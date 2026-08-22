@@ -52,6 +52,7 @@ export interface GeneralSettings {
     activity_identity_protection: boolean;
     channel_hosting_enabled: boolean;
     auto_announce_interval: number;
+    haptics_enabled?: boolean;
     hide_known_spam_peers: boolean;
     public_channel_consent_required_version: number;
     public_channel_consent_version: number;
@@ -71,6 +72,10 @@ export interface NotificationSettings {
     ios_stubbed?: boolean;
 }
 
+export interface HapticsSettings {
+    enabled: boolean;
+}
+
 export interface VersionInfo {
     version: string;
     name: string;
@@ -86,16 +91,56 @@ export class Settings {
     }
 
     async getAppSettings(): Promise<GeneralSettings> {
-        return new Promise((resolve: (value: any) => void, reject: (value: any) => void) => {
+        return new Promise((resolve: (value: GeneralSettings) => void, reject: (value: any) => void) => {
             invoke<GeneralSettings>('api_app_settings')
-                .then(resolve)
-                .catch(reject);
+                .then((settings: GeneralSettings) => {
+
+                    this.getHapticsSettings()
+                        .then((haptics: HapticsSettings) => {
+                            resolve({
+                                ...settings, ...{
+                                    haptics_enabled: haptics.enabled
+                                }
+                            })
+                        }).catch(reject);
+
+                }).catch(reject);
         });
     }
 
     async getVersion(): Promise<VersionInfo> {
         return await invoke<VersionInfo>('api_version');
     }
+
+
+    getHapticsSettings(): Promise<HapticsSettings> {
+        return new Promise((resolve: (value: HapticsSettings) => void, reject: (value: any) => void) => {
+            try {
+                return resolve({
+                    enabled: localStorage.getItem("rs-haptics-enabled") === '1'
+                } as HapticsSettings);
+
+            } catch (e) {
+                reject({error: `${e}`});
+            }
+        });
+    }
+
+    setHapticsSettings(enabled: boolean) {
+        return new Promise((resolve: (value: HapticsSettings) => void, reject: (value: any) => void) => {
+            try {
+                localStorage.setItem("rs-haptics-enabled", enabled ? '1' : '0');
+
+                return resolve({
+                    enabled: enabled
+                } as HapticsSettings);
+
+            } catch (e) {
+                reject({error: `${e}`});
+            }
+        });
+    }
+
 
     async getNotificationSettings(): Promise<any> {
         return new Promise((resolve: (value: any) => void, reject: (value: any) => void) => {
