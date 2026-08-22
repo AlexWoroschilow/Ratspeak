@@ -2,7 +2,7 @@
 import React from "react";
 import {Switcher, SwitchFailed, SwitchSuccessful} from "../components/Switcher";
 import {inject, observer} from "mobx-react";
-import {NotificationSettings, Settings as SettingsStore} from "../../ApplicationStore/Settings";
+import {DeveloperMode, GeneralSettings, NotificationSettings, Settings as SettingsStore} from "../../ApplicationStore/Settings";
 import {info} from "@tauri-apps/plugin-log";
 
 interface GeneralProps {
@@ -10,7 +10,8 @@ interface GeneralProps {
 }
 
 interface GeneralState {
-    notifications?: boolean | undefined;
+    notifications?: number | undefined;
+    developer_mode?: number | undefined;
 }
 
 @inject("settings")
@@ -21,14 +22,19 @@ export class General extends React.Component<GeneralProps, GeneralState> {
 
         this.state = {
             notifications: undefined,
+            developer_mode: undefined,
         }
     }
 
     componentDidMount() {
         const {settings} = this.props;
 
+        settings?.getAppSettings?.()?.then?.((settings: GeneralSettings) => {
+            this.setState({developer_mode: settings?.developer_mode ? 1 : 0});
+        });
+
         settings?.getNotificationSettings?.()?.then?.((settings: NotificationSettings) => {
-            this.setState({notifications: settings.enabled});
+            this.setState({notifications: settings?.enabled ? 1 : 0});
         });
     }
 
@@ -39,7 +45,7 @@ export class General extends React.Component<GeneralProps, GeneralState> {
         return new Promise((resolve: (value: SwitchSuccessful) => void, reject: (reason: SwitchFailed) => void) => {
             settings?.setDesktopNotifications?.(enabled == 1)
                 .then((settings: NotificationSettings) => {
-                    this.setState({notifications: settings.enabled});
+                    this.setState({notifications: settings.enabled ? 1 : 0});
                     return resolve({message: `Successful!`} as SwitchSuccessful);
                 })
                 .catch((error: any) => {
@@ -48,8 +54,26 @@ export class General extends React.Component<GeneralProps, GeneralState> {
         });
     }
 
+    onChangedDeveloperMode(enabled: string | number): Promise<SwitchSuccessful> {
+        const {settings} = this.props;
+
+        return new Promise((resolve: (value: SwitchSuccessful) => void, reject: (reason: SwitchFailed) => void) => {
+            settings?.setDeveloperMode?.(enabled == 1)
+                .then((settings: DeveloperMode) => {
+                    info(`${JSON.stringify(settings)}`);
+                    this.setState({developer_mode: settings.developer_mode ? 1 : 0});
+                    return resolve({message: `Successful!`} as SwitchSuccessful);
+                })
+                .catch((error: any) => {
+                    return reject({error: `Failed!`} as SwitchFailed);
+                });
+        });
+    }
+
+
     render() {
-        const {notifications} = this.state;
+        let {notifications, developer_mode} = this.state;
+        info(`???: ${notifications} / ${developer_mode}`);
 
         return <>
             <section className="settings-detail-pane" aria-labelledby="settings-detail-title">
@@ -102,14 +126,15 @@ export class General extends React.Component<GeneralProps, GeneralState> {
                                     <span className="settings-row-label">Desktop Notifications</span>
                                     <span className="settings-row-desc">Show a system notification when a new message arrives while Ratspeak is in the background</span>
                                 </div>
-                                <Switcher value={notifications ? 1 : 0} onChanged={this.onChangedDesktopNotification.bind(this)}/>
+                                <Switcher value={notifications} onChanged={this.onChangedDesktopNotification.bind(this)}/>
                             </div>
                             <div className="settings-row">
                                 <div className="settings-row-info">
                                     <span className="settings-row-label">Developer Mode</span>
                                     <span className="settings-row-desc">Show advanced developer settings when available.</span>
                                 </div>
-                                <Switcher/>
+                                <Switcher value={developer_mode} onChanged={this.onChangedDeveloperMode.bind(this)}/>
+
                             </div>
                             <div className="settings-row">
                                 <div className="settings-row-info">

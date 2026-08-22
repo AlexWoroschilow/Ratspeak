@@ -78,7 +78,7 @@ export class Switcher extends React.Component<SwitcherProps, SwitcherState> {
         (states == undefined) &&
         (states = [
             {value: 1, name: "On"},
-            {value: 0, name: "Off", isDefault: true},
+            {value: 0, name: "Off"},
         ]);
 
         (name == undefined) &&
@@ -100,13 +100,12 @@ export class Switcher extends React.Component<SwitcherProps, SwitcherState> {
                             <input type="radio"
                                    name={`${name}`}
                                    value={item.value}
-                                   defaultChecked={value == item?.value}
+                                   checked={value == item?.value}
                                    onChange={this.onChanged.bind(this)}/>
                             <span>{item.name}</span>
                         </label>
                     })}
                 </>}
-
 
             </div>
 

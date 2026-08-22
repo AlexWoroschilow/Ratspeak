@@ -48,8 +48,17 @@ import {invoke} from "@tauri-apps/api/core";
 import {makeAutoObservable} from "mobx";
 import {info} from "@tauri-apps/plugin-log";
 
-export interface AppSettings {
+export interface GeneralSettings {
+    activity_identity_protection: boolean;
+    channel_hosting_enabled: boolean;
     auto_announce_interval: number;
+    hide_known_spam_peers: boolean;
+    public_channel_consent_required_version: number;
+    public_channel_consent_version: number;
+    text_scale_percent: number;
+    theme_family: string;
+    theme_mode: string;
+    lxmf_limit_1mb: boolean;
     announce_ratspeak_usage: boolean;
     peers_sort: 'name' | 'hops' | 'last_seen';
     hardware_session_timeout: number;
@@ -67,13 +76,21 @@ export interface VersionInfo {
     name: string;
 }
 
+export interface DeveloperMode {
+    developer_mode: boolean
+}
+
 export class Settings {
     constructor() {
         makeAutoObservable(this);
     }
 
-    async getAppSettings(): Promise<AppSettings> {
-        return await invoke<AppSettings>('api_app_settings');
+    async getAppSettings(): Promise<GeneralSettings> {
+        return new Promise((resolve: (value: any) => void, reject: (value: any) => void) => {
+            invoke<GeneralSettings>('api_app_settings')
+                .then(resolve)
+                .catch(reject);
+        });
     }
 
     async getVersion(): Promise<VersionInfo> {
@@ -120,8 +137,12 @@ export class Settings {
         return await invoke('trigger_announce');
     }
 
-    async setDeveloperMode(enabled: boolean): Promise<{ developer_mode: boolean }> {
-        return await invoke('set_developer_mode', {enabled});
+    async setDeveloperMode(enabled: boolean): Promise<DeveloperMode> {
+        return new Promise((resolve: (value: DeveloperMode) => void, reject: (value: any) => void) => {
+            invoke<DeveloperMode>('set_developer_mode', {enabled})
+                .then(resolve)
+                .catch(reject);
+        });
     }
 
 
