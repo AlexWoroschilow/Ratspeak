@@ -1,19 +1,55 @@
 "use strict";
 import React from "react";
-import {Switcher} from "../components/Switcher";
+import {Switcher, SwitchFailed, SwitchSuccessful} from "../components/Switcher";
+import {inject, observer} from "mobx-react";
+import {NotificationSettings, Settings as SettingsStore} from "../../ApplicationStore/Settings";
+import {info} from "@tauri-apps/plugin-log";
 
 interface GeneralProps {
+    settings?: SettingsStore | undefined;
 }
 
 interface GeneralState {
+    notifications?: boolean | undefined;
 }
 
+@inject("settings")
+@observer
 export class General extends React.Component<GeneralProps, GeneralState> {
     constructor(props: GeneralProps) {
         super(props);
+
+        this.state = {
+            notifications: undefined,
+        }
+    }
+
+    componentDidMount() {
+        const {settings} = this.props;
+
+        settings?.getNotificationSettings?.()?.then?.((settings: NotificationSettings) => {
+            this.setState({notifications: settings.enabled});
+        });
+    }
+
+
+    onChangedDesktopNotification(enabled: string | number): Promise<SwitchSuccessful> {
+        const {settings} = this.props;
+
+        return new Promise((resolve: (value: SwitchSuccessful) => void, reject: (reason: SwitchFailed) => void) => {
+            settings?.setDesktopNotifications?.(enabled == 1)
+                .then((settings: NotificationSettings) => {
+                    this.setState({notifications: settings.enabled});
+                    return resolve({message: `Successful!`} as SwitchSuccessful);
+                })
+                .catch((error: any) => {
+                    return reject({error: `Failed!`} as SwitchFailed);
+                });
+        });
     }
 
     render() {
+        const {notifications} = this.state;
 
         return <>
             <section className="settings-detail-pane" aria-labelledby="settings-detail-title">
@@ -66,7 +102,7 @@ export class General extends React.Component<GeneralProps, GeneralState> {
                                     <span className="settings-row-label">Desktop Notifications</span>
                                     <span className="settings-row-desc">Show a system notification when a new message arrives while Ratspeak is in the background</span>
                                 </div>
-                                <Switcher/>
+                                <Switcher value={notifications ? 1 : 0} onChanged={this.onChangedDesktopNotification.bind(this)}/>
                             </div>
                             <div className="settings-row">
                                 <div className="settings-row-info">

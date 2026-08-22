@@ -59,7 +59,7 @@ export interface AppSettings {
 
 export interface NotificationSettings {
     enabled: boolean;
-    ios_stubbed: boolean;
+    ios_stubbed?: boolean;
 }
 
 export interface VersionInfo {
@@ -80,12 +80,20 @@ export class Settings {
         return await invoke<VersionInfo>('api_version');
     }
 
-    async getNotificationSettings(): Promise<NotificationSettings> {
-        return await invoke<NotificationSettings>('api_notification_settings');
+    async getNotificationSettings(): Promise<any> {
+        return new Promise((resolve: (value: any) => void, reject: (value: any) => void) => {
+            invoke<any>('api_notification_settings')
+                .then(resolve)
+                .catch(reject);
+        });
     }
 
-    async setDesktopNotifications(enabled: boolean): Promise<{ enabled: boolean }> {
-        return await invoke('set_desktop_notifications', {enabled});
+    async setDesktopNotifications(enabled: any): Promise<NotificationSettings> {
+        return new Promise((resolve: (value: NotificationSettings) => void, reject: (value: any) => void) => {
+            invoke<NotificationSettings>('set_desktop_notifications', {enabled})
+                .then(resolve)
+                .catch(reject);
+        });
     }
 
     async setAnnounceRatspeakUsage(enabled: boolean): Promise<{ enabled: boolean }> {
