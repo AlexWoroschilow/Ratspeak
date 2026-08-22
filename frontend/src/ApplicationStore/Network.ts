@@ -132,6 +132,7 @@ export interface Interfaces {
     auto: Array<{
         name: string;
         type: string;
+        enabled: boolean;
 
         [key: string]: string | number | boolean | undefined;
     }>;
@@ -171,6 +172,21 @@ export interface Interfaces {
 
         [key: string]: string | number | boolean | undefined;
     }>;
+
+    mobile_hardware: Array<{
+        name: string;
+        type: string;
+
+        [key: string]: string | number | boolean | undefined;
+    }>;
+
+    // "transport":
+// {
+// "configured_enabled":false,
+// "enabled":false,
+// "mode":"off",
+// "suppressed":false
+// }}
 
     transport: {
         mode: 'on' | 'off' | 'auto';
@@ -215,6 +231,10 @@ export interface PublicServer {
 export type Blackhole = Blackholes['entries'][number];
 export type InterfaceTCP = Interfaces['tcp_client'][number];
 export type LocalhostInterface = Localhost['interfaces'][number];
+
+export interface ConfigNetwork {
+    onNetworkInterfacesUpdated?: (interfaces: Interfaces) => void;
+}
 
 export class Network {
 
@@ -288,32 +308,10 @@ export class Network {
     protected unlistenBlackholeUpdate: Promise<UnlistenFn> | undefined = undefined;
     protected unlistenStatisticUpdate: Promise<UnlistenFn> | undefined = undefined;
     protected unlistenInterfacesUpdate: Promise<UnlistenFn> | undefined = undefined;
+    protected config: ConfigNetwork;
 
-    get interfacesAll() {
-        const interfaces: Array<{ name: string, enabled: boolean }> = [];
-        const ifaces = this.interfaces as any;
-
-        Object.keys(ifaces).forEach((key) => {
-            if (Array.isArray(ifaces[key])) {
-                ifaces[key].forEach((iface: any) => {
-                    if (iface.name) {
-                        interfaces.push({
-                            name: iface.name,
-                            enabled: iface.enabled !== false && iface.enabled !== 'false'
-                        });
-                    }
-                });
-            }
-        });
-
-        return interfaces;
-    }
-
-    get interfacesEnabled() {
-        return this.interfacesAll.filter(iface => iface.enabled);
-    }
-
-    constructor(store: ApplicationStore) {
+    constructor(config: ConfigNetwork) {
+        this.config = config;
         this.host = new Host();
         makeAutoObservable(this, {
             interfacesAll: false,
@@ -342,11 +340,31 @@ export class Network {
             .doToggleListenerBlackholeUpdate()
             .doToggleListenerNetworkEvent()
             .doToggleListenerNetworkLog();
+    }
 
-        invoke<Blackholes>('api_hub_interfaces')
-            .then((data: any) => {
-                info(`???hub_interfaces_update: ${JSON.stringify(data)}`);
-            });
+
+    get interfacesAll() {
+        const interfaces: Array<{ name: string, enabled: boolean }> = [];
+        const ifaces = this.interfaces as any;
+
+        Object.keys(ifaces).forEach((key) => {
+            if (Array.isArray(ifaces[key])) {
+                ifaces[key].forEach((iface: any) => {
+                    if (iface.name) {
+                        interfaces.push({
+                            name: iface.name,
+                            enabled: iface.enabled !== false && iface.enabled !== 'false'
+                        });
+                    }
+                });
+            }
+        });
+
+        return interfaces;
+    }
+
+    get interfacesEnabled() {
+        return this.interfacesAll.filter(iface => iface.enabled);
     }
 
     clearLog() {
@@ -378,6 +396,8 @@ export class Network {
             }
         });
         this.updatePublicServers();
+
+        this?.config?.onNetworkInterfacesUpdated?.(this.interfaces);
         return this.interfaces;
     }
 

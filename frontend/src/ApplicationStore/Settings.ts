@@ -45,18 +45,21 @@
 // *   `alert` / `clone_warning`: Critical system warnings or notifications for the user.
 //
 import {invoke} from "@tauri-apps/api/core";
-import {makeAutoObservable} from "mobx";
+import {action, makeAutoObservable} from "mobx";
 import {info} from "@tauri-apps/plugin-log";
+import {Interfaces} from "./Network";
 
 export interface GeneralSettings {
     activity_identity_protection: boolean;
     channel_hosting_enabled: boolean;
     auto_announce_interval: number;
     haptics_enabled?: boolean;
+    desktop_notifications?: boolean;
     hide_known_spam_peers: boolean;
     public_channel_consent_required_version: number;
     public_channel_consent_version: number;
     text_scale_percent: number;
+    transport_mode?: "on" | "off" | "auto" | undefined;
     theme_family: string;
     theme_mode: string;
     lxmf_limit_1mb: boolean;
@@ -76,6 +79,10 @@ export interface HapticsSettings {
     enabled: boolean;
 }
 
+export interface AnnounceSettings {
+    enabled: boolean;
+}
+
 export interface VersionInfo {
     version: string;
     name: string;
@@ -85,26 +92,67 @@ export interface DeveloperMode {
     developer_mode: boolean
 }
 
+export interface TransportModeSettings {
+    configured_enabled: boolean;
+    enabled: boolean;
+    mode: "on" | "off" | "auto";
+    suppressed: boolean;
+}
+
 export class Settings {
+
+    public generalSettings: GeneralSettings | undefined;
+
     constructor() {
-        makeAutoObservable(this);
+
+        makeAutoObservable(this, {
+            setSettings: action,
+        });
+
+        this.getAppSettings()
+            .then((settings: GeneralSettings) => {
+                this.setSettings(settings);
+            });
+    }
+
+    setSettings(settings: GeneralSettings) {
+        const previous = this?.generalSettings || {};
+        this.generalSettings = {
+            ...previous,
+            ...settings
+        };
+    }
+
+    onNetworkInterfacesUpdated(interfaces: Interfaces) {
+        const previous = this?.generalSettings || {};
+
+        this.setSettings({
+            ...previous, ...{
+                transport_mode: interfaces.transport.mode
+            }
+        } as GeneralSettings);
     }
 
     async getAppSettings(): Promise<GeneralSettings> {
-        return new Promise((resolve: (value: GeneralSettings) => void, reject: (value: any) => void) => {
-            invoke<GeneralSettings>('api_app_settings')
-                .then((settings: GeneralSettings) => {
+        return new Promise(async (resolve: (value: GeneralSettings) => void, reject: (value: any) => void) => {
 
-                    this.getHapticsSettings()
-                        .then((haptics: HapticsSettings) => {
-                            resolve({
-                                ...settings, ...{
-                                    haptics_enabled: haptics.enabled
-                                }
-                            })
-                        }).catch(reject);
+            try {
 
-                }).catch(reject);
+                let settings: GeneralSettings = await invoke<GeneralSettings>('api_app_settings');
+
+                const hsettings: HapticsSettings = await this.getHapticsSettings();
+                const nsettings: NotificationSettings = await this.getNotificationSettings();
+
+                return resolve({
+                    ...settings, ...{
+                        haptics_enabled: hsettings.enabled,
+                        desktop_notifications: nsettings.enabled
+                    }
+                });
+
+            } catch (e) {
+                reject(e);
+            }
         });
     }
 
@@ -126,10 +174,20 @@ export class Settings {
         });
     }
 
+
     setHapticsSettings(enabled: boolean) {
         return new Promise((resolve: (value: HapticsSettings) => void, reject: (value: any) => void) => {
             try {
+
                 localStorage.setItem("rs-haptics-enabled", enabled ? '1' : '0');
+
+                const previous = this?.generalSettings || {};
+
+                this.setSettings({
+                    ...previous, ...{
+                        haptics_enabled: enabled
+                    }
+                } as GeneralSettings);
 
                 return resolve({
                     enabled: enabled
@@ -142,9 +200,9 @@ export class Settings {
     }
 
 
-    async getNotificationSettings(): Promise<any> {
-        return new Promise((resolve: (value: any) => void, reject: (value: any) => void) => {
-            invoke<any>('api_notification_settings')
+    async getNotificationSettings(): Promise<NotificationSettings> {
+        return new Promise((resolve: (value: NotificationSettings) => void, reject: (value: any) => void) => {
+            invoke<NotificationSettings>('api_notification_settings')
                 .then(resolve)
                 .catch(reject);
         });
@@ -153,13 +211,37 @@ export class Settings {
     async setDesktopNotifications(enabled: any): Promise<NotificationSettings> {
         return new Promise((resolve: (value: NotificationSettings) => void, reject: (value: any) => void) => {
             invoke<NotificationSettings>('set_desktop_notifications', {enabled})
-                .then(resolve)
-                .catch(reject);
+                .then((settings: NotificationSettings) => {
+                    const previous = this?.generalSettings || {};
+
+                    this.setSettings({
+                        ...previous, ...{
+                            desktop_notifications: settings.enabled
+                        }
+                    } as GeneralSettings);
+
+                    return resolve(settings);
+
+                }).catch(reject);
         });
     }
 
-    async setAnnounceRatspeakUsage(enabled: boolean): Promise<{ enabled: boolean }> {
-        return await invoke('set_announce_ratspeak_usage', {enabled});
+    async setAnnounceRatspeakUsage(enabled: boolean): Promise<AnnounceSettings> {
+        return new Promise((resolve: (value: NotificationSettings) => void, reject: (value: any) => void) => {
+            invoke<AnnounceSettings>('set_announce_ratspeak_usage', {enabled})
+                .then((settings: AnnounceSettings) => {
+                    const previous = this?.generalSettings || {};
+
+                    this.setSettings({
+                        ...previous, ...{
+                            announce_ratspeak_usage: settings.enabled
+                        }
+                    } as GeneralSettings);
+
+                    return resolve(settings);
+
+                }).catch(reject);
+        });
     }
 
     async setAutoAnnounce(interval: number): Promise<{ interval: number }> {
@@ -182,11 +264,51 @@ export class Settings {
         return await invoke('trigger_announce');
     }
 
+    setTransportMode(mode: string, network_type: string = "unknown") {
+        return new Promise((resolve: (value: TransportModeSettings) => void, reject: (value: any) => void) => {
+            invoke<TransportModeSettings>('set_transport_mode', {args: {mode: mode, network_type: network_type}})
+                .then((settings: TransportModeSettings) => {
+                    const previous = this?.generalSettings || {};
+
+                    // function currentNetworkType() {
+                    //     if (navigator.connection && navigator.connection.type) return navigator.connection.type;
+                    //     if (navigator.connection && navigator.connection.effectiveType) return navigator.connection.effectiveType;
+                    //     return 'unknown';
+                    // }
+
+
+                    this.setSettings({
+                        ...previous, ...{
+                            transport_mode: settings.mode
+                        }
+                    } as GeneralSettings);
+
+                    return resolve(settings);
+
+                }).catch(reject);
+        });
+    }
+
+    // return RS.invoke('set_transport_mode', {
+    //     args: { mode: mode, network_type: currentNetworkType() }
+    // }).then(function() {
+
+
     async setDeveloperMode(enabled: boolean): Promise<DeveloperMode> {
         return new Promise((resolve: (value: DeveloperMode) => void, reject: (value: any) => void) => {
             invoke<DeveloperMode>('set_developer_mode', {enabled})
-                .then(resolve)
-                .catch(reject);
+                .then((settings: DeveloperMode) => {
+                    const previous = this?.generalSettings || {};
+
+                    this.setSettings({
+                        ...previous, ...{
+                            developer_mode: settings.developer_mode
+                        }
+                    } as GeneralSettings);
+
+                    return resolve(settings);
+
+                }).catch(reject);
         });
     }
 

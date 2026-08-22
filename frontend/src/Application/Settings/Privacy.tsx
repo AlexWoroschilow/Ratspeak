@@ -1,19 +1,47 @@
 "use strict";
 import React from "react";
-import {Switcher} from "../components/Switcher";
+import {Switcher, SwitchFailed, SwitchSuccessful} from "../components/Switcher";
+import {inject, observer} from "mobx-react";
+import {HapticsSettings, Settings as SettingsStore} from "../../ApplicationStore/Settings";
+import {info} from "@tauri-apps/plugin-log";
 
 interface PrivacyProps {
+    settings?: SettingsStore | undefined;
 }
 
 interface PrivacyState {
 }
 
+@inject("settings")
+@observer
 export class Privacy extends React.Component<PrivacyProps, PrivacyState> {
     constructor(props: PrivacyProps) {
         super(props);
     }
 
+
+    onChangedAnnounce(enabled: string | number): Promise<SwitchSuccessful> {
+        const {settings} = this.props;
+
+        return new Promise((resolve: (value: SwitchSuccessful) => void, reject: (reason: SwitchFailed) => void) => {
+            settings?.setAnnounceRatspeakUsage?.(enabled == 1)
+                .then((settings: any) => {
+                    return resolve({
+                        message: `Successful!`
+                    } as SwitchSuccessful);
+                })
+                .catch((error: any) => {
+                    return reject({
+                        error: `Failed!`
+                    } as SwitchFailed);
+                });
+        });
+    }
+
     render() {
+
+        const {settings} = this.props;
+        const {generalSettings} = settings || {};
 
         return <>
             <section className="settings-detail-pane" aria-labelledby="settings-detail-title">
@@ -28,7 +56,7 @@ export class Privacy extends React.Component<PrivacyProps, PrivacyState> {
                                     <span className="settings-row-label">Announce Ratspeak usage</span>
                                     <span className="settings-row-desc">Let others know you support games, calls, and extra features.</span>
                                 </div>
-                                <Switcher/>
+                                <Switcher value={generalSettings?.announce_ratspeak_usage ? 1 : 0} onChanged={this.onChangedAnnounce.bind(this)}/>
                             </div>
                         </div>
                     </div>

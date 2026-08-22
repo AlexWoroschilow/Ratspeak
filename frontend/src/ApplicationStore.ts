@@ -1,7 +1,7 @@
 import {makeAutoObservable, observable} from "mobx";
 import {invoke} from '@tauri-apps/api/core';
 import {Peers} from "./ApplicationStore/Peers";
-import {Network} from "./ApplicationStore/Network";
+import {Interfaces, Network} from "./ApplicationStore/Network";
 import {Contacts} from "./ApplicationStore/Contacts";
 import {Identity} from "./ApplicationStore/Identity";
 import {Messages} from "./ApplicationStore/Messages";
@@ -81,23 +81,21 @@ export class ApplicationStore {
     public settings: Settings;
 
     constructor() {
-        this.network = new Network(this);
+        this.network = new Network({
+            onNetworkInterfacesUpdated: this.onNetworkInterfacesUpdated.bind(this),
+        });
+
+        this.settings = new Settings();
         this.peers = new Peers(this.network);
         this.contacts = new Contacts(this.peers);
         this.identity = new Identity();
         this.messages = new Messages();
-        this.settings = new Settings();
 
         makeAutoObservable(this);
+    }
 
-
-        // invoke?.('api_announces')
-        //     .then((data: any) => {
-        //         info(`api_announces (data): ${JSON.stringify(data)}\n`);
-        //     })
-        //     .catch((error: any) => {
-        //         info(`api_announces (error): ${JSON.stringify(error)}\n`);
-        //     });
+    onNetworkInterfacesUpdated(interfaces: Interfaces) {
+        this?.settings?.onNetworkInterfacesUpdated?.(interfaces);
     }
 
     /**

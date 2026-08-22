@@ -76,7 +76,7 @@ export class Peers {
     public collection: PeerCache = {};
     public statistic: Statistic = {} as Statistic;
 
-    constructor(store: Network) {
+    constructor(network: Network) {
 
         makeAutoObservable(this, {
             setCollectionItem: action,

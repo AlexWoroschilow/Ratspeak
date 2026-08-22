@@ -2,17 +2,13 @@
 import React from "react";
 import {Switcher, SwitchFailed, SwitchSuccessful} from "../components/Switcher";
 import {inject, observer} from "mobx-react";
-import {DeveloperMode, GeneralSettings, HapticsSettings, NotificationSettings, Settings as SettingsStore} from "../../ApplicationStore/Settings";
-import {info} from "@tauri-apps/plugin-log";
+import {DeveloperMode, HapticsSettings, NotificationSettings, Settings as SettingsStore} from "../../ApplicationStore/Settings";
 
 interface GeneralProps {
     settings?: SettingsStore | undefined;
 }
 
 interface GeneralState {
-    notifications?: number | undefined;
-    developer_mode?: number | undefined;
-    haptics_enabled?: number | undefined;
 }
 
 @inject("settings")
@@ -21,26 +17,7 @@ export class General extends React.Component<GeneralProps, GeneralState> {
     constructor(props: GeneralProps) {
         super(props);
 
-        this.state = {
-            notifications: undefined,
-            developer_mode: undefined,
-            haptics_enabled: undefined,
-        }
-    }
-
-    componentDidMount() {
-        const {settings} = this.props;
-
-        settings?.getAppSettings?.()?.then?.((settings: GeneralSettings) => {
-            this.setState({
-                developer_mode: settings?.developer_mode ? 1 : 0,
-                haptics_enabled: settings?.haptics_enabled ? 1 : 0,
-            });
-        });
-
-        settings?.getNotificationSettings?.()?.then?.((settings: NotificationSettings) => {
-            this.setState({notifications: settings?.enabled ? 1 : 0});
-        });
+        this.state = {}
     }
 
 
@@ -50,11 +27,14 @@ export class General extends React.Component<GeneralProps, GeneralState> {
         return new Promise((resolve: (value: SwitchSuccessful) => void, reject: (reason: SwitchFailed) => void) => {
             settings?.setDesktopNotifications?.(enabled == 1)
                 .then((settings: NotificationSettings) => {
-                    this.setState({notifications: settings.enabled ? 1 : 0});
-                    return resolve({message: `Successful!`} as SwitchSuccessful);
+                    return resolve({
+                        message: `Successful!`
+                    } as SwitchSuccessful);
                 })
                 .catch((error: any) => {
-                    return reject({error: `Failed!`} as SwitchFailed);
+                    return reject({
+                        error: `Failed!`
+                    } as SwitchFailed);
                 });
         });
     }
@@ -65,15 +45,14 @@ export class General extends React.Component<GeneralProps, GeneralState> {
         return new Promise((resolve: (value: SwitchSuccessful) => void, reject: (reason: SwitchFailed) => void) => {
             settings?.setDeveloperMode?.(enabled == 1)
                 .then((settings: DeveloperMode) => {
-
-                    this.setState({
-                        developer_mode: settings.developer_mode ? 1 : 0
-                    });
-
-                    return resolve({message: `Successful!`} as SwitchSuccessful);
+                    return resolve({
+                        message: `Successful!`
+                    } as SwitchSuccessful);
                 })
                 .catch((error: any) => {
-                    return reject({error: `Failed!`} as SwitchFailed);
+                    return reject({
+                        error: `Failed!`
+                    } as SwitchFailed);
                 });
         });
     }
@@ -84,22 +63,24 @@ export class General extends React.Component<GeneralProps, GeneralState> {
         return new Promise((resolve: (value: SwitchSuccessful) => void, reject: (reason: SwitchFailed) => void) => {
             settings?.setHapticsSettings?.(enabled == 1)
                 .then((settings: HapticsSettings) => {
-
-                    this.setState({
-                        haptics_enabled: settings.enabled ? 1 : 0
-                    });
-
-                    return resolve({message: `Successful!`} as SwitchSuccessful);
+                    return resolve({
+                        message: `Successful!`
+                    } as SwitchSuccessful);
                 })
                 .catch((error: any) => {
-                    return reject({error: `Failed!`} as SwitchFailed);
+                    return reject({
+                        error: `Failed!`
+                    } as SwitchFailed);
                 });
         });
     }
 
 
     render() {
-        let {notifications, developer_mode, haptics_enabled} = this.state;
+
+        const {settings} = this.props;
+        const {generalSettings} = settings || {};
+
 
         return <>
             <section className="settings-detail-pane" aria-labelledby="settings-detail-title">
@@ -145,21 +126,21 @@ export class General extends React.Component<GeneralProps, GeneralState> {
                                     <span className="settings-row-label">Vibration</span>
                                     <span className="settings-row-desc">Enable haptic feedback for taps and gestures</span>
                                 </div>
-                                <Switcher value={haptics_enabled} onChanged={this.onChangedHaptics.bind(this)}/>
+                                <Switcher value={generalSettings?.haptics_enabled ? 1 : 0} onChanged={this.onChangedHaptics.bind(this)}/>
                             </div>
                             <div className="settings-row" id="settings-row-notifications">
                                 <div className="settings-row-info">
                                     <span className="settings-row-label">Desktop Notifications</span>
                                     <span className="settings-row-desc">Show a system notification when a new message arrives while Ratspeak is in the background</span>
                                 </div>
-                                <Switcher value={notifications} onChanged={this.onChangedDesktopNotification.bind(this)}/>
+                                <Switcher value={generalSettings?.desktop_notifications ? 1 : 0} onChanged={this.onChangedDesktopNotification.bind(this)}/>
                             </div>
                             <div className="settings-row">
                                 <div className="settings-row-info">
                                     <span className="settings-row-label">Developer Mode</span>
                                     <span className="settings-row-desc">Show advanced developer settings when available.</span>
                                 </div>
-                                <Switcher value={developer_mode} onChanged={this.onChangedDeveloperMode.bind(this)}/>
+                                <Switcher value={generalSettings?.developer_mode ? 1 : 0} onChanged={this.onChangedDeveloperMode.bind(this)}/>
 
                             </div>
                             <div className="settings-row">
