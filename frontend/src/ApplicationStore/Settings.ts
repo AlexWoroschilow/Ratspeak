@@ -289,11 +289,6 @@ export class Settings {
         });
     }
 
-    // return RS.invoke('set_transport_mode', {
-    //     args: { mode: mode, network_type: currentNetworkType() }
-    // }).then(function() {
-
-
     async setDeveloperMode(enabled: boolean): Promise<DeveloperMode> {
         return new Promise((resolve: (value: DeveloperMode) => void, reject: (value: any) => void) => {
             invoke<DeveloperMode>('set_developer_mode', {enabled})

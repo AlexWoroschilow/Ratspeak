@@ -39,7 +39,6 @@ export class Privacy extends React.Component<PrivacyProps, PrivacyState> {
     }
 
     render() {
-
         const {settings} = this.props;
         const {generalSettings} = settings || {};
 
