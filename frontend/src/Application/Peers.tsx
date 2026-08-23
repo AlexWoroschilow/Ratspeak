@@ -29,7 +29,7 @@ interface PeersState {
 
 @inject("peers")
 @observer
-export default class Peers extends React.PureComponent<PeersProps, PeersState> {
+export class Peers extends React.PureComponent<PeersProps, PeersState> {
     constructor(props: PeersProps) {
         super(props);
 

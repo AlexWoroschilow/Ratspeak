@@ -1,6 +1,6 @@
 "use strict";
 import React from "react";
-import {Provider} from "mobx-react";
+import {inject, observer, Provider} from "mobx-react";
 
 import {Layout} from "./Application/Layout";
 import {HashRouter, Route, Routes} from "react-router-dom";
@@ -18,6 +18,7 @@ import {NetworkLocal} from "./Application/NetworkLocal";
 import {NetworkRadio} from "./Application/NetworkRadio";
 import {NetworkHost} from "./Application/NetworkHost";
 import {Setup} from "./Application/Setup";
+import {Peers} from "./Application/Peers";
 import {
     contacts,
     identity,
@@ -31,17 +32,17 @@ import {
 import "./Application.scss";
 import {NetworkActivity} from "./Application/NetworkActivity";
 import {IdentityShare} from "./Application/IdentityShare";
+import {Settings as SettingsStore} from "./ApplicationStore/Settings";
 
-const Peers = React.lazy(() => import("./Application/Peers"));
 
 interface ApplicationProps {
+    settings?: SettingsStore | undefined;
 }
 
 interface ApplicationState {
     isSetupRequired?: boolean;
     error?: string;
 }
-
 
 export class Application extends React.Component<ApplicationProps, ApplicationState> {
 
@@ -101,15 +102,11 @@ export class Application extends React.Component<ApplicationProps, ApplicationSt
                             <Route path="contacts" element={<Contacts/>}/>
                             <Route path="identity" element={<Identity/>}/>
                             <Route path="identity" element={<Identity/>}/>
+                            <Route path="peers" element={<Peers/>}/>
                             <Route path="identity-import" element={<IdentityImport/>}/>
                             <Route path="identity-create" element={<IdentityCreate/>}/>
                             <Route path="identity-hardware" element={<IdentityHardware/>}/>
                             <Route path="identity-share/:hash" element={<IdentityShare/>}/>
-                            <Route path="peers" element={
-                                <React.Suspense fallback={<div className="peers-row-loading">Loading...</div>}>
-                                    <Peers/>
-                                </React.Suspense>
-                            }/>
                             <Route path="network-interfaces" element={<Network/>}/>
                             <Route path="network-activity" element={<NetworkActivity/>}/>
                             <Route path="network-internet" element={<NetworkInternet/>}/>

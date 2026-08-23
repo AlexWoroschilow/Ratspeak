@@ -9,8 +9,11 @@ import {PiGearSix} from "react-icons/pi";
 import {CiGlobe} from "react-icons/ci";
 import {LuMessageSquare, LuUsers} from "react-icons/lu";
 import {Teaser} from "./Identity/Teaser";
+import {inject, observer} from "mobx-react";
+import {Settings as SettingsStore} from "../ApplicationStore/Settings";
 
 interface LayoutProps {
+    settings?: SettingsStore | undefined;
     children?: React.ReactNode;
 }
 
@@ -18,7 +21,8 @@ interface LayoutState {
     location: string;
 }
 
-
+@inject("settings")
+@observer
 export class Layout extends React.Component<LayoutProps, LayoutState> {
     protected onUpdatedLocationRef?: EventListenerOrEventListenerObject | undefined;
 
@@ -54,6 +58,8 @@ export class Layout extends React.Component<LayoutProps, LayoutState> {
 
 
     render() {
+        const {settings} = this.props;
+        const {generalSettings} = settings || {};
 
         return <>
 
@@ -78,10 +84,12 @@ export class Layout extends React.Component<LayoutProps, LayoutState> {
                         <IoGitNetworkOutline size={20}/>
                         <span className="nav-label">Network</span>
                     </a>
-                    <a className={`nav-item ${this.isActive('#network-activity') && 'active'}`} href="#network-activity" title="Activity">
-                        <FiActivity size={20}/>
-                        <span className="nav-label">Activity</span>
-                    </a>
+                    {generalSettings?.developer_mode && <>
+                        <a className={`nav-item ${this.isActive('#network-activity') && 'active'}`} href="#network-activity" title="Activity">
+                            <FiActivity size={20}/>
+                            <span className="nav-label">Activity</span>
+                        </a>
+                    </>}
                     <a className={`nav-item ${this.isActive('#identity') && 'active'}`} href="#identity" title="Identity">
                         <IoKeyOutline size={20}/>
                         <span className="nav-label">Identities</span>
