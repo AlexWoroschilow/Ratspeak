@@ -41,7 +41,7 @@ export class Network extends React.Component<NetworkProps, PrivacyNetwork> {
     render() {
 
         const {settings} = this.props;
-        const {generalSettings} = settings || {};
+        const {general} = settings || {};
 
 
         return <>
@@ -56,7 +56,7 @@ export class Network extends React.Component<NetworkProps, PrivacyNetwork> {
                                     <span className="settings-row-desc">Relay packets for other nodes on the network</span>
                                 </div>
 
-                                <Switcher value={generalSettings?.transport_mode} states={[
+                                <Switcher value={general?.transport_mode} states={[
                                     {name: 'AUTO', value: 'auto'},
                                     {name: 'ON', value: 'on'},
                                     {name: 'OFF', value: 'off'}

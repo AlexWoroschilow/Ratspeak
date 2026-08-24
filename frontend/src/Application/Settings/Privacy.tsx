@@ -40,7 +40,7 @@ export class Privacy extends React.Component<PrivacyProps, PrivacyState> {
 
     render() {
         const {settings} = this.props;
-        const {generalSettings} = settings || {};
+        const {general} = settings || {};
 
         return <>
             <section className="settings-detail-pane" aria-labelledby="settings-detail-title">
@@ -55,7 +55,7 @@ export class Privacy extends React.Component<PrivacyProps, PrivacyState> {
                                     <span className="settings-row-label">Announce Ratspeak usage</span>
                                     <span className="settings-row-desc">Let others know you support games, calls, and extra features.</span>
                                 </div>
-                                <Switcher value={generalSettings?.announce_ratspeak_usage ? 1 : 0} onChanged={this.onChangedAnnounce.bind(this)}/>
+                                <Switcher value={general?.announce_ratspeak_usage ? 1 : 0} onChanged={this.onChangedAnnounce.bind(this)}/>
                             </div>
                         </div>
                     </div>

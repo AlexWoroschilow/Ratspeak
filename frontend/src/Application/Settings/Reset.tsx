@@ -83,7 +83,6 @@ export class Reset extends React.Component<ResetProps, ResetState> {
     }
 
     render() {
-        const {settings} = this.props;
 
         return <>
             <section className="settings-detail-pane" aria-labelledby="settings-detail-title">

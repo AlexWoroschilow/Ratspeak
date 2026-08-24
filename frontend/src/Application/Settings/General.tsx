@@ -79,7 +79,7 @@ export class General extends React.Component<GeneralProps, GeneralState> {
     render() {
 
         const {settings} = this.props;
-        const {generalSettings} = settings || {};
+        const {general} = settings || {};
 
 
         return <>
@@ -126,21 +126,21 @@ export class General extends React.Component<GeneralProps, GeneralState> {
                                     <span className="settings-row-label">Vibration</span>
                                     <span className="settings-row-desc">Enable haptic feedback for taps and gestures</span>
                                 </div>
-                                <Switcher value={generalSettings?.haptics_enabled ? 1 : 0} onChanged={this.onChangedHaptics.bind(this)}/>
+                                <Switcher value={general?.haptics_enabled ? 1 : 0} onChanged={this.onChangedHaptics.bind(this)}/>
                             </div>
                             <div className="settings-row" id="settings-row-notifications">
                                 <div className="settings-row-info">
                                     <span className="settings-row-label">Desktop Notifications</span>
                                     <span className="settings-row-desc">Show a system notification when a new message arrives while Ratspeak is in the background</span>
                                 </div>
-                                <Switcher value={generalSettings?.desktop_notifications ? 1 : 0} onChanged={this.onChangedDesktopNotification.bind(this)}/>
+                                <Switcher value={general?.desktop_notifications ? 1 : 0} onChanged={this.onChangedDesktopNotification.bind(this)}/>
                             </div>
                             <div className="settings-row">
                                 <div className="settings-row-info">
                                     <span className="settings-row-label">Developer Mode</span>
                                     <span className="settings-row-desc">Show advanced developer settings when available.</span>
                                 </div>
-                                <Switcher value={generalSettings?.developer_mode ? 1 : 0} onChanged={this.onChangedDeveloperMode.bind(this)}/>
+                                <Switcher value={general?.developer_mode ? 1 : 0} onChanged={this.onChangedDeveloperMode.bind(this)}/>
 
                             </div>
                             <div className="settings-row">

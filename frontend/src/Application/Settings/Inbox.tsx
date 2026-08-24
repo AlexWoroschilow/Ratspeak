@@ -3,6 +3,7 @@ import React from "react";
 import {Switcher} from "../components/Switcher";
 import {Settings as SettingsStore} from "../../ApplicationStore/Settings";
 import {inject, observer} from "mobx-react";
+import {info} from "@tauri-apps/plugin-log";
 
 interface InboxProps {
     settings?: SettingsStore | undefined;
@@ -20,7 +21,12 @@ export class Inbox extends React.Component<InboxProps, InboxState> {
 
     render() {
         const {settings} = this.props;
-        const {generalSettings} = settings || {};
+
+        settings?.getInboxSettings?.()?.then?.((data) => {
+            info(`${JSON.stringify(data)}`);
+        });
+
+        const {inbox} = settings || {};
 
         return <>
             <section className="settings-detail-pane" aria-labelledby="settings-detail-title">
@@ -45,7 +51,7 @@ export class Inbox extends React.Component<InboxProps, InboxState> {
                                     <div className="settings-row-info">
                                         <span className="settings-row-desc">When contacts can't reach you directly, your Offline Inbox stores their messages until you come back online.</span>
                                     </div>
-                                    <Switcher states={[
+                                    <Switcher value={inbox?.mode} states={[
                                         {value: "on", name: "On"},
                                         {value: "auto", name: "Auto", isDefault: true},
                                         {value: "off", name: "Off"},
@@ -56,7 +62,7 @@ export class Inbox extends React.Component<InboxProps, InboxState> {
                                     <div className="settings-row-info">
                                         <span className="settings-row-label">Favor Ratspeak inbox nodes</span><span className="settings-row-desc">Prefer reachable Ratspeak inbox nodes, with fallback when none can be reached.</span>
                                     </div>
-                                    <Switcher/>
+                                    <Switcher value={inbox?.favor_static ? 1 : 0}/>
                                 </label>
 
                                 <div className="relay-card relay-card-empty">
@@ -69,7 +75,7 @@ export class Inbox extends React.Component<InboxProps, InboxState> {
                                             <span className="settings-row-label">Host inbox node</span>
                                             <span className="settings-row-desc">Store offline LXMF messages for other people using this device.</span>
                                         </div>
-                                        <Switcher/>
+                                        <Switcher value={inbox?.hosting_enabled ? 1 : 0}/>
                                     </div>
                                 </div>
                                 <details className="relay-advanced-block relay-details">
@@ -78,13 +84,13 @@ export class Inbox extends React.Component<InboxProps, InboxState> {
                                         <div className="settings-row-info"><span className="settings-row-label">Require stamps</span>
                                             <span className="settings-row-desc">Advertise and require proof-of-work on messages sent directly to you.</span>
                                         </div>
-                                        <Switcher/>
+                                        <Switcher value={inbox?.enforce_stamps ? 1 : 0}/>
                                     </div>
                                     <div className="settings-row propagation-settings-row" style={{borderBottom: "none"}}>
                                         <div className="settings-row-info">
                                             <span className="settings-row-label">Required work</span><span className="settings-row-desc">Higher values make spam harder but slow down senders.</span>
                                         </div>
-                                        <Switcher/>
+                                        <Switcher value={inbox?.required_stamp_cost ? 1 : 0}/>
                                     </div>
                                 </details>
                             </div>

@@ -99,13 +99,40 @@ export interface TransportModeSettings {
     suppressed: boolean;
 }
 
+export interface InboxSettings {
+    auto_active_node: boolean | null;
+    awaiting_discovery: boolean | null;
+    client_state: string;
+    connected: boolean;
+    enabled: boolean;
+    enforce_stamps: boolean;
+    favor_static: boolean;
+    hosting_enabled: boolean;
+    local_node_hash: string;
+    local_node_message_count: number;
+    local_node_stamp_cost: number;
+    message_count: number;
+    mode: string;
+    node_hash: string | null;
+    pn_parse_failures: number;
+    propagation_node: string | null;
+    required_stamp_cost: number;
+    static_nodes_known: number;
+    sync_state: string;
+    transfer_progress: number | null;
+    transfer_result: string | null;
+    transfer_size: number | null;
+}
+
 export class Settings {
 
-    public generalSettings: GeneralSettings | undefined;
+    public general: GeneralSettings | undefined;
+    public inbox: InboxSettings | undefined;
 
     constructor() {
 
         makeAutoObservable(this, {
+            setSettingsInbox: action,
             setSettings: action,
         });
 
@@ -113,18 +140,31 @@ export class Settings {
             .then((settings: GeneralSettings) => {
                 this.setSettings(settings);
             });
+
+        this.getInboxSettings()
+            .then((settings: InboxSettings) => {
+                this.setSettingsInbox(settings);
+            })
     }
 
     setSettings(settings: GeneralSettings) {
-        const previous = this?.generalSettings || {};
-        this.generalSettings = {
+        const previous = this?.general || {};
+        this.general = {
+            ...previous,
+            ...settings
+        };
+    }
+
+    setSettingsInbox(settings: InboxSettings) {
+        const previous = this?.inbox || {};
+        this.inbox = {
             ...previous,
             ...settings
         };
     }
 
     onNetworkInterfacesUpdated(interfaces: Interfaces) {
-        const previous = this?.generalSettings || {};
+        const previous = this?.general || {};
 
         this.setSettings({
             ...previous, ...{
@@ -181,7 +221,7 @@ export class Settings {
 
                 localStorage.setItem("rs-haptics-enabled", enabled ? '1' : '0');
 
-                const previous = this?.generalSettings || {};
+                const previous = this?.general || {};
 
                 this.setSettings({
                     ...previous, ...{
@@ -212,7 +252,7 @@ export class Settings {
         return new Promise((resolve: (value: NotificationSettings) => void, reject: (value: any) => void) => {
             invoke<NotificationSettings>('set_desktop_notifications', {enabled})
                 .then((settings: NotificationSettings) => {
-                    const previous = this?.generalSettings || {};
+                    const previous = this?.general || {};
 
                     this.setSettings({
                         ...previous, ...{
@@ -230,7 +270,7 @@ export class Settings {
         return new Promise((resolve: (value: NotificationSettings) => void, reject: (value: any) => void) => {
             invoke<AnnounceSettings>('set_announce_ratspeak_usage', {enabled})
                 .then((settings: AnnounceSettings) => {
-                    const previous = this?.generalSettings || {};
+                    const previous = this?.general || {};
 
                     this.setSettings({
                         ...previous, ...{
@@ -243,6 +283,27 @@ export class Settings {
                 }).catch(reject);
         });
     }
+
+    async getInboxSettings(): Promise<InboxSettings> {
+        return new Promise((resolve: (value: InboxSettings) => void, reject: (value: any) => void) => {
+            invoke<InboxSettings>('api_propagation')
+                .then((settings: InboxSettings) => {
+                    return resolve(settings);
+                }).catch(reject);
+        });
+    }
+
+    // RS.invoke('set_propagation_mode', args).catch(function(err) {
+    //     showToast('Could not change Offline Inbox mode: ' + (err && err.message ? err.message : 'Unknown'),
+    //         'toast-red', 4000);
+    //     RS.invoke('api_propagation').then(function(data) {
+    //         propagationStatus = data || propagationStatus;
+    //         renderPropagationStatus();
+    //     }).catch(function() {
+    //         renderPropagationStatus();
+    //     });
+    // });
+
 
     async setAutoAnnounce(interval: number): Promise<{ interval: number }> {
         return await invoke('set_auto_announce', {interval});
@@ -268,14 +329,13 @@ export class Settings {
         return new Promise((resolve: (value: TransportModeSettings) => void, reject: (value: any) => void) => {
             invoke<TransportModeSettings>('set_transport_mode', {args: {mode: mode, network_type: network_type}})
                 .then((settings: TransportModeSettings) => {
-                    const previous = this?.generalSettings || {};
+                    const previous = this?.general || {};
 
                     // function currentNetworkType() {
                     //     if (navigator.connection && navigator.connection.type) return navigator.connection.type;
                     //     if (navigator.connection && navigator.connection.effectiveType) return navigator.connection.effectiveType;
                     //     return 'unknown';
                     // }
-
 
                     this.setSettings({
                         ...previous, ...{
@@ -293,7 +353,7 @@ export class Settings {
         return new Promise((resolve: (value: DeveloperMode) => void, reject: (value: any) => void) => {
             invoke<DeveloperMode>('set_developer_mode', {enabled})
                 .then((settings: DeveloperMode) => {
-                    const previous = this?.generalSettings || {};
+                    const previous = this?.general || {};
 
                     this.setSettings({
                         ...previous, ...{

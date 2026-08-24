@@ -59,7 +59,7 @@ export class Layout extends React.Component<LayoutProps, LayoutState> {
 
     render() {
         const {settings} = this.props;
-        const {generalSettings} = settings || {};
+        const {general} = settings || {};
 
         return <>
 
@@ -84,7 +84,7 @@ export class Layout extends React.Component<LayoutProps, LayoutState> {
                         <IoGitNetworkOutline size={20}/>
                         <span className="nav-label">Network</span>
                     </a>
-                    {generalSettings?.developer_mode && <>
+                    {general?.developer_mode && <>
                         <a className={`nav-item ${this.isActive('#network-activity') && 'active'}`} href="#network-activity" title="Activity">
                             <FiActivity size={20}/>
                             <span className="nav-label">Activity</span>
