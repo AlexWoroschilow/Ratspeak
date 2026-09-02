@@ -143,12 +143,13 @@ export class Inbox extends React.Component<InboxProps, InboxState> {
 
                                 {!inbox?.connected &&
                                     <span className="settings-relay-badge">
-                                    Not connected
+                                        {inbox?.mode != "off" && "Finding inbox..."}
+                                        {inbox?.mode == "off" && "Off"}
                                 </span>}
 
                                 {inbox?.connected &&
-                                    <span className="settings-relay-badge">
-                                    Not connected
+                                    <span className="settings-relay-badge connected">
+                                        {inbox?.mode == "auto" && "Auto: ready"}
                                 </span>}
 
 
