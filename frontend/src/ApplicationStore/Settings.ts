@@ -284,6 +284,31 @@ export class Settings {
         });
     }
 
+
+    async setHostingEnabled(enabled: boolean): Promise<InboxSettings> {
+        return new Promise((resolve: (value: any) => void, reject: (value: any) => void) => {
+            invoke<InboxSettings>('set_propagation_hosting', {
+                args: {enabled: enabled, stamp_cost: this.inbox?.local_node_stamp_cost || 0}
+            }).then((settings: InboxSettings) => {
+                this.setSettingsInbox(settings);
+                return resolve(this.inbox);
+            }).catch(reject);
+        });
+    }
+
+
+    async setHostingStampSettings(enforce: boolean, required_cost: number): Promise<any> {
+        return new Promise((resolve: (value: any) => void, reject: (value: any) => void) => {
+            invoke<InboxSettings>('set_stamp_settings', {
+                args: {enforce: enforce, required_cost: required_cost}
+            }).then((settings: InboxSettings) => {
+                this.setSettingsInbox(settings);
+                return resolve(this.inbox);
+            }).catch(reject);
+        });
+    }
+
+
     async getInboxSettings(): Promise<InboxSettings> {
         return new Promise((resolve: (value: InboxSettings) => void, reject: (value: any) => void) => {
             invoke<InboxSettings>('api_propagation')
@@ -293,16 +318,17 @@ export class Settings {
         });
     }
 
-    // RS.invoke('set_propagation_mode', args).catch(function(err) {
-    //     showToast('Could not change Offline Inbox mode: ' + (err && err.message ? err.message : 'Unknown'),
-    //         'toast-red', 4000);
-    //     RS.invoke('api_propagation').then(function(data) {
-    //         propagationStatus = data || propagationStatus;
-    //         renderPropagationStatus();
-    //     }).catch(function() {
-    //         renderPropagationStatus();
-    //     });
-    // });
+
+    async setInboxSettings(mode: string, favorStatic: boolean): Promise<any> {
+        return new Promise((resolve: (value: any) => void, reject: (value: any) => void) => {
+            invoke<InboxSettings>('set_propagation_mode', {
+                mode: mode, favorStatic: favorStatic
+            }).then((settings: InboxSettings) => {
+                this.setSettingsInbox(settings);
+                return resolve(this.inbox);
+            }).catch(reject);
+        });
+    }
 
 
     async setAutoAnnounce(interval: number): Promise<{ interval: number }> {
@@ -330,12 +356,6 @@ export class Settings {
             invoke<TransportModeSettings>('set_transport_mode', {args: {mode: mode, network_type: network_type}})
                 .then((settings: TransportModeSettings) => {
                     const previous = this?.general || {};
-
-                    // function currentNetworkType() {
-                    //     if (navigator.connection && navigator.connection.type) return navigator.connection.type;
-                    //     if (navigator.connection && navigator.connection.effectiveType) return navigator.connection.effectiveType;
-                    //     return 'unknown';
-                    // }
 
                     this.setSettings({
                         ...previous, ...{

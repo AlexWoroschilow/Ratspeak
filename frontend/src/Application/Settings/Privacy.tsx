@@ -20,11 +20,30 @@ export class Privacy extends React.Component<PrivacyProps, PrivacyState> {
     }
 
 
+    onChangedHosting(enabled: string | number): Promise<SwitchSuccessful> {
+        const {settings} = this.props;
+
+        return new Promise((resolve: (value: SwitchSuccessful) => void, reject: (reason: SwitchFailed) => void) => {
+            settings?.setHostingEnabled?.(enabled == 1)
+                .then((settings: any) => {
+                    return resolve({
+                        message: `Successful!`
+                    } as SwitchSuccessful);
+                })
+                .catch((error: any) => {
+                    return reject({
+                        error: `Failed!`
+                    } as SwitchFailed);
+                });
+        });
+    }
+
+
     onChangedAnnounce(enabled: string | number): Promise<SwitchSuccessful> {
         const {settings} = this.props;
 
         return new Promise((resolve: (value: SwitchSuccessful) => void, reject: (reason: SwitchFailed) => void) => {
-            settings?.setAnnounceRatspeakUsage?.(enabled == 1)
+            settings?.setHostingStampSettings?.(enabled == 1)
                 .then((settings: any) => {
                     return resolve({
                         message: `Successful!`
