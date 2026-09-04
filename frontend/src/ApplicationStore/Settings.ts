@@ -124,6 +124,26 @@ export interface InboxSettings {
     transfer_size: number | null;
 }
 
+export interface InboxNode {
+    backoff_until: any;
+    display_name: string;
+    failure_count: number;
+    hash: string;
+    hops: number;
+    last_failure_reason: any;
+    last_path_success: number;
+    last_seen: number;
+    last_success: number;
+    node_state: string;
+    path_status: string;
+    priority: any;
+    region: any;
+    role: any;
+    stamp_cost: number;
+    static: boolean;
+    transfer_limit_kb: number;
+}
+
 export class Settings {
 
     public general: GeneralSettings | undefined;
@@ -315,6 +335,15 @@ export class Settings {
                 .then((settings: InboxSettings) => {
                     return resolve(settings);
                 }).catch(reject);
+        });
+    }
+
+
+    async getInboxNodes(): Promise<InboxNode[]> {
+        return new Promise((resolve: (value: InboxNode[]) => void, reject: (value: any) => void) => {
+            invoke<InboxNode[]>('api_propagation_nodes')
+                .then(resolve)
+                .catch(reject);
         });
     }
 

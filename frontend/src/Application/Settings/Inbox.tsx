@@ -1,16 +1,18 @@
 "use strict";
 import React from "react";
 import {Switcher, SwitchFailed, SwitchSuccessful} from "../components/Switcher";
-import {InboxSettings, Settings as SettingsStore} from "../../ApplicationStore/Settings";
+import {InboxNode, InboxSettings, Settings as SettingsStore} from "../../ApplicationStore/Settings";
 import {inject, observer} from "mobx-react";
 import {info} from "@tauri-apps/plugin-log";
 import {IoMdAdd} from "react-icons/io";
+import "./Inbox.scss";
 
 interface InboxProps {
     settings?: SettingsStore | undefined;
 }
 
 interface InboxState {
+    nodes: Array<InboxNode> | undefined;
 }
 
 @inject("settings")
@@ -19,8 +21,20 @@ export class Inbox extends React.Component<InboxProps, InboxState> {
     constructor(props: InboxProps) {
         super(props);
 
-        this.state = {}
+        this.state = {
+            nodes: undefined
+        }
     }
+
+
+    componentDidMount() {
+        const {settings} = this.props;
+
+        settings?.getInboxNodes?.()?.then?.((nodes) => {
+            this.setState({nodes: nodes});
+        });
+    }
+
 
     onChangedInboxMode(mode: string | number): Promise<SwitchSuccessful> {
         const {settings} = this.props;
@@ -48,25 +62,6 @@ export class Inbox extends React.Component<InboxProps, InboxState> {
 
         return new Promise((resolve: (value: SwitchSuccessful) => void, reject: (reason: SwitchFailed) => void) => {
             settings?.setInboxSettings?.(inbox?.mode || "off", favorStatic == 1)
-                .then((data: InboxSettings) => {
-                    return resolve({
-                        message: `Successful!`
-                    } as SwitchSuccessful);
-                })
-                .catch((error: any) => {
-                    return reject({
-                        error: `Failed!`
-                    } as SwitchFailed);
-                });
-        });
-    }
-
-
-    onChangedHosting(enabled: string | number): Promise<SwitchSuccessful> {
-        const {settings} = this.props;
-
-        return new Promise((resolve: (value: SwitchSuccessful) => void, reject: (reason: SwitchFailed) => void) => {
-            settings?.setHostingEnabled?.(enabled == 1)
                 .then((data: InboxSettings) => {
                     return resolve({
                         message: `Successful!`
@@ -125,7 +120,7 @@ export class Inbox extends React.Component<InboxProps, InboxState> {
         const {inbox} = settings || {};
 
         return <>
-            <section className="settings-detail-pane" aria-labelledby="settings-detail-title">
+            <section className="Inbox settings-detail-pane" aria-labelledby="settings-detail-title">
                 <div className="settings-page-inner settings-detail-panels">
 
 
@@ -137,8 +132,8 @@ export class Inbox extends React.Component<InboxProps, InboxState> {
 
                             <label className="settings-row">
                                 <div className="settings-row-info">
-                                    <span
-                                        className="settings-row-desc">When contacts can't reach you directly, your Offline Inbox stores their messages until you come back online.</span>
+                                    <span className="settings-row-label">Offline Inbox</span>
+                                    <span className="settings-row-desc">Store messages on an Offline Inbox when you're away</span>
                                 </div>
                                 <Switcher value={inbox?.mode} states={[
                                     {value: "manual", name: "On"},
@@ -147,22 +142,55 @@ export class Inbox extends React.Component<InboxProps, InboxState> {
                                 ]} onChanged={this.onChangedInboxMode.bind(this)}/>
                             </label>
 
+                            {inbox?.mode == "manual" && <>
+                                <div className="relay-node-list">
+                                    {this.state.nodes?.map((node: InboxNode) => (
+                                        <div className="relay-node-row">
+                                            {node.static && <>
+                                                <span className="relay-static-badge" title="Bundled Ratspeak inbox node">★</span>
+                                            </>}
+
+                                            {/*<span className="text-muted-color text-xs">tracked</span>*/}
+                                            <span className="relay-node-name">{node.display_name}</span>
+                                            <span className="relay-node-hops">{node.hops} hops</span>
+
+                                            {node.hash == inbox.node_hash && <>
+                                                <span className="relay-node-badge">Active</span>
+                                            </>}
+
+                                            {node.hash != inbox.node_hash && <>
+                                                <button className="nr-btn nr-btn-xs relay-select-btn">
+                                                    Select
+                                                </button>
+                                            </>}
+
+                                        </div>
+                                    ))}
+                                </div>
+                            </>}
+
+
                             <div className="settings-row">
                                 <div className="settings-row-info">
-                                    <span className="settings-row-label">Offline Inbox</span>
-                                    <span className="settings-row-desc">Store messages on an Offline Inbox when you're away</span>
+                                    <span className="settings-row-label">Inbox Node</span>
+                                    <span className="settings-row-desc">{inbox?.auto_active_node}</span>
+                                    <span className="settings-row-desc">Messages: {inbox?.message_count}</span>
+                                </div>
+                                <div className="settings-row-desc">
+                                    <button className="nr-btn nr-btn-sm">Check Now</button> &nbsp;
+                                    <button className="nr-btn nr-btn-sm">Dsconnect</button>
                                 </div>
 
-                                {!inbox?.connected &&
-                                    <span className="settings-relay-badge">
-                                        {inbox?.mode != "off" && "Finding inbox..."}
-                                        {inbox?.mode == "off" && "Off"}
-                                </span>}
+                                {/*{!inbox?.connected &&*/}
+                                {/*    <span className="settings-relay-badge">*/}
+                                {/*        {inbox?.mode != "off" && "Finding inbox..."}*/}
+                                {/*        {inbox?.mode == "off" && "Off"}*/}
+                                {/*</span>}*/}
 
-                                {inbox?.connected &&
-                                    <span className="settings-relay-badge connected">
-                                        {inbox?.mode == "auto" && "Auto: ready"}
-                                </span>}
+                                {/*{inbox?.connected &&*/}
+                                {/*    <span className="settings-relay-badge connected">*/}
+                                {/*        {inbox?.mode == "auto" && "Auto: ready"}*/}
+                                {/*</span>}*/}
                             </div>
 
                             <label className="settings-row">
@@ -171,15 +199,6 @@ export class Inbox extends React.Component<InboxProps, InboxState> {
                                 </div>
                                 <Switcher value={inbox?.favor_static ? 1 : 0} onChanged={this.onChangedInboxFavorStatic.bind(this)}/>
                             </label>
-
-                            <div id="settings-propagation-status">
-
-
-                                <div className="relay-card relay-card-empty">
-                                    <div className="inline-hint">Looking for a reachable Offline Inbox…</div>
-                                </div>
-                            </div>
-
 
                             <div className="settings-row propagation-settings-row">
                                 <div className="settings-row-info"><span className="settings-row-label">Require stamps</span>
