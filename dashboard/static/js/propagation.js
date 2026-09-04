@@ -386,8 +386,8 @@ function wireUpHandlers(container, mode) {
     var hostAnnounceBtn = document.getElementById('prop-host-announce-btn');
     if (hostAnnounceBtn) {
         hostAnnounceBtn.addEventListener('click', function() {
-            RS.invoke('trigger_announce').catch(function() {});
-            showToast('Offline Inbox announce queued', 'toast-blue', 2500);
+            // All manual announce surfaces share the pre-IPC pending guard.
+            if (typeof tryTriggerAnnounce === 'function') tryTriggerAnnounce();
         });
     }
 
@@ -439,7 +439,7 @@ function setPropagationHosting(enabled, cost) {
             }
         }).catch(function(err) {
             showToast('Could not update hosted inbox: ' + ((err && err.message) || 'Unknown'),
-                'toast-red', 4000);
+                'toast-error', 4000);
         });
     };
     var mobile = (typeof isMobile === 'function') ? isMobile() : !!window.__RATSPEAK_MOBILE__;
@@ -473,7 +473,7 @@ function setStampSettings(enforce, cost) {
         }
     }).catch(function(err) {
         showToast('Could not update stamps: ' + ((err && err.message) || 'Unknown'),
-            'toast-red', 4000);
+            'toast-error', 4000);
     });
 }
 
@@ -538,7 +538,7 @@ function applyPropagationMode(mode, opts) {
     renderPropagationStatus();
     RS.invoke('set_propagation_mode', args).catch(function(err) {
         showToast('Could not change Offline Inbox mode: ' + (err && err.message ? err.message : 'Unknown'),
-            'toast-red', 4000);
+            'toast-error', 4000);
         RS.invoke('api_propagation').then(function(data) {
             propagationStatus = data || propagationStatus;
             renderPropagationStatus();
@@ -558,7 +558,6 @@ function selectRelayNode(hash) {
         .catch(function(err) {
             showPreConditionToast((err && err.message) || 'Invalid Offline Inbox node hash');
         });
-    showToast('Connecting to Offline Inbox node…', 'toast-orange', 2000);
 }
 
 function setPropagationNode() {
@@ -572,8 +571,10 @@ function setPropagationNode() {
 }
 
 function clearPropagationNode() {
-    RS.invoke('set_propagation_node', { hash: '' }).catch(function() {});
-    showToast('Disconnected from Offline Inbox node', 'toast-blue', 2000);
+    RS.invoke('set_propagation_node', { hash: '' }).catch(function(err) {
+        showToast((err && err.message) || 'Could not disconnect from the Offline Inbox node',
+            'toast-error', 4000);
+    });
 }
 
 function syncPropagationMailbox() {
@@ -600,11 +601,11 @@ function refreshRelayNodes() {
     RS.invoke('refresh_propagation_nodes').then(function(outcome) {
         outcome = outcome || { kind: 'sent', count: 0 };
         if (outcome.kind === 'offline') {
-            showToast('No transport connection — connect to a hub interface first.',
-                'toast-red', 4000);
+            showToast('Connect a hub interface before checking Offline Inbox.',
+                'toast-warning', 4000);
         } else if (outcome.kind === 'throttled') {
-            showToast('Refresh throttled — try again in a few seconds.',
-                'toast-blue', 3000);
+            showToast('Wait a few seconds before checking again.',
+                'toast-warning', 3000);
         }
         // Re-pull so newly-arrived nodes appear without waiting for the
         // ~4s propagation_update follow-up emit.
@@ -655,23 +656,22 @@ RS.listen('propagation_refresh_started', function(data) {
 });
 
 RS.listen('propagation_error', function(data) {
-    showToast('Offline Inbox error: ' + (data.error || 'Unknown'), 'toast-red', 4000);
+    showToast('Offline Inbox error: ' + (data.error || 'Unknown'), 'toast-error', 4000);
 });
 
 RS.listen('propagation_sync_result', function(data) {
     if (data && (data.success || data.ok)) {
         if (data.started) {
-            showToast(data.message || 'Offline Inbox check started', 'toast-blue', 3000);
             return;
         }
         var count = data.downloaded || 0;
         if (count > 0) {
-            showToast(count + ' message' + (count > 1 ? 's' : '') + ' downloaded from Offline Inbox', 'toast-green', 4000);
+            showToast(count + ' message' + (count > 1 ? 's' : '') + ' downloaded from Offline Inbox', 'toast-success', 4000);
         } else {
-            showToast(data.message || 'No new messages in Offline Inbox', 'toast-blue', 3000);
+            showToast(data.message || 'No new messages in Offline Inbox', 'toast-info', 3000);
         }
     } else {
-        showToast('Offline Inbox check failed: ' + ((data && (data.error || data.message)) || 'Unknown'), 'toast-red', 4000);
+        showToast('Offline Inbox check failed: ' + ((data && (data.error || data.message)) || 'Unknown'), 'toast-error', 4000);
     }
     var btn = document.getElementById('prop-sync-btn');
     if (btn) {

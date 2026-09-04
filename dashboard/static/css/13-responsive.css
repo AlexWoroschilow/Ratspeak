@@ -12,8 +12,32 @@
 
 @media (max-width: 768px) {
 
+    /* Canonical rich sheets keep their header and actions anchored while the
+       body is the only touch-scroll owner. Nested outer/body scrolling could
+       strand controls on short phones, especially at larger text sizes. */
+    .bottom-sheet.rs-dialog-sheet {
+        overflow: hidden;
+        padding-bottom: 0;
+    }
+
+    .bottom-sheet.rs-dialog-sheet .bottom-sheet-body {
+        min-height: 0;
+        overflow-x: hidden;
+        overflow-y: auto;
+        overscroll-behavior-y: contain;
+        scrollbar-gutter: stable;
+        -webkit-overflow-scrolling: touch;
+        touch-action: pan-y;
+    }
+
+    .bottom-sheet.rs-dialog-sheet .bottom-sheet-footer {
+        flex: 0 0 auto;
+        padding-bottom: max(var(--space-5), var(--sab));
+    }
+
     .bottom-sheet.open.channel-consent-sheet {
-        max-height: min(88dvh, 760px);
+        max-height: min(760px, calc(100vh - var(--space-8)));
+        max-height: min(760px, calc(var(--app-height, 100dvh) - max(var(--sat), var(--space-8))));
     }
 
     .channel-consent-sheet .bottom-sheet-body {
@@ -25,6 +49,20 @@
     .channel-consent-sheet .bottom-sheet-footer {
         padding-top: var(--space-4);
         padding-bottom: max(var(--space-5), var(--sab));
+    }
+
+    .channel-consent-sheet .bottom-sheet-footer .nr-btn {
+        min-width: 0;
+        flex: 1 1 0;
+    }
+
+    @media (max-width: 360px), (max-height: 560px) {
+        .channel-consent-sheet .bottom-sheet-header,
+        .channel-consent-sheet .bottom-sheet-body,
+        .channel-consent-sheet .bottom-sheet-footer {
+            padding-left: var(--space-5);
+            padding-right: var(--space-5);
+        }
     }
     .network-main {
         display: flex;
@@ -527,6 +565,7 @@
     .lxmf-msg-content {
         -webkit-user-select: text;
         user-select: text;
+        -webkit-touch-callout: default;
     }
 
     /* Hash displays: select-all so one tap copies the whole value. */
@@ -937,13 +976,30 @@
         min-height: 44px;
         padding: 0 var(--space-2);
         gap: var(--space-2);
+        grid-template-columns: var(--touch-target) minmax(0, 1fr) auto var(--touch-target);
+    }
+
+    .voice-memo-leading-slot,
+    .voice-memo-trailing-slot,
+    .voice-memo-primary-slot {
+        width: var(--touch-target);
+        height: var(--touch-target);
+        min-width: var(--touch-target);
+        flex-basis: var(--touch-target);
     }
 
     .voice-memo-field .voice-memo-action {
-        width: 44px;
-        height: 44px;
-        min-width: 44px;
-        flex-basis: 44px;
+        width: var(--touch-target);
+        height: var(--touch-target);
+        min-width: var(--touch-target);
+        flex-basis: var(--touch-target);
+    }
+
+    .voice-memo-send {
+        width: var(--touch-target);
+        height: var(--touch-target);
+        min-width: var(--touch-target);
+        flex-basis: var(--touch-target);
     }
 
     .voice-memo-player {
@@ -1229,15 +1285,16 @@
         max-width: none;
     }
     .toast {
+        grid-template-columns: 28px minmax(0, 1fr) 44px;
         max-width: 100%;
         width: 100%;
-        transform: translateY(-120%);
+        transform: translate3d(0, -14px, 0) scale(0.985);
     }
     .toast.visible {
         transform: translateY(0);
     }
     .toast.dismiss {
-        transform: translateY(-120%);
+        transform: translate3d(0, -10px, 0) scale(0.985);
     }
     .toast-close {
         min-width: 44px;
@@ -1326,6 +1383,19 @@
         height: var(--app-height, 100dvh);
         padding-bottom: 0;
     }
+
+    /* iOS shrinks and may independently pan the visual viewport for its
+       keyboard. Keep both conversation implementations anchored to that
+       viewport instead of assuming its top remains at layout coordinate 0. */
+    html[data-keyboard-platform="ios"] body.view-chat-detail .app-layout,
+    html[data-keyboard-platform="ios"] body.view-channel-detail .app-layout {
+        position: relative;
+        top: var(--visual-viewport-top, 0px);
+    }
+    html[data-keyboard-platform="ios"].keyboard-open body.view-chat-detail .app-layout,
+    html[data-keyboard-platform="ios"].keyboard-open body.view-channel-detail .app-layout {
+        height: var(--visual-viewport-height, var(--app-height, 100dvh));
+    }
 }
 
 @media (max-width: 480px) {
@@ -1395,6 +1465,15 @@
         transform: translateY(0);
         visibility: visible;
         pointer-events: auto;
+    }
+
+    /* WKWebView keeps fixed sheets in the layout viewport while the software
+       keyboard shrinks and may pan the visual viewport. Lift only the sheet
+       that owns keyboard focus, and bound it to the actually visible height.
+       This shared rule covers Add Contact and every canonical input sheet. */
+    html[data-keyboard-platform="ios"].keyboard-open .bottom-sheet.open:focus-within {
+        bottom: var(--keyboard-inset, 0px);
+        max-height: min(70vh, calc(var(--visual-viewport-height, 100dvh) - var(--space-8)));
     }
     .bottom-sheet-handle {
         width: 36px;

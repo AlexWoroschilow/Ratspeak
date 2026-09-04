@@ -347,9 +347,9 @@ RS.listen('node_operation_status', function(data) {
     }
 
     if (data.done && !progressHandling) {
-        var toastColor = data.error ? 'toast-red' : 'toast-green';
-        var toastDuration = data.error ? 8000 : 5000;
-        showToast(displayStep, toastColor, toastDuration);
+        // Successful lifecycle changes are reflected by the connection row.
+        // Only a failure needs to interrupt the user.
+        if (data.error) showToast(displayStep, 'toast-error', 5000);
 
         if (data.operation === 'add_lora' && !data.error) {
             closeRnodeModal();
@@ -606,27 +606,23 @@ if (typeof PeersCache !== 'undefined' && PeersCache && typeof PeersCache.subscri
     });
 }
 
-// Counts unique logical peers, deduping bidirectional connections by
-// identity_hash. On Apple-without-bonding the central/peripheral identifiers
-// diverge for the same physical peer, so address-only counting double-counts.
+// Counts only signed-identity-verified peers. A live GATT connection is not
+// message-ready until its announce has authenticated the Reticulum identity.
 function _bleConnectedPeerCount() {
     if (typeof window._bleVisiblePeersFromCache === 'function') {
         return window._bleVisiblePeersFromCache().length;
     }
     if (!window._blePeers) return 0;
     var seenIdentities = {};
-    var unidentified = 0;
     var addrs = Object.keys(window._blePeers);
     for (var i = 0; i < addrs.length; i++) {
         var p = window._blePeers[addrs[i]];
-        if (!p || !p.connected) continue;
+        if (!p || !p.connected || p.routable !== true) continue;
         if (p.identity_hash) {
             seenIdentities[p.identity_hash] = true;
-        } else {
-            unidentified += 1;
         }
     }
-    return Object.keys(seenIdentities).length + unidentified;
+    return Object.keys(seenIdentities).length;
 }
 window._bleConnectedPeerCount = _bleConnectedPeerCount;
 
@@ -674,21 +670,21 @@ function _refreshBlePeerSectionState() {
         label.textContent = labelText;
     }
 
-    // Pill keeps the BlueZ rejection visible across re-renders (toast is ephemeral).
-    var existingPill = section.querySelector('[data-ble-pill="peripheral-unavailable"]');
+    // Persistent status keeps the BlueZ rejection visible across re-renders (toast is ephemeral).
+    var existingStatus = section.querySelector('[data-ble-status="peripheral-unavailable"]');
     if (state === 'central_only' && label) {
         var reason = window._blePeerPeripheralUnavailable || 'Peripheral mode unavailable';
-        if (!existingPill) {
-            var pill = document.createElement('span');
-            pill.className = 'conn-iface-pill';
-            pill.setAttribute('data-ble-pill', 'peripheral-unavailable');
-            pill.textContent = 'Peripheral unavailable';
-            label.parentNode.insertBefore(pill, label.nextSibling);
-            existingPill = pill;
+        if (!existingStatus) {
+            var statusText = document.createElement('span');
+            statusText.className = 'conn-iface-status-text is-warning';
+            statusText.setAttribute('data-ble-status', 'peripheral-unavailable');
+            statusText.textContent = 'Peripheral unavailable';
+            label.parentNode.insertBefore(statusText, label.nextSibling);
+            existingStatus = statusText;
         }
-        existingPill.setAttribute('title', reason);
-    } else if (existingPill) {
-        existingPill.remove();
+        existingStatus.setAttribute('title', reason);
+    } else if (existingStatus) {
+        existingStatus.remove();
     }
 
     var countBadge = section.querySelector('#conn-count-ble');
@@ -760,21 +756,21 @@ RS.listen('ble_peer_connected', function(data) {
     window._blePeers = window._blePeers || {};
     _pruneBleOrphanIdentities();
     var prior = window._blePeers[data.address] || {};
-    var identity = data.identity_hash || prior.identity_hash || '';
+    var identity = data.identity_hash || '';
+    var provisionalIdentity = data.provisional_identity_hash ||
+        prior.provisional_identity_hash || '';
     // Adopt the orphan identity only when exactly one is alive (avoids
     // mis-attribution when multiple peers rotate inside the TTL window).
-    if (!identity && window._bleOrphanIdentities.length === 1) {
-        identity = window._bleOrphanIdentities[0].identity_hash;
+    if (!identity && !provisionalIdentity && window._bleOrphanIdentities.length === 1) {
+        provisionalIdentity = window._bleOrphanIdentities[0].identity_hash;
         window._bleOrphanIdentities = [];
-        if (!window._blePeersByIdentity) window._blePeersByIdentity = {};
-        if (!window._blePeersByIdentity[identity]) {
-            window._blePeersByIdentity[identity] = {};
-        }
-        window._blePeersByIdentity[identity][data.address] = true;
     }
     window._blePeers[data.address] = {
         address: data.address,
         identity_hash: identity,
+        provisional_identity_hash: provisionalIdentity,
+        readiness: identity ? 'routable' : (data.readiness || 'connected'),
+        routable: !!identity && data.routable !== false,
         protocol: data.protocol || prior.protocol || 'Ratspeak',
         rssi: prior.rssi,
         connected: true,
@@ -820,6 +816,9 @@ RS.listen('ble_peer_identity_resolved', function(data) {
     var peer = window._blePeers[data.address];
     if (peer) {
         peer.identity_hash = data.identity_hash;
+        peer.provisional_identity_hash = '';
+        peer.readiness = data.readiness || 'routable';
+        peer.routable = data.routable !== false;
     }
     if (!window._blePeersByIdentity) {
         window._blePeersByIdentity = {};
@@ -837,7 +836,7 @@ RS.listen('ble_peer_peripheral_unavailable', function(data) {
     window._blePeerPeripheralUnavailable = (data && data.reason) || 'Peripheral mode unavailable';
     if (typeof showToast === 'function') {
         var reason = window._blePeerPeripheralUnavailable;
-        showToast('Bluetooth Peer: ' + reason + ' — running as central only', 'toast-orange', 5000);
+        showToast('Bluetooth Peer: ' + reason + ' — running as central only', 'toast-warning', 5000);
     }
     _bleRerender();
 });
@@ -877,7 +876,7 @@ RS.listen('ble_scan_results', function(data) {
     }
 });
 
-// AutoInterface JoinFailed; current producer is Apple multicast-without-entitlement.
+// AutoInterface JoinFailed; surface the runtime failure on the matching row.
 RS.listen('auto_unavailable', function(data) {
     if (!data) return;
     window._autoUnavailable = {
@@ -902,6 +901,10 @@ RS.listen('auto_carrier_state', function(data) {
     if (!data || !data.nic) return;
     var key = (data.interface || '') + ':' + data.nic;
     var prev = window._autoCarrier[key];
+    var recoveredUnavailable = !!data.ok && !!window._autoUnavailable &&
+        window._autoUnavailable.interface === (data.interface || '') &&
+        window._autoUnavailable.nic === data.nic;
+    if (recoveredUnavailable) window._autoUnavailable = null;
     window._autoCarrier[key] = {
         ok: !!data.ok,
         reason: data.reason || '',
@@ -915,16 +918,17 @@ RS.listen('auto_carrier_state', function(data) {
         if (prevWasOk || firstSinceSpawn) {
             if (typeof showToast === 'function') {
                 showToast(
-                    'Local Network: no multicast echo on ' + data.nic +
-                    '. Windows Defender Firewall blocks IPv6 multicast on Public Wi-Fi profiles by default. ' +
-                    'In Settings → Network & Internet → Wi-Fi → properties, switch the active network to Private — ' +
-                    'or run as administrator: Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private',
-                    'toast-yellow',
+                    'Local Network is blocked on ' + data.nic +
+                    '. Set the active Wi-Fi network to Private in Windows Settings.',
+                    'toast-warning',
                     12000
                 );
                 window._autoFirewallToastShown = true;
             }
         }
+    }
+    if (recoveredUnavailable && typeof refreshConnectionsList === 'function') {
+        try { refreshConnectionsList(); } catch (_) {}
     }
 });
 
@@ -990,13 +994,13 @@ RS.listen('ble_rnode_passkey_prompt', function(data) {
         var digits = String(value).replace(/\D+/g, '');
         var passkey = parseInt(digits, 10);
         if (!digits || isNaN(passkey) || passkey < 0 || passkey > 999999) {
-            showToast('Passkey must be a 6-digit number.', 'toast-red', 4000);
+            showToast('Enter a 6-digit passkey.', 'toast-warning', 4000);
             if (wasCurrent) RS.invoke('cancel_ble_rnode_pairing').catch(function() {});
             return;
         }
         RS.invoke('submit_ble_rnode_passkey', { passkey: passkey }).catch(function(err) {
-            var msg = (err && err.message) || 'Failed to submit passkey';
-            showToast(msg, 'toast-red', 4000);
+            var msg = (err && err.message) || 'Could not submit the passkey';
+            showToast(msg, 'toast-error', 4000);
         });
     });
 
@@ -1030,9 +1034,9 @@ RS.listen('mobile_hardware_state', function(data) {
     if (data.kind === 'usb_rnode') {
         var usbProgress = window._activeProgressDialog;
         if (data.state === 'detached') {
-            showToast('USB RNode disconnected. Reconnect it, then resume the interface.', 'toast-yellow', 5000);
+            showToast('USB RNode disconnected. Reconnect it, then resume the interface.', 'toast-warning', 5000);
         } else if (data.state === 'permission_needed') {
-            showToast('USB permission is required to reconnect the RNode.', 'toast-yellow', 5000);
+            showToast('USB permission is required to reconnect the RNode.', 'toast-warning', 5000);
         } else if (data.state === 'permission_granted' && usbProgress && usbProgress.isOpen()) {
             usbProgress.update('USB permission granted. Reconnecting...');
         }
@@ -1040,8 +1044,10 @@ RS.listen('mobile_hardware_state', function(data) {
     }
     if (data.kind !== 'ble_rnode') return;
     var messages = {
+        waiting_for_radio: 'Waiting for radio...',
+        reconnecting: 'Waiting for radio...',
         connecting: 'Connecting to RNode...',
-        reconnecting: 'RNode unavailable — reconnecting...',
+        initializing: 'Initializing RNode...',
         connected: 'RNode connected',
         disabled: 'RNode disconnected',
         conflict: 'Only one Bluetooth RNode can be active on Android.',
@@ -1061,7 +1067,7 @@ RS.listen('mobile_hardware_state', function(data) {
         };
         message = failures[data.reason] || failures.connect_failed;
         if (pd && pd.isOpen()) pd.error(message);
-        else showToast(message, 'toast-red', 5000);
+        else showToast(message, 'toast-error', 5000);
         return;
     }
     if (pd && pd.isOpen() && message) pd.update(message);
@@ -1106,10 +1112,8 @@ RS.listen('identity_reset', function(data) {
 
 RS.listen('system_status', function(data) {
     if (!data || typeof data !== 'object') return;
-    var wasFirstReady = !_initialConnectDone;
     if (data.status === 'ready') {
         _initialConnectDone = true;
-        if (!wasFirstReady) showToast('Services ready', 'toast-green');
         if (typeof loadConversations === 'function') loadConversations();
         if (typeof loadIdentities === 'function') loadIdentities();
         return;
@@ -1118,8 +1122,8 @@ RS.listen('system_status', function(data) {
 });
 
 RS.listen('identity_error', function(data) {
-    var msg = (data && data.error) ? data.error : 'Identity operation failed.';
-    var toastClass = (data && data.degraded) ? 'toast-red' : 'toast-orange';
+    var msg = (data && data.error) ? data.error : 'Could not update the identity';
+    var toastClass = (data && data.degraded) ? 'toast-error' : 'toast-warning';
     var duration = (data && data.degraded) ? 12000 : 6000;
     showToast(msg, toastClass, duration);
 
@@ -1128,17 +1132,6 @@ RS.listen('identity_error', function(data) {
         btn.textContent = 'Select';
         btn.disabled = false;
     });
-});
-
-RS.listen('announce_triggered', function(data) {
-    if (!data || data.success) return;
-    // settings.js owns the manual announce UX and gives context-specific errors.
-    if (data.error === 'no_interfaces' || data.error === 'not_sent' || data.error === 'not_ready') {
-        return;
-    }
-    if (typeof showToast === 'function') {
-        showToast('Announce failed: ' + (data.error || 'Unknown error'), 'toast-red');
-    }
 });
 
 document.addEventListener('DOMContentLoaded', function() {

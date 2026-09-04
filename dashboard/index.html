@@ -4,15 +4,15 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-visual">
     <meta name="theme-color" content="#FAF7F3">
-    <script src="/static/js/theme.js?v=ui-20260804"></script>
-    <script src="/static/js/text_scale.js?v=ui-20260804"></script>
+    <script src="/static/js/theme.js?v=ui-20260826-1"></script>
+    <script src="/static/js/text_scale.js?v=ui-20260826-1"></script>
     <!-- Safe-area insets (--sat/--sab/--sal/--sar) are defined in 00-tokens.css
          via env(safe-area-inset-*). iOS feeds env() through viewport-fit=cover +
          WKWebView contentInsetAdjustmentBehavior=.never; Android MainActivity
          injects pixel values via evaluateJavascript; desktop falls back to 0. -->
     <title>Ratspeak - Dashboard</title>
-    <link rel="stylesheet" href="/static/fonts/fonts.css?v=ui-20260804">
-    <link rel="stylesheet" href="/static/style.css?v=ui-20260804">
+    <link rel="stylesheet" href="/static/fonts/fonts.css?v=ui-20260826-1">
+    <link rel="stylesheet" href="/static/style.css?v=ui-20260826-1">
 </head>
 <body class="checking-setup">
 
@@ -128,7 +128,7 @@
             <span class="bottom-bar-badge" id="bb-unread" style="display:none;" aria-hidden="true"></span>
         </button>
         <button class="bottom-bar-item" type="button" data-view="channels" aria-label="Channels">
-            <svg viewBox="0 0 24 24"><path d="M8 16H5l-3 3V7a3 3 0 0 1 3-3h9a3 3 0 0 1 3 3v6a3 3 0 0 1-3 3Z"/><path d="M8 19h7l4 3v-3h1a2 2 0 0 0 2-2v-7a3 3 0 0 0-3-3"/></svg>
+            <svg viewBox="0 0 24 24"><path d="M8.5 16.5a6 6 0 0 1 0-9"/><path d="M15.5 7.5a6 6 0 0 1 0 9"/><path d="M5.5 19.5a10 10 0 0 1 0-15"/><path d="M18.5 4.5a10 10 0 0 1 0 15"/><circle cx="12" cy="12" r="1.7" fill="currentColor" stroke="none"/></svg>
             <span class="bottom-bar-badge" id="bb-channels-unread" style="display:none;" aria-hidden="true"></span>
         </button>
         <button class="bottom-bar-item bottom-bar-hamburger" id="bottom-bar-hamburger" type="button" aria-label="More options">
@@ -535,23 +535,34 @@
                                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6m3 0V4h8v2"/></svg>
                             </button>
                             <div class="voice-memo-field">
-                                <button class="voice-memo-action voice-memo-play" id="voice-memo-play-btn" type="button" title="Preview recording" aria-label="Play voice message" hidden>
-                                    <svg class="voice-memo-state-icon" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
-                                </button>
-                                <span class="voice-memo-live-dot" id="voice-memo-live-dot" aria-hidden="true"></span>
-                                <div class="voice-memo-waveform" id="voice-memo-waveform" aria-hidden="true"></div>
-                                <span class="voice-memo-timer" id="voice-memo-timer" aria-live="polite">0:00</span>
-                                <span class="sr-only" id="voice-memo-announcer" aria-live="assertive"></span>
-                                <button class="voice-memo-action voice-memo-pause" id="voice-memo-pause-btn" type="button" title="Pause recording" aria-label="Pause voice message recording">
-                                    <svg class="voice-memo-state-icon" width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
-                                </button>
+                                <span class="voice-memo-leading-slot">
+                                    <button class="voice-memo-action voice-memo-play" id="voice-memo-play-btn" type="button" title="Preview recording" aria-label="Play voice message" hidden>
+                                        <svg class="voice-memo-state-icon" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+                                    </button>
+                                    <span class="voice-memo-live-dot" id="voice-memo-live-dot" aria-hidden="true"></span>
+                                    <span class="loading-spinner voice-memo-state-spinner" id="voice-memo-state-spinner" aria-hidden="true"></span>
+                                </span>
+                                <span class="voice-memo-signal">
+                                    <span class="voice-memo-waveform" id="voice-memo-waveform" aria-hidden="true"></span>
+                                    <span class="voice-memo-inline-status" id="voice-memo-inline-status" role="status" aria-live="polite" aria-atomic="true">Preparing…</span>
+                                </span>
+                                <span class="voice-memo-timer" id="voice-memo-timer" aria-label="Voice message duration">0:00</span>
+                                <span class="sr-only" id="voice-memo-announcer" role="status" aria-live="polite" aria-atomic="true"></span>
+                                <span class="sr-only" id="voice-memo-alert" role="alert" aria-live="assertive" aria-atomic="true"></span>
+                                <span class="voice-memo-trailing-slot">
+                                    <button class="voice-memo-action voice-memo-pause" id="voice-memo-pause-btn" type="button" title="Pause recording" aria-label="Pause voice message recording">
+                                        <svg class="voice-memo-state-icon" width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+                                    </button>
+                                </span>
                             </div>
-                            <button class="voice-memo-action voice-memo-stop" id="voice-memo-stop-btn" type="button" title="Finish recording" aria-label="Finish voice message recording">
-                                <span aria-hidden="true"></span>
-                            </button>
-                            <button class="lxmf-send-btn message-send-btn voice-memo-send" id="voice-memo-send-btn" type="button" title="Send voice message" aria-label="Send voice message" hidden>
-                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
-                            </button>
+                            <span class="voice-memo-primary-slot">
+                                <button class="voice-memo-action voice-memo-stop" id="voice-memo-stop-btn" type="button" title="Finish recording" aria-label="Finish voice message recording">
+                                    <span aria-hidden="true"></span>
+                                </button>
+                                <button class="lxmf-send-btn message-send-btn voice-memo-send" id="voice-memo-send-btn" type="button" title="Send voice message" aria-label="Send voice message" hidden>
+                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+                                </button>
+                            </span>
                         </div>
                         <div class="lxmf-compose message-composer" id="lxmf-compose-bar" style="display:none;">
                             <input type="file" id="lxmf-file-input" style="display:none;">
@@ -1291,7 +1302,7 @@
                             <div class="settings-row" id="settings-row-notifications" style="display:none;">
                                 <div class="settings-row-info">
                                     <span class="settings-row-label">Notifications</span>
-                                    <span class="settings-row-desc">Show a system notification when a new message arrives while Ratspeak is in the background</span>
+                                    <span class="settings-row-desc">Show background alerts; sound and haptics follow device settings</span>
                                 </div>
                                 <button class="selector-badge selector-badge-no-caret" id="settings-notification-action" type="button" style="display:none;">Open Settings</button>
                                 <label class="prop-toggle" aria-label="Notifications">
@@ -1420,6 +1431,16 @@
                                         <span>ON</span>
                                     </label>
                                 </div>
+                            </div>
+                            <div class="settings-row" id="settings-row-android-rnode-auto-resume" style="display:none;">
+                                <div class="settings-row-info">
+                                    <span class="settings-row-label">Auto-reconnect radios</span>
+                                    <span class="settings-row-desc">Reconnect Bluetooth RNodes automatically.</span>
+                                </div>
+                                <label class="prop-toggle" aria-label="Auto-reconnect radios">
+                                    <input type="checkbox" id="android-rnode-auto-resume-toggle" checked>
+                                    <span class="prop-slider"></span>
+                                </label>
                             </div>
                             <div class="settings-row" style="border-bottom:none;">
                                 <div class="settings-row-info">
@@ -1964,43 +1985,43 @@
 <!-- Synchronous load order matters: state/constants/setup/nav before any caller
      of their module-level functions; tauri_events.js last (wires everything above).
      Reordering breaks fresh boots silently. -->
-<script src="/static/js/state.js?v=ui-20260804"></script>
-<script src="/static/js/constants.js?v=ui-20260804"></script>
-<script src="/static/js/setup.js?v=ui-20260804"></script>
-<script src="/static/js/nav.js?v=ui-20260804"></script>
-<script src="/static/js/gestures.js?v=ui-20260804"></script>
-<script src="/static/js/view_stack.js?v=ui-20260804"></script>
+<script src="/static/js/state.js?v=ui-20260826-1"></script>
+<script src="/static/js/constants.js?v=ui-20260826-1"></script>
+<script src="/static/js/setup.js?v=ui-20260826-1"></script>
+<script src="/static/js/nav.js?v=ui-20260826-1"></script>
+<script src="/static/js/gestures.js?v=ui-20260826-1"></script>
+<script src="/static/js/view_stack.js?v=ui-20260826-1"></script>
 
-<script src="/static/js/peers_cache.js?v=ui-20260804"></script>
-<script src="/static/js/connections.js?v=ui-20260804"></script>
-<script src="/static/js/peers.js?v=ui-20260804"></script>
-<script src="/static/js/toasts.js?v=ui-20260804"></script>
-<script src="/static/js/dialogs.js?v=ui-20260804"></script>
-<script src="/static/js/legal_documents.js?v=ui-20260804"></script>
-<script src="/static/js/action_popover.js?v=ui-20260804"></script>
-<script src="/static/js/ui_shared.js?v=ui-20260804"></script>
-<script src="/static/js/events.js?v=ui-20260804"></script>
-<script src="/static/js/activity.js?v=ui-20260804"></script>
-<script src="/static/js/health.js?v=ui-20260804"></script>
-<script src="/static/js/modals.js?v=ui-20260804"></script>
-<script src="/static/js/emoji_data.js?v=ui-20260804"></script>
-<script src="/static/js/emoji_picker.js?v=ui-20260804"></script>
-<script src="/static/js/voice_ringtones.js?v=ui-20260804"></script>
+<script src="/static/js/peers_cache.js?v=ui-20260826-1"></script>
+<script src="/static/js/connections.js?v=ui-20260826-1"></script>
+<script src="/static/js/peers.js?v=ui-20260826-1"></script>
+<script src="/static/js/toasts.js?v=ui-20260826-1"></script>
+<script src="/static/js/dialogs.js?v=ui-20260826-1"></script>
+<script src="/static/js/legal_documents.js?v=ui-20260826-1"></script>
+<script src="/static/js/action_popover.js?v=ui-20260826-1"></script>
+<script src="/static/js/ui_shared.js?v=ui-20260826-1"></script>
+<script src="/static/js/events.js?v=ui-20260826-1"></script>
+<script src="/static/js/activity.js?v=ui-20260826-1"></script>
+<script src="/static/js/health.js?v=ui-20260826-1"></script>
+<script src="/static/js/modals.js?v=ui-20260826-1"></script>
+<script src="/static/js/emoji_data.js?v=ui-20260826-1"></script>
+<script src="/static/js/emoji_picker.js?v=ui-20260826-1"></script>
+<script src="/static/js/voice_ringtones.js?v=ui-20260826-1"></script>
 <script src="/static/js/vendor/jsQR.js"></script>
-<script src="/static/js/contact_card.js?v=ui-20260804"></script>
-<script src="/static/js/lxmf.js?v=ui-20260804"></script>
-<script src="/static/js/voice_memos.js?v=ui-20260804"></script>
-<script src="/static/js/channels.js?v=ui-20260804"></script>
-<script src="/static/js/channel_hub.js?v=ui-20260804"></script>
-<script src="/static/js/propagation.js?v=ui-20260804"></script>
-<script src="/static/js/settings.js?v=ui-20260804"></script>
-<script src="/static/js/identity.js?v=ui-20260804"></script>
-<script src="/static/js/confetti.js?v=ui-20260804"></script>
-<script src="/static/js/game_registry.js?v=ui-20260804"></script>
-<script src="/static/js/four_in_a_row_view.js?v=ui-20260804"></script>
-<script src="/static/js/games_tab.js?v=ui-20260804"></script>
-<script src="/static/js/native_channel_share.js?v=ui-20260804"></script>
-<script src="/static/js/tauri_events.js?v=ui-20260804"></script>
-<script src="/static/js/init_dom_handlers.js?v=ui-20260804"></script>
+<script src="/static/js/contact_card.js?v=ui-20260826-1"></script>
+<script src="/static/js/lxmf.js?v=ui-20260826-1"></script>
+<script src="/static/js/voice_memos.js?v=ui-20260826-1"></script>
+<script src="/static/js/channels.js?v=ui-20260826-1"></script>
+<script src="/static/js/channel_hub.js?v=ui-20260826-1"></script>
+<script src="/static/js/propagation.js?v=ui-20260826-1"></script>
+<script src="/static/js/settings.js?v=ui-20260826-1"></script>
+<script src="/static/js/identity.js?v=ui-20260826-1"></script>
+<script src="/static/js/confetti.js?v=ui-20260826-1"></script>
+<script src="/static/js/game_registry.js?v=ui-20260826-1"></script>
+<script src="/static/js/four_in_a_row_view.js?v=ui-20260826-1"></script>
+<script src="/static/js/games_tab.js?v=ui-20260826-1"></script>
+<script src="/static/js/native_channel_share.js?v=ui-20260826-1"></script>
+<script src="/static/js/tauri_events.js?v=ui-20260826-1"></script>
+<script src="/static/js/init_dom_handlers.js?v=ui-20260826-1"></script>
 </body>
 </html>

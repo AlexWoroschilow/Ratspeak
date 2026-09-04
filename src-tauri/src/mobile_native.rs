@@ -84,7 +84,10 @@ pub(crate) fn install(state: &Arc<AppState>) {
 
     #[cfg(target_os = "android")]
     {
-        state.install_mobile_platform_bridge(Arc::new(AndroidPlatformBridge));
+        let bridge: Arc<dyn MobilePlatformBridge> = Arc::new(AndroidPlatformBridge);
+        let _ =
+            bridge.set_android_ble_rnode_auto_resume(state.android_ble_rnode_auto_resume_enabled());
+        state.install_mobile_platform_bridge(bridge);
         state.mobile_platform_bridge().replay_platform_state();
     }
 }
@@ -150,6 +153,20 @@ impl MobilePlatformBridge for AndroidPlatformBridge {
             }
         }
         disconnected
+    }
+
+    fn set_android_ble_rnode_auto_resume(&self, enabled: bool) -> bool {
+        with_android_bridge(|env, class| {
+            use jni::objects::JValue;
+            env.call_static_method(
+                class,
+                "setBleRnodeAutoResume",
+                "(Z)Z",
+                &[JValue::Bool(u8::from(enabled))],
+            )?
+            .z()
+        })
+        .unwrap_or(false)
     }
 
     fn replay_platform_state(&self) {
@@ -482,9 +499,7 @@ fn take_pending_ble_request(token: &str, generation: u64) -> Option<NativeBleRno
 }
 
 #[cfg(target_os = "android")]
-fn native_ble_failure_code(
-    code: &str,
-) -> ratspeak_tauri::commands::ble::BleRnodeNativeFailureCode {
+fn native_ble_failure_code(code: &str) -> ratspeak_tauri::commands::ble::BleRnodeNativeFailureCode {
     use ratspeak_tauri::commands::ble::BleRnodeNativeFailureCode;
     match code {
         "bond_timeout" => BleRnodeNativeFailureCode::BondTimeout,
@@ -503,6 +518,7 @@ fn native_ble_hardware_reason(code: &str) -> &'static str {
         "stale_bond" => "stale_bond",
         "bridge_unavailable" => "bridge_unavailable",
         "radio_disconnected" => "radio_disconnected",
+        "auto_resume_disabled" => "auto_resume_disabled",
         _ => "connect_failed",
     }
 }
@@ -538,8 +554,8 @@ pub extern "system" fn Java_org_ratspeak_android_RatspeakNativeBridge_nativeBleR
                 "ble_rnode",
                 match state_code {
                     0 => "connecting",
-                    1 => "reconnecting",
-                    _ => "connected",
+                    1 => "waiting_for_radio",
+                    _ => "initializing",
                 },
                 None,
             );
@@ -599,6 +615,7 @@ pub extern "system" fn Java_org_ratspeak_android_RatspeakNativeBridge_nativeBleR
                             | "bridge_unavailable"
                             | "connect_failed"
                             | "radio_disconnected"
+                            | "auto_resume_disabled"
                     )
                 })
                 .unwrap_or_else(|| "connect_failed".to_string());
@@ -686,6 +703,9 @@ pub(crate) fn submit_lifecycle(foreground: bool) {
     // Tauri RunEvents are delivered only after setup has installed AppState.
     // Allocate authority before spawning so scheduling cannot invert two edges.
     let transition = state.begin_foreground_transition();
+    // Notification attention follows the trusted platform edge immediately;
+    // protocol lifecycle housekeeping continues asynchronously below.
+    state.set_notification_foreground(foreground);
     tauri::async_runtime::spawn(async move {
         if ratspeak_tauri::commands::system::apply_foreground_transition(
             state, foreground, transition,

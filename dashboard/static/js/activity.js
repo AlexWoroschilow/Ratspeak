@@ -980,18 +980,12 @@ function initActivity() {
 
 function setActivityCapture(enabled) {
     var command = null;
-    var toastText = null;
-    var toastClass = 'toast-green';
     if (enabled && activityCaptureState === 'off') {
         command = 'activity_start';
-        toastText = 'Activity started';
     } else if (enabled && activityCaptureState === 'stopped') {
         command = 'activity_resume';
-        toastText = 'Activity resumed';
     } else if (!enabled && activityCaptureState === 'capturing') {
         command = 'activity_stop';
-        toastText = 'Activity paused';
-        toastClass = 'toast-orange';
     }
     if (!command || _activityControlPending) return Promise.resolve(activityStatus);
 
@@ -1004,16 +998,11 @@ function setActivityCapture(enabled) {
         }
         activityBootstrap.forceResync('capture_control_acknowledged');
         return status;
-    }).then(function(status) {
-        if (context.token === _activityControlToken && typeof showToast === 'function') {
-            showToast(toastText, toastClass, 2000);
-        }
-        return status;
     }).catch(function(error) {
         rollbackActivityControl(context);
         return reconcileActivityStatus(context).then(function() { throw error; });
     }).catch(function() {
-        if (typeof showToast === 'function') showToast('Activity capture could not be changed', 'toast-red', 4000);
+        if (typeof showToast === 'function') showToast('Activity capture could not be changed', 'toast-error', 4000);
     }).then(function(result) {
         finishActivityControl(context);
         return result;
@@ -1037,7 +1026,7 @@ function setActivityProfile(profile) {
         rollbackActivityControl(context);
         return reconcileActivityStatus(context).then(function() { throw error; });
     }).catch(function() {
-        if (typeof showToast === 'function') showToast('Activity profile could not be changed', 'toast-red', 4000);
+        if (typeof showToast === 'function') showToast('Activity profile could not be changed', 'toast-error', 4000);
     }).then(function(result) {
         updateProfileButtons();
         renderActivityFeed();
@@ -1063,7 +1052,7 @@ function clearActivity() {
         rollbackActivityControl(context);
         return reconcileActivityStatus(context).then(function() { throw error; });
     }).catch(function() {
-        if (typeof showToast === 'function') showToast('Activity could not be cleared', 'toast-red', 4000);
+        if (typeof showToast === 'function') showToast('Activity could not be cleared', 'toast-error', 4000);
     }).then(function(result) {
         finishActivityControl(context);
         return result;
@@ -1498,7 +1487,7 @@ function activateActivityIdentifier(sequence, field) {
     }
     return activityRevealEvent(event).then(function(revealed) {
         if (!revealed && typeof showToast === 'function') {
-            showToast('Could not reveal this event’s identities', 'toast-red', 3000);
+            showToast('Could not reveal this event’s identities', 'toast-error', 3000);
         }
         return !!revealed;
     });
@@ -1512,8 +1501,8 @@ function copyActivityIdentifier(sequence, field) {
     if (!value || !RS.copyText) return Promise.resolve(false);
     return Promise.resolve(RS.copyText(value)).then(function(copied) {
         if (typeof showToast === 'function') {
-            if (copied) showToast(label + ' copied', 'toast-green', 1800);
-            else showToast('Could not copy ' + label.toLowerCase(), 'toast-red', 3000);
+            if (copied) showToast(label + ' copied', 'toast-success', 1800);
+            else showToast('Could not copy ' + label.toLowerCase(), 'toast-error', 3000);
         }
         return !!copied;
     });
@@ -1549,6 +1538,8 @@ function activityEventSummary(event) {
         'storage.db.failed': 'Local storage unavailable',
         'ipc.failed': 'App event delivery failed',
         'rns.security.dropped': 'Network input rejected',
+        'rns.announce.queued': 'Announce queued',
+        'rns.announce.sent': 'Announce queued',
         'rns.announce.ingress_burst_started': 'High announce traffic detected',
         'rns.announce.ingress_burst_cleared': 'Announce traffic returned to normal',
         'lxmf.propagation.started': 'Storing message in Offline Inbox',
@@ -2037,7 +2028,7 @@ function initSystemDrops() {
                     if (n === 0) {
                         showToast('Nothing to purge — all blocks are verified.', 'toast-info', 3000);
                     } else {
-                        showToast('Purged ' + n + ' unverified entr' + (n === 1 ? 'y' : 'ies') + '.', 'toast-green', 3000);
+                        showToast('Purged ' + n + ' unverified entr' + (n === 1 ? 'y' : 'ies') + '.', 'toast-success', 3000);
                     }
                 }).catch(function() {});
             });

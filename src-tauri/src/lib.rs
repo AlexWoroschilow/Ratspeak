@@ -80,6 +80,33 @@ fn diagnostics_enabled() -> bool {
     env_flag("RATSPEAK_DIAGNOSTICS")
 }
 
+fn process_diagnostics_enabled() -> bool {
+    process_diagnostics_enabled_for_build(
+        env_flag("RATSPEAK_DIAGNOSTICS"),
+        cfg!(all(target_os = "ios", debug_assertions)),
+    )
+}
+
+const fn process_diagnostics_enabled_for_build(
+    explicit_opt_in: bool,
+    ios_debug_build: bool,
+) -> bool {
+    explicit_opt_in || ios_debug_build
+}
+
+#[cfg(test)]
+mod process_diagnostics_tests {
+    use super::process_diagnostics_enabled_for_build;
+
+    #[test]
+    fn only_explicit_opt_in_or_an_ios_debug_build_enables_process_logs() {
+        assert!(!process_diagnostics_enabled_for_build(false, false));
+        assert!(process_diagnostics_enabled_for_build(true, false));
+        assert!(process_diagnostics_enabled_for_build(false, true));
+        assert!(process_diagnostics_enabled_for_build(true, true));
+    }
+}
+
 fn diagnostic_metadata_allowed(metadata: &tracing::Metadata<'_>) -> bool {
     ratspeak_tauri::diagnostics::metadata_allowed(metadata)
 }
@@ -229,6 +256,38 @@ fn validate_http_url(raw: &str) -> Result<String, String> {
     }
 }
 
+fn encode_mailto_query_component(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for &byte in value.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    encoded
+}
+
+#[cfg(test)]
+mod mailto_tests {
+    use super::encode_mailto_query_component;
+
+    #[test]
+    fn mailto_query_uses_rfc3986_spaces_and_utf8() {
+        assert_eq!(
+            encode_mailto_query_component("Ratspeak privacy request"),
+            "Ratspeak%20privacy%20request"
+        );
+        assert_eq!(
+            encode_mailto_query_component("a+b&c\nü"),
+            "a%2Bb%26c%0A%C3%BC"
+        );
+    }
+}
+
 #[tauri::command]
 async fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
     let clean = validate_http_url(&url)?;
@@ -252,10 +311,14 @@ async fn open_support_email(
     {
         return Err("Invalid support email".into());
     }
-    let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("subject", subject)
-        .append_pair("body", &body)
-        .finish();
+    // `application/x-www-form-urlencoded` encodes spaces as `+`, but several
+    // mobile mail clients treat `+` literally in a mailto URI. RFC 3986
+    // percent-encoding keeps the visible draft subject correct everywhere.
+    let query = format!(
+        "subject={}&body={}",
+        encode_mailto_query_component(subject),
+        encode_mailto_query_component(&body)
+    );
     open_platform_url(app, format!("mailto:mail@ratspeak.org?{query}")).await
 }
 
@@ -266,7 +329,7 @@ async fn open_platform_url(app: tauri::AppHandle, clean: String) -> Result<(), S
 
         let (tx, rx) = std::sync::mpsc::channel();
         app.run_on_main_thread(move || {
-            let _ = tx.send(open_external_url_ios(&clean));
+            open_external_url_ios(&clean, tx);
         })
         .map_err(|error| format!("Could not open link: {error}"))?;
 
@@ -323,46 +386,85 @@ async fn open_platform_url(app: tauri::AppHandle, clean: String) -> Result<(), S
 }
 
 #[cfg(target_os = "ios")]
-fn open_external_url_ios(url: &str) -> Result<(), String> {
+fn open_external_url_ios(url: &str, reply: std::sync::mpsc::Sender<Result<(), String>>) {
+    use block2::RcBlock;
     use objc2::msg_send;
-    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2::runtime::{AnyClass, AnyObject, Bool};
     use std::ffi::CString;
 
     unsafe {
-        let ns_string_class =
-            AnyClass::get(c"NSString").ok_or_else(|| "NSString class not found".to_string())?;
-        let ns_url_class =
-            AnyClass::get(c"NSURL").ok_or_else(|| "NSURL class not found".to_string())?;
-        let ui_app_class = AnyClass::get(c"UIApplication")
-            .ok_or_else(|| "UIApplication class not found".to_string())?;
-        let c_url = CString::new(url).map_err(|_| "Invalid URL".to_string())?;
+        let Some(ns_string_class) = AnyClass::get(c"NSString") else {
+            let _ = reply.send(Err("NSString class not found".to_string()));
+            return;
+        };
+        let Some(ns_url_class) = AnyClass::get(c"NSURL") else {
+            let _ = reply.send(Err("NSURL class not found".to_string()));
+            return;
+        };
+        let Some(ns_dictionary_class) = AnyClass::get(c"NSDictionary") else {
+            let _ = reply.send(Err("NSDictionary class not found".to_string()));
+            return;
+        };
+        let Some(ui_app_class) = AnyClass::get(c"UIApplication") else {
+            let _ = reply.send(Err("UIApplication class not found".to_string()));
+            return;
+        };
+        let Ok(c_url) = CString::new(url) else {
+            let _ = reply.send(Err("Invalid URL".to_string()));
+            return;
+        };
         let ns_string: *mut AnyObject =
             msg_send![ns_string_class, stringWithUTF8String: c_url.as_ptr()];
         let ns_url: *mut AnyObject = msg_send![ns_url_class, URLWithString: ns_string];
         if ns_url.is_null() {
-            return Err("Invalid URL".into());
+            let _ = reply.send(Err("Invalid URL".into()));
+            return;
         }
         let app: *mut AnyObject = msg_send![ui_app_class, sharedApplication];
         if app.is_null() {
-            return Err("UIApplication unavailable".into());
+            let _ = reply.send(Err("UIApplication unavailable".into()));
+            return;
         }
-        let ok: bool = msg_send![app, openURL: ns_url];
-        if ok {
-            Ok(())
-        } else {
-            Err("No application can open this link".into())
+        let can_open: Bool = msg_send![app, canOpenURL: ns_url];
+        if !can_open.as_bool() {
+            let _ = reply.send(Err("No application can open this link".into()));
+            return;
         }
+        let options: *mut AnyObject = msg_send![ns_dictionary_class, dictionary];
+        if options.is_null() {
+            let _ = reply.send(Err("Could not prepare link options".into()));
+            return;
+        }
+
+        // The modern API confirms whether iOS actually handed the URL to an
+        // application. Retain the block until UIKit invokes it.
+        let completion = RcBlock::new(move |opened: Bool| {
+            let result = if opened.as_bool() {
+                Ok(())
+            } else {
+                Err("No application can open this link".into())
+            };
+            let _ = reply.send(result);
+        });
+        let _: () = msg_send![
+            app,
+            openURL: ns_url,
+            options: options,
+            completionHandler: &*completion
+        ];
+        std::mem::forget(completion);
     }
 }
 
 #[tauri::command]
-fn open_mobile_app_settings() -> Result<(), String> {
+async fn open_mobile_app_settings(app: tauri::AppHandle) -> Result<(), String> {
     #[cfg(target_os = "ios")]
     {
-        open_external_url_ios("app-settings:")
+        open_platform_url(app, "app-settings:".to_string()).await
     }
     #[cfg(not(target_os = "ios"))]
     {
+        let _ = app;
         Err("Mobile app settings are unavailable on this platform".to_string())
     }
 }
@@ -404,13 +506,7 @@ async fn save_stored_attachment_native(
     #[cfg(target_os = "android")]
     {
         let _ = app;
-        if mobile_native::save_stored_file(
-            &path,
-            &filename,
-            &mime,
-            prefer_photos,
-            &request_id,
-        ) {
+        if mobile_native::save_stored_file(&path, &filename, &mime, prefer_photos, &request_id) {
             Ok("pending".into())
         } else {
             Ok("unsupported".into())
@@ -694,13 +790,16 @@ impl TracingGuard {
     }
 }
 
-// Silent by default. Source/dev support diagnostics require
-// RATSPEAK_DIAGNOSTICS=1, and desktop file logs additionally require
-// RATSPEAK_DIAGNOSTIC_FILE=1. RUST_LOG only selects the filter after opt-in.
+// Silent in production by default. Source/dev support diagnostics require
+// RATSPEAK_DIAGNOSTICS=1, except local iOS debug builds where reviewed unified
+// logging is enabled at compile time because a manually launched installed app
+// does not inherit the host shell environment. Desktop file logs additionally
+// require RATSPEAK_DIAGNOSTIC_FILE=1. RUST_LOG only selects the filter after
+// opt-in.
 fn init_tracing() -> TracingGuard {
     #[allow(unused_mut)]
     let mut tracing_guard = TracingGuard::default();
-    if !diagnostics_enabled() {
+    if !process_diagnostics_enabled() {
         return tracing_guard;
     }
 
@@ -927,6 +1026,9 @@ pub fn run() {
             ratspeak_tauri::commands::messaging::begin_attachment_stage,
             ratspeak_tauri::commands::messaging::append_attachment_stage,
             ratspeak_tauri::commands::messaging::cancel_attachment_stage,
+            ratspeak_tauri::commands::messaging::inspect_image_attachment_stage,
+            ratspeak_tauri::commands::messaging::prepare_image_attachment_stage,
+            ratspeak_tauri::commands::messaging::mark_image_attachment_stage_as_file,
             ratspeak_tauri::commands::messaging::send_lxmf_with_staged_attachment,
             ratspeak_tauri::commands::messaging::cancel_lxmf_message,
             ratspeak_tauri::commands::messaging::get_conversation,
@@ -968,6 +1070,7 @@ pub fn run() {
             ratspeak_tauri::commands::interfaces::set_hardware_lock_timeout,
             ratspeak_tauri::commands::interfaces::set_developer_mode,
             ratspeak_tauri::commands::interfaces::set_announce_ratspeak_usage,
+            ratspeak_tauri::commands::interfaces::set_android_ble_rnode_auto_resume,
             ratspeak_tauri::commands::interfaces::set_activity_identity_protection,
             ratspeak_tauri::commands::interfaces::set_hide_known_spam_peers,
             ratspeak_tauri::commands::interfaces::set_lxmf_limit_1mb,
@@ -1092,7 +1195,9 @@ pub fn run() {
             #[cfg(feature = "lxst-voice")]
             ratspeak_tauri::commands::voice::voice_memo_cancel,
             #[cfg(feature = "lxst-voice")]
-            ratspeak_tauri::commands::voice::voice_memo_playback_session_start,
+            ratspeak_tauri::commands::voice::send_lxmf_voice_message,
+            #[cfg(feature = "lxst-voice")]
+            ratspeak_tauri::commands::voice::voice_memo_playback_start,
             #[cfg(feature = "lxst-voice")]
             ratspeak_tauri::commands::voice::voice_memo_playback_session_stop,
             #[cfg(feature = "lxst-voice")]
@@ -1426,8 +1531,8 @@ fn prepare_file_export_ios(
         .map_err(|_| "Could not secure the file exporter".to_string())?;
 
     if let Ok(entries) = std::fs::read_dir(&root) {
-        let cutoff = std::time::SystemTime::now()
-            .checked_sub(std::time::Duration::from_secs(24 * 60 * 60));
+        let cutoff =
+            std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(24 * 60 * 60));
         for entry in entries.flatten() {
             let stale = cutoff.is_some_and(|cutoff| {
                 entry
@@ -1487,8 +1592,7 @@ fn present_file_export_ios(path: &std::path::Path) -> Result<(), String> {
         let url: *mut AnyObject = msg_send![url_class, fileURLWithPath: string];
         let urls: *mut AnyObject = msg_send![array_class, arrayWithObject: url];
         let allocated: *mut AnyObject = msg_send![picker_class, alloc];
-        let picker: *mut AnyObject =
-            msg_send![allocated, initForExportingURLs: urls, asCopy: true];
+        let picker: *mut AnyObject = msg_send![allocated, initForExportingURLs: urls, asCopy: true];
         let application: *mut AnyObject = msg_send![application_class, sharedApplication];
         let windows: *mut AnyObject = msg_send![application, windows];
         let window: *mut AnyObject = msg_send![windows, firstObject];
@@ -1534,6 +1638,9 @@ fn set_desktop_foreground(app: &tauri::AppHandle, foreground: bool) {
     if let Some(state) = app.try_state::<std::sync::Arc<ratspeak_tauri::state::AppState>>() {
         let state = std::sync::Arc::clone(state.inner());
         let transition = state.begin_foreground_transition();
+        // Window visibility owns notification attention synchronously. The
+        // transport lifecycle transition may await Activity housekeeping.
+        state.set_notification_foreground(foreground);
         if foreground {
             tauri::async_runtime::spawn(async move {
                 let expiry = {
@@ -1687,7 +1794,10 @@ unsafe fn register_ios_memory_warning_observer() {
         return;
     };
     let Some(string_class) = AnyClass::get(c"NSString") else {
-        tracing::debug!(reason = "nsstring_unavailable", "iOS memory observer unavailable");
+        tracing::debug!(
+            reason = "nsstring_unavailable",
+            "iOS memory observer unavailable"
+        );
         return;
     };
     let center: *mut AnyObject = msg_send![center_class, defaultCenter];

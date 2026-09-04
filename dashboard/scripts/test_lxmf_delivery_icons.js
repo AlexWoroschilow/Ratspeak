@@ -64,6 +64,15 @@ var failed = icon('failed', 'opportunistic');
 assert(failed.includes('msg-state-failed'));
 assert(failed.includes('aria-label="Failed"'));
 
+var stopped = icon('cancelled', 'direct');
+assert(stopped.includes('aria-label="Sending cancelled"'));
+assert(source.includes('aria-label="Cancel sending message">Cancel</button>'));
+assert(source.includes("message: 'Cancel preparation and retries for this message?'"));
+assert(source.includes('Cancelled local retries. A copy already handed to the network may still arrive.'));
+assert(source.includes('No live send remained. The local message was cancelled, but a copy may still arrive.'));
+assert(source.includes('Cancelled before the message left this device.'));
+assert(source.includes("title: 'Cancel sending?'"));
+
 var css = fs.readFileSync(path.join(dashboardRoot, 'static', 'css', '09-messaging.css'), 'utf8');
 assert(/\.msg-state-sent svg\s*\{[^}]*var\(--text-muted\)/s.test(css),
     'sent checks must use the muted foreground');

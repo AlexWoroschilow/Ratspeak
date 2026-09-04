@@ -1,38 +1,42 @@
 name: Release Windows
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_call:
+    inputs:
+      source_ref:
+        description: "Exact tag or commit to build."
+        required: true
+        type: string
+      release_tag:
+        description: "Public version used in artifact names."
+        required: true
+        type: string
+      qualify_release_ref:
+        description: "Bind source BOMs to an existing annotated release tag."
+        required: true
+        type: boolean
   workflow_dispatch:
     inputs:
-      publish_github_release:
-        description: "Publish Windows artifacts to a GitHub Release"
+      source_ref:
+        description: "Commit or ref to build; defaults to the selected dispatch ref."
+        required: false
+        type: string
+      release_tag:
+        description: "Artifact version label; defaults to the selected ref name."
+        required: false
+        type: string
+      qualify_release_ref:
+        description: "Require release_tag to be the exact annotated product tag."
         required: true
         default: false
         type: boolean
-      release_tag:
-        description: "Release tag to publish when manually dispatching."
-        required: false
-        type: string
-      prerelease:
-        description: "Mark the GitHub Release as a prerelease."
-        required: true
-        default: true
-        type: boolean
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: release-windows-${{ inputs.release_tag || github.ref }}
   cancel-in-progress: false
-
-env:
-  RATSPEAK_RSRETICULUM_REF: ratspeak-v1.0.26d
-  RATSPEAK_RSLXMF_REF: ratspeak-v1.0.26d
-  RATSPEAK_RSLXST_REF: ratspeak-v1.0.26d
-  RATSPEAK_LRGP_REF: ratspeak-v1.0.26d
 
 jobs:
   build:
@@ -40,57 +44,105 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 150
     steps:
+      - name: Preserve source bytes
+        shell: bash
+        run: git config --global core.autocrlf false
+
       - name: Checkout Ratspeak
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           path: Ratspeak
+          fetch-depth: 0
+          ref: ${{ inputs.source_ref || github.sha }}
+
+      - name: Setup source qualification Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.22.0
+
+      - name: Load reviewed source set
+        id: source
+        shell: bash
+        working-directory: Ratspeak
+        run: node scripts/release/source-integrity.mjs github-outputs >> "$GITHUB_OUTPUT"
 
       - name: Checkout rsReticulum
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/rsReticulum
-          ref: ${{ env.RATSPEAK_RSRETICULUM_REF }}
+          ref: ${{ steps.source.outputs.rsreticulum_ref }}
           path: rsReticulum
+          fetch-depth: 0
 
       - name: Checkout rsLXMF
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/rsLXMF
-          ref: ${{ env.RATSPEAK_RSLXMF_REF }}
+          ref: ${{ steps.source.outputs.rslxmf_ref }}
           path: rsLXMF
+          fetch-depth: 0
 
       - name: Checkout rsLXST
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/rsLXST
-          ref: ${{ env.RATSPEAK_RSLXST_REF }}
+          ref: ${{ steps.source.outputs.rslxst_ref }}
           path: rsLXST
+          fetch-depth: 0
 
       - name: Checkout lrgp-rs
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/lrgp-rs
-          ref: ${{ env.RATSPEAK_LRGP_REF }}
+          ref: ${{ steps.source.outputs.lrgp_ref }}
           path: lrgp-rs
+          fetch-depth: 0
+
+      - name: Verify reviewed source set
+        shell: bash
+        working-directory: Ratspeak
+        run: node scripts/release/source-integrity.mjs verify-release-source
+
+      - name: Verify qualified release ref
+        if: ${{ inputs.qualify_release_ref }}
+        shell: pwsh
+        working-directory: Ratspeak
+        env:
+          RELEASE_REF: ${{ inputs.release_tag }}
+        run: |
+          & node scripts/release/source-integrity.mjs verify-tags
+          if ($LASTEXITCODE -ne 0) {
+            throw "Integration tag verification failed."
+          }
+          & node scripts/release/source-integrity.mjs verify-release-ref "$env:RELEASE_REF"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release ref verification failed."
+          }
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: ${{ steps.source.outputs.rust_toolchain }}
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
-          cache-bin: false
+          cache-bin: true
+          key: tauri-${{ steps.source.outputs.tauri_cli }}
           workspaces: |
             Ratspeak
             Ratspeak/src-tauri
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2.0" --locked
+        shell: bash
+        working-directory: Ratspeak
+        run: bash scripts/release/install-tauri-cli.sh "${{ steps.source.outputs.tauri_cli }}"
 
       - name: Run tests
+        timeout-minutes: 20
         working-directory: Ratspeak
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
       - name: Build CSS
         shell: bash
@@ -100,7 +152,7 @@ jobs:
       - name: Check Tauri desktop shell
         shell: bash
         working-directory: Ratspeak
-        run: cargo check --manifest-path src-tauri/Cargo.toml
+        run: cargo check --manifest-path src-tauri/Cargo.toml --locked
 
       - name: Build Tauri Windows installers
         shell: bash
@@ -108,24 +160,19 @@ jobs:
         run: |
           unset TAURI_CONFIG
           unset TAURI_DEV_HOST
-          cargo tauri build --bundles msi nsis
+          cargo tauri build --bundles msi nsis -- --locked
 
       - name: Check for bundled dev URLs
         shell: bash
         working-directory: Ratspeak
         run: bash scripts/release/assert-no-tauri-dev-url.sh src-tauri/target/release/bundle
 
-      - name: Validate manual release tag
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_github_release && inputs.release_tag == '' }}
-        shell: pwsh
-        run: |
-          throw "release_tag is required when publishing a GitHub Release from workflow_dispatch."
-
       - name: Stage Windows release artifacts
         shell: pwsh
         working-directory: Ratspeak
         env:
-          RELEASE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+          RELEASE_VERSION: ${{ inputs.release_tag || github.ref_name }}
+          QUALIFY_RELEASE_REF: ${{ inputs.qualify_release_ref }}
         run: |
           $ErrorActionPreference = "Stop"
           $version = "$env:RELEASE_VERSION".Trim()
@@ -159,7 +206,21 @@ jobs:
           Copy-Item $msi.FullName "$outDir/$msiName"
           Copy-Item $setup.FullName "$outDir/$setupName"
 
-          Get-Item "$outDir/$msiName", "$outDir/$setupName" |
+          $bomArgs = @(
+            "scripts/release/source-integrity.mjs",
+            "bom",
+            "--output",
+            "$outDir/Ratspeak-$version-windows-source-bom.json"
+          )
+          if ($env:QUALIFY_RELEASE_REF -eq "true") {
+            $bomArgs += @("--release-ref", $version)
+          }
+          & node @bomArgs
+          if ($LASTEXITCODE -ne 0) {
+            throw "Source BOM generation failed."
+          }
+
+          Get-Item "$outDir/$msiName", "$outDir/$setupName", "$outDir/Ratspeak-$version-windows-source-bom.json" |
             Format-Table Name, Length
 
       - name: Write Windows checksums
@@ -179,7 +240,7 @@ jobs:
             throw "No Windows artifacts found for checksums."
           }
 
-          $checksumPath = Join-Path (Get-Location) $checksumFile
+          $checksumPath = Join-Path (Get-Location) "dist/windows/$checksumFile"
           $contents = ($lines -join "`n") + "`n"
           [System.IO.File]::WriteAllText(
             $checksumPath,
@@ -188,27 +249,9 @@ jobs:
           )
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: ratspeak-windows
-          path: |
-            Ratspeak/dist/windows/*
-            Ratspeak/checksums-windows.txt
+          path: Ratspeak/dist/windows/*
           if-no-files-found: error
           retention-days: 7
-
-      - name: Publish GitHub Release
-        if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_github_release) }}
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
-          prerelease: ${{ github.event_name == 'push' || inputs.prerelease }}
-          body: |
-            - Public Channels beta: connect, discover, share, and join live RRC hubs with local history, unread counts, mentions, presence, and identity avatars
-            - Bidirectional RRC messages and actions with authenticated reconnect/rejoin and safer malformed-peer handling
-            - Opt-in hub hosting with graphical room, access, moderation, and discovery controls
-            - Mobile Channels polish for keyboard resizing, safe areas, Back navigation, sheets, and partial member lists
-            - Privacy-bounded Activity diagnostics plus broader Reticulum, LXMF, and LXST reliability fixes
-          files: |
-            Ratspeak/dist/windows/*
-            Ratspeak/checksums-windows.txt

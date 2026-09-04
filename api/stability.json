@@ -1,0 +1,101 @@
+{
+  "schemaVersion": 1,
+  "tool": {
+    "name": "cargo-public-api",
+    "version": "0.52.0",
+    "rustdocToolchain": "nightly-2026-08-01",
+    "target": "aarch64-apple-darwin",
+    "arguments": [
+      "--all-features",
+      "-sss"
+    ]
+  },
+  "baseline": {
+    "commit": "fc78e4926c696a921f308d238ef1b620e0db0078",
+    "capturedOn": "2026-08-17"
+  },
+  "compatibilityFloor": {
+    "evidenceCommit": "7209cd7018d238e0c054bcc8e7b89cb1ac8b0341",
+    "sourceCommit": "fc78e4926c696a921f308d238ef1b620e0db0078"
+  },
+  "snapshotSource": {
+    "commit": "1886478993ab905d9e6ca77ebe3784b85630f88b",
+    "capturedOn": "2026-08-24",
+    "review": {
+      "areas": [
+        "application domain and configuration",
+        "database and persistence",
+        "Reticulum and messaging runtime",
+        "Tauri commands and events",
+        "desktop and mobile application shell"
+      ],
+      "canonicalDependencies": [
+        "lxmf_core::message_api",
+        "lxst_telephony::TelephonyService::registered",
+        "lrgp::protocol"
+      ],
+      "classification": "application-internal lifecycle, persistence, and mobile integration",
+      "publicApiDiff": {
+        "added": 123,
+        "removed": 12
+      },
+      "semver": "no public-library consequence; application integration only",
+      "deprecations": "none",
+      "wirePersistenceRuntimeImpact": "no wire-format change; retains the reviewed announce, readiness, and persistence boundaries while exposing one application-internal BLE RNode startup-policy helper used to persist firmware Bluetooth availability",
+      "platformEvidence": [
+        "rsReticulum full Rust workspace, MSRV, API, and cross-platform CI gates",
+        "Ratspeak full Rust workspace, strict Clippy, source-contract, and dashboard behavior gates",
+        "Android arm64 Kotlin policy, BLE lifecycle, and application compilation gates",
+        "physical Android BLE RNode power-cycle, pairing, reconnect, and interface-resume verification",
+        "desktop and Android message-action and native-selection interaction verification"
+      ]
+    }
+  },
+  "packages": [
+    {
+      "name": "ratspeak-core",
+      "manifestPath": "Cargo.toml",
+      "tier": "application-internal",
+      "compatibility": "reviewed-snapshot",
+      "snapshot": "api/snapshots/ratspeak-core.txt",
+      "itemCount": 186,
+      "sha256": "d545a522d547a5e9847898b735595fa17b74c38bad013741ad15cd1964413241"
+    },
+    {
+      "name": "ratspeak-db",
+      "manifestPath": "Cargo.toml",
+      "tier": "application-internal",
+      "compatibility": "reviewed-snapshot",
+      "snapshot": "api/snapshots/ratspeak-db.txt",
+      "itemCount": 686,
+      "sha256": "f53dd3f0aef794bb279d6a5f77954bf4034eeabf2e28cccd67e3d67e4484586a"
+    },
+    {
+      "name": "ratspeak-runtime",
+      "manifestPath": "Cargo.toml",
+      "tier": "application-internal",
+      "compatibility": "reviewed-snapshot",
+      "snapshot": "api/snapshots/ratspeak-runtime.txt",
+      "itemCount": 2465,
+      "sha256": "11ae8fd9547b39fb2413263dcc0bc4e5f03fa0db1d37307086e5987d71f1719b"
+    },
+    {
+      "name": "ratspeak-tauri",
+      "manifestPath": "Cargo.toml",
+      "tier": "application-internal",
+      "compatibility": "reviewed-snapshot",
+      "snapshot": "api/snapshots/ratspeak-tauri.txt",
+      "itemCount": 794,
+      "sha256": "e5c700da3c2adb819cb68ceb98dc00f41241d5819ba2ccb242e322f921093204"
+    },
+    {
+      "name": "ratspeak",
+      "manifestPath": "src-tauri/Cargo.toml",
+      "tier": "application-internal",
+      "compatibility": "reviewed-snapshot",
+      "snapshot": "api/snapshots/ratspeak.txt",
+      "itemCount": 2,
+      "sha256": "034278ac95cbe749a710332e76ec105d2188a36da147738f9f852517872f38d6"
+    }
+  ]
+}

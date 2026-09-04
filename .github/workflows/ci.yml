@@ -15,42 +15,101 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RATSPEAK_RSRETICULUM_REF: a1b78564e08988c11f8ecac80c3ea6d596b22cab
-  RATSPEAK_RSLXMF_REF: 681c0f5961acce637183efc9a4047bf25ead56bf
-  RATSPEAK_RSLXST_REF: 47827c9e2adb1fbdff84b12e687581f9c8991344
-  RATSPEAK_LRGP_REF: 58909b23b1ea0657e7668274e9c3bee4a511e353
+  RATSPEAK_RSRETICULUM_REF: 3b3eb29c16c9dbc114c9b31d9f912a7b1a68652c
+  RATSPEAK_RSLXMF_REF: e210e0c244c76532faae99696f83c94d44c27dc6
+  RATSPEAK_RSLXST_REF: f228e2e1b1c026728c728549f70ce22633770009
+  RATSPEAK_LRGP_REF: 88c8665e1e7e1ad710e53e8da6425f3dbe4f5856
 
 jobs:
+  api-compat:
+    name: Internal Rust API baseline
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          path: Ratspeak
+          fetch-depth: 0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ${{ github.repository_owner }}/rsReticulum
+          ref: ${{ env.RATSPEAK_RSRETICULUM_REF }}
+          path: rsReticulum
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ${{ github.repository_owner }}/rsLXMF
+          ref: ${{ env.RATSPEAK_RSLXMF_REF }}
+          path: rsLXMF
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ${{ github.repository_owner }}/rsLXST
+          ref: ${{ env.RATSPEAK_RSLXST_REF }}
+          path: rsLXST
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ${{ github.repository_owner }}/lrgp-rs
+          ref: ${{ env.RATSPEAK_LRGP_REF }}
+          path: lrgp-rs
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: nightly-2026-08-01
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: Ratspeak, Ratspeak/src-tauri
+          cache-bin: true
+      - name: Install API snapshot tool
+        run: cargo install cargo-public-api --version 0.52.0 --locked
+      - name: Check reviewed Rust API baseline
+        run: python3 tools/check-api-baseline.py
+        working-directory: Ratspeak
+      - name: Check manifest and feature contract
+        run: python3 tools/check-api-manifest.py
+        working-directory: Ratspeak
+      - name: Check reviewed compatibility floor
+        run: python3 tools/check-api-compatibility.py
+        working-directory: Ratspeak
+
   test:
     name: Test
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           path: Ratspeak
-      - uses: actions/checkout@v5
+          fetch-depth: 0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/rsReticulum
           ref: ${{ env.RATSPEAK_RSRETICULUM_REF }}
           path: rsReticulum
-      - uses: actions/checkout@v5
+          fetch-depth: 0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/rsLXMF
           ref: ${{ env.RATSPEAK_RSLXMF_REF }}
           path: rsLXMF
-      - uses: actions/checkout@v5
+          fetch-depth: 0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/rsLXST
           ref: ${{ env.RATSPEAK_RSLXST_REF }}
           path: rsLXST
-      - uses: actions/checkout@v5
+          fetch-depth: 0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/lrgp-rs
           ref: ${{ env.RATSPEAK_LRGP_REF }}
           path: lrgp-rs
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.22.0
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           cache-bin: false
           workspaces: Ratspeak
@@ -72,8 +131,14 @@ jobs:
       - name: Validate shell scripts
         run: bash -n dashboard/build-css.sh scripts/release/*.sh
         working-directory: Ratspeak
+      - name: Validate Android JNI source boundary
+        run: python3 scripts/release/assert-android-jni-boundaries.py source
+        working-directory: Ratspeak
       - name: Validate ordinary workflow dependency pins
         run: bash scripts/ci/check-workflow-dependency-pins.sh
+        working-directory: Ratspeak
+      - name: Validate reviewed source set
+        run: node --test scripts/release/source-integrity.test.mjs
         working-directory: Ratspeak
       - name: Build dashboard CSS
         run: bash dashboard/build-css.sh
@@ -96,33 +161,39 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           path: Ratspeak
-      - uses: actions/checkout@v5
+          fetch-depth: 0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/rsReticulum
           ref: ${{ env.RATSPEAK_RSRETICULUM_REF }}
           path: rsReticulum
-      - uses: actions/checkout@v5
+          fetch-depth: 0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/rsLXMF
           ref: ${{ env.RATSPEAK_RSLXMF_REF }}
           path: rsLXMF
-      - uses: actions/checkout@v5
+          fetch-depth: 0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/rsLXST
           ref: ${{ env.RATSPEAK_RSLXST_REF }}
           path: rsLXST
-      - uses: actions/checkout@v5
+          fetch-depth: 0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/lrgp-rs
           ref: ${{ env.RATSPEAK_LRGP_REF }}
           path: lrgp-rs
-      - uses: dtolnay/rust-toolchain@stable
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
+          toolchain: stable
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           cache-bin: false
           workspaces: Ratspeak
@@ -151,37 +222,43 @@ jobs:
         working-directory: Ratspeak
 
   msrv:
-    name: Rust 1.85 MSRV
+    name: Rust 1.87 MSRV
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           path: Ratspeak
-      - uses: actions/checkout@v5
+          fetch-depth: 0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/rsReticulum
           ref: ${{ env.RATSPEAK_RSRETICULUM_REF }}
           path: rsReticulum
-      - uses: actions/checkout@v5
+          fetch-depth: 0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/rsLXMF
           ref: ${{ env.RATSPEAK_RSLXMF_REF }}
           path: rsLXMF
-      - uses: actions/checkout@v5
+          fetch-depth: 0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/rsLXST
           ref: ${{ env.RATSPEAK_RSLXST_REF }}
           path: rsLXST
-      - uses: actions/checkout@v5
+          fetch-depth: 0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/lrgp-rs
           ref: ${{ env.RATSPEAK_LRGP_REF }}
           path: lrgp-rs
-      - uses: dtolnay/rust-toolchain@1.85.0
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
+          toolchain: 1.87.0
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           cache-bin: false
           workspaces: |
@@ -218,31 +295,38 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           path: Ratspeak
-      - uses: actions/checkout@v5
+          fetch-depth: 0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/rsReticulum
           ref: ${{ env.RATSPEAK_RSRETICULUM_REF }}
           path: rsReticulum
-      - uses: actions/checkout@v5
+          fetch-depth: 0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/rsLXMF
           ref: ${{ env.RATSPEAK_RSLXMF_REF }}
           path: rsLXMF
-      - uses: actions/checkout@v5
+          fetch-depth: 0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/rsLXST
           ref: ${{ env.RATSPEAK_RSLXST_REF }}
           path: rsLXST
-      - uses: actions/checkout@v5
+          fetch-depth: 0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/lrgp-rs
           ref: ${{ env.RATSPEAK_LRGP_REF }}
           path: lrgp-rs
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           cache-bin: false
           workspaces: |
@@ -266,7 +350,7 @@ jobs:
             native_android_lint: true
           - os: ubuntu-latest
             target: aarch64-linux-android
-            toolchain: 1.85.0
+            toolchain: 1.87.0
             native_android_lint: false
           - os: macos-latest
             target: aarch64-apple-ios-sim
@@ -274,55 +358,72 @@ jobs:
             native_android_lint: false
           - os: macos-latest
             target: aarch64-apple-ios-sim
-            toolchain: 1.85.0
+            toolchain: 1.87.0
             native_android_lint: false
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           path: Ratspeak
-      - uses: actions/checkout@v5
+          fetch-depth: 0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/rsReticulum
           ref: ${{ env.RATSPEAK_RSRETICULUM_REF }}
           path: rsReticulum
-      - uses: actions/checkout@v5
+          fetch-depth: 0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/rsLXMF
           ref: ${{ env.RATSPEAK_RSLXMF_REF }}
           path: rsLXMF
-      - uses: actions/checkout@v5
+          fetch-depth: 0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/rsLXST
           ref: ${{ env.RATSPEAK_RSLXST_REF }}
           path: rsLXST
-      - uses: actions/checkout@v5
+          fetch-depth: 0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/lrgp-rs
           ref: ${{ env.RATSPEAK_LRGP_REF }}
           path: lrgp-rs
-      - uses: dtolnay/rust-toolchain@master
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        if: matrix.native_android_lint
+        with:
+          node-version: 22.22.0
+      - name: Load reviewed mobile toolchains
+        if: matrix.native_android_lint
+        id: mobile-source
+        working-directory: Ratspeak
+        run: node scripts/release/source-integrity.mjs github-outputs >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
           toolchain: ${{ matrix.toolchain }}
           targets: ${{ matrix.target }}
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           cache-bin: false
           workspaces: Ratspeak/src-tauri
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: nttld/setup-ndk@v1
+      - uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779
         if: matrix.target == 'aarch64-linux-android'
         id: setup-ndk
         with:
           ndk-version: r27d
           add-to-path: false
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
         if: matrix.native_android_lint
         with:
           distribution: temurin
           java-version: '17'
           cache: gradle
           cache-dependency-path: Ratspeak/src-tauri/gen/android/**/*.gradle*
+      - name: Install Tauri CLI
+        if: matrix.native_android_lint
+        run: cargo install tauri-cli --version "${{ steps.mobile-source.outputs.tauri_cli }}" --locked
       - name: Clippy Android
         if: matrix.target == 'aarch64-linux-android'
         working-directory: Ratspeak
@@ -335,13 +436,24 @@ jobs:
           TAURI_ANDROID_PACKAGE_UNESCAPED: org.ratspeak.android
           WRY_ANDROID_PACKAGE: org.ratspeak.android
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }} --all-targets --all-features --locked -- -D warnings
-      - name: Compile Kotlin and run Android lint
+      - name: Build minified Android APK and run release lint
         if: matrix.native_android_lint
-        working-directory: Ratspeak/src-tauri/gen/android
+        working-directory: Ratspeak/src-tauri
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          TAURI_ANDROID_PROJECT_PATH: ${{ github.workspace }}/Ratspeak/src-tauri/gen/android
+          TAURI_ANDROID_PACKAGE_UNESCAPED: org.ratspeak.android
+          WRY_ANDROID_PACKAGE: org.ratspeak.android
         run: |
-          test -s tauri.settings.gradle
-          test -s app/tauri.build.gradle.kts
-          ./gradlew :app:compileArm64DebugKotlin :app:lintArm64Debug --warning-mode all --no-daemon
+          test -s gen/android/tauri.settings.gradle
+          test -s gen/android/app/tauri.build.gradle.kts
+          unset TAURI_CONFIG
+          unset TAURI_DEV_HOST
+          cargo tauri android build --target aarch64 --apk -- --locked
+          ./gen/android/gradlew -p gen/android :app:lintArm64Release --warning-mode all --no-daemon
+          apk=gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk
+          test -f "$apk"
+          python3 ../scripts/release/assert-android-jni-boundaries.py archive "$apk"
       - name: Clippy iOS simulator
         if: matrix.target == 'aarch64-apple-ios-sim'
         working-directory: Ratspeak

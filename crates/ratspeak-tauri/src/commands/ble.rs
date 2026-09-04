@@ -8,8 +8,6 @@
 
 use std::sync::Arc;
 
-#[cfg(feature = "ble")]
-use bytes::Bytes;
 use serde::Deserialize;
 #[cfg(any(feature = "ble", test))]
 use serde::Serialize;
@@ -23,11 +21,11 @@ use ratspeak_runtime::activity::producer::{
 #[cfg(target_os = "android")]
 use ratspeak_runtime::mobile_platform::NativeBleRnodeDisconnect;
 #[cfg(feature = "ble")]
-use rns_interface::rnode::RNodeStartupOptions;
+use ratspeak_runtime::rns::ble_rnode_startup_options;
 
 use crate::commands::interface_activity::record_interface_event as record_interface_activity;
 #[cfg(any(feature = "ble", test))]
-use crate::commands::rnode_readiness::RnodeReadinessFailure;
+use crate::commands::rnode_readiness::{RnodeReadinessFailure, RnodeReadyStatsPublicationFailure};
 #[cfg(feature = "ble")]
 use crate::commands::rnode_readiness::{await_spawned_rnode_ready, teardown_spawned_rnode_exact};
 #[cfg(feature = "ble")]
@@ -129,6 +127,32 @@ fn ble_rnode_readiness_failure_feedback(
             "RNode startup timed out. Check the radio and try again.",
             "startup_timeout",
             BleRnodeActivityOutcome::StartupTimedOut,
+        ),
+        RnodeReadinessFailure::CapabilityAdmissionRejected(_) => (
+            "RNode did not become ready. Try connecting again.",
+            "readiness_failed",
+            BleRnodeActivityOutcome::RuntimeFailed,
+        ),
+        RnodeReadinessFailure::ReadyStatsPublication(
+            RnodeReadyStatsPublicationFailure::Timeout,
+        ) => (
+            "RNode became ready, but its interface status timed out. Try connecting again.",
+            "ready_stats_timeout",
+            BleRnodeActivityOutcome::RuntimeFailed,
+        ),
+        RnodeReadinessFailure::ReadyStatsPublication(
+            RnodeReadyStatsPublicationFailure::ObservationLost,
+        ) => (
+            "RNode disconnected before setup completed. Try connecting again.",
+            "ready_observation_lost",
+            BleRnodeActivityOutcome::RuntimeFailed,
+        ),
+        RnodeReadinessFailure::ReadyStatsPublication(
+            RnodeReadyStatsPublicationFailure::SessionReplaced,
+        ) => (
+            "RNode setup was replaced before it completed. Try connecting again.",
+            "ready_session_replaced",
+            BleRnodeActivityOutcome::RuntimeFailed,
         ),
         RnodeReadinessFailure::ShuttingDown
         | RnodeReadinessFailure::Stopped
@@ -368,6 +392,27 @@ fn ble_recent_disconnect_seed_addresses(
 }
 
 #[cfg(any(feature = "ble", test))]
+fn ble_recent_disconnect_identity_seeds(
+    v2_json: Option<&str>,
+) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let Some(records) = v2_json
+        .and_then(|value| serde_json::from_str::<Vec<BleRecentDisconnectRecord>>(value).ok())
+    else {
+        return out;
+    };
+    for record in records
+        .into_iter()
+        .filter_map(normalize_ble_recent_disconnect_record)
+    {
+        if !record.identity_hash.is_empty() {
+            out.entry(record.address).or_insert(record.identity_hash);
+        }
+    }
+    out
+}
+
+#[cfg(any(feature = "ble", test))]
 fn update_ble_recent_disconnect_records(
     mut records: Vec<BleRecentDisconnectRecord>,
     address: String,
@@ -408,6 +453,94 @@ fn now_unix_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(any(feature = "ble", test))]
+fn logical_ble_peer_count(
+    address_to_identity: &std::collections::HashMap<String, String>,
+) -> usize {
+    address_to_identity
+        .values()
+        .filter(|identity| is_valid_identity_hash_hex(identity))
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+}
+
+#[cfg(any(feature = "ble", test))]
+fn verified_ble_peer_rows(
+    address_to_identity: &std::collections::HashMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    address_to_identity
+        .iter()
+        .filter(|(_, identity)| is_valid_identity_hash_hex(identity))
+        .map(|(address, identity)| (address.clone(), identity.clone()))
+        .collect()
+}
+
+#[cfg(any(feature = "ble", test))]
+fn ble_retry_owns_connection(
+    generations: &std::collections::HashMap<String, u64>,
+    address: &str,
+    generation: u64,
+) -> bool {
+    generations
+        .get(address)
+        .is_some_and(|current| *current == generation)
+}
+
+#[cfg(any(feature = "ble", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BleIdentityResolutionDisposition {
+    Accepted,
+    Duplicate,
+    Disconnected,
+    Conflict,
+    Invalid,
+}
+
+#[cfg(any(feature = "ble", test))]
+fn begin_ble_connection_generation(
+    connected: &mut std::collections::HashSet<String>,
+    verified: &mut std::collections::HashSet<String>,
+    address_to_identity: &mut std::collections::HashMap<String, String>,
+    address: &str,
+) -> bool {
+    let fresh = connected.insert(address.to_string());
+    if fresh {
+        verified.remove(address);
+        address_to_identity.insert(address.to_string(), String::new());
+    }
+    fresh
+}
+
+#[cfg(any(feature = "ble", test))]
+fn accept_ble_identity_for_live_connection(
+    connected: &std::collections::HashSet<String>,
+    verified: &mut std::collections::HashSet<String>,
+    address_to_identity: &mut std::collections::HashMap<String, String>,
+    address: &str,
+    identity_hash: &str,
+) -> BleIdentityResolutionDisposition {
+    if !is_valid_identity_hash_hex(identity_hash) {
+        return BleIdentityResolutionDisposition::Invalid;
+    }
+    if !connected.contains(address) {
+        return BleIdentityResolutionDisposition::Disconnected;
+    }
+    if verified.contains(address) {
+        return if address_to_identity
+            .get(address)
+            .is_some_and(|current| current == identity_hash)
+        {
+            BleIdentityResolutionDisposition::Duplicate
+        } else {
+            BleIdentityResolutionDisposition::Conflict
+        };
+    }
+
+    address_to_identity.insert(address.to_string(), identity_hash.to_string());
+    verified.insert(address.to_string());
+    BleIdentityResolutionDisposition::Accepted
 }
 
 fn ble_peer_expires_at_for_duration(duration_secs: u64) -> u64 {
@@ -482,6 +615,26 @@ fn emit_ble_peer_enabled_status(state: &Arc<AppState>) {
             "peer_count": peer_count,
         }),
     );
+}
+
+#[cfg(any(feature = "ble", test))]
+const BLE_IDENTITY_ANNOUNCE_RETRY_DELAYS_SECS: [u64; 5] = [0, 2, 5, 10, 20];
+
+#[cfg(feature = "ble")]
+async fn send_ble_identity_announce_once(state: &Arc<AppState>) -> bool {
+    let activity_origin = state.activity_request_fence();
+    let report = crate::send_typed_announce_from_origin(
+        state,
+        crate::announce::AnnounceOrigin::InterfaceOnline,
+        activity_origin,
+    )
+    .await;
+    matches!(
+        report.disposition,
+        crate::AnnounceSendDisposition::Queued
+            | crate::AnnounceSendDisposition::AlreadyQueued
+            | crate::AnnounceSendDisposition::Deferred
+    )
 }
 
 #[cfg_attr(not(feature = "ble"), allow(dead_code))]
@@ -582,34 +735,36 @@ fn spawn_enable_ble_peer_task(
                 .ok()
                 .and_then(|g| g.as_ref().map(|mgr| mgr.identity_hash.clone()));
 
-            let (identity_hash, seed_addresses) = db::spawn_db(state_arc.db.clone(), move |p| {
-                let hash_hex = from_lxmf
-                    .filter(|h| !h.is_empty())
-                    .or_else(|| {
-                        db::get_active_identity(&p).and_then(|v| {
-                            v.get("hash")
-                                .and_then(|s| s.as_str())
-                                .map(|s| s.to_string())
+            let (identity_hash, seed_addresses, provisional_identities) =
+                db::spawn_db(state_arc.db.clone(), move |p| {
+                    let hash_hex = from_lxmf
+                        .filter(|h| !h.is_empty())
+                        .or_else(|| {
+                            db::get_active_identity(&p).and_then(|v| {
+                                v.get("hash")
+                                    .and_then(|s| s.as_str())
+                                    .map(|s| s.to_string())
+                            })
                         })
-                    })
-                    .unwrap_or_default();
-                let id = hex::decode(&hash_hex).unwrap_or_default();
-                let recent_v2 = db::get_setting(&p, BLE_RECENT_DISCONNECTS_V2_SETTING);
-                let recent_legacy = db::get_setting(&p, BLE_RECENT_DISCONNECTS_SETTING);
-                let seed = ble_recent_disconnect_seed_addresses(
-                    recent_v2.as_deref(),
-                    recent_legacy.as_deref(),
-                );
-                tracing::info!(
-                    hash_hex_len = hash_hex.len(),
-                    decoded_len = id.len(),
-                    seed_address_count = seed.len(),
-                    "Bluetooth Peer enable: resolved active identity"
-                );
-                (id, seed)
-            })
-            .await
-            .expect("db task panicked");
+                        .unwrap_or_default();
+                    let id = hex::decode(&hash_hex).unwrap_or_default();
+                    let recent_v2 = db::get_setting(&p, BLE_RECENT_DISCONNECTS_V2_SETTING);
+                    let recent_legacy = db::get_setting(&p, BLE_RECENT_DISCONNECTS_SETTING);
+                    let seed = ble_recent_disconnect_seed_addresses(
+                        recent_v2.as_deref(),
+                        recent_legacy.as_deref(),
+                    );
+                    let provisional = ble_recent_disconnect_identity_seeds(recent_v2.as_deref());
+                    tracing::info!(
+                        hash_hex_len = hash_hex.len(),
+                        decoded_len = id.len(),
+                        seed_address_count = seed.len(),
+                        "Bluetooth Peer enable: resolved active identity"
+                    );
+                    (id, seed, provisional)
+                })
+                .await
+                .expect("db task panicked");
 
             // Zero/missing identity → Android startAdvertising SecurityException.
             if !rns_interface::ble_peer::is_valid_identity_hash(&identity_hash) {
@@ -679,25 +834,25 @@ fn spawn_enable_ble_peer_task(
                     let state_relay: Arc<AppState> = Arc::clone(&state_arc);
                     tokio::spawn(async move {
                         use rns_interface::ble_peer::BlePeerEvent;
-                        // Disconnected events lack identity; track per-address.
+                        // Only a signature-verified announce makes a GATT
+                        // connection identity-addressable and message-ready.
                         let mut address_to_identity: std::collections::HashMap<String, String> =
                             std::collections::HashMap::new();
+                        let mut provisional_identity_by_address = provisional_identities;
+                        let verified_addresses = Arc::new(tokio::sync::RwLock::new(
+                            std::collections::HashSet::<String>::new(),
+                        ));
+                        let connected_addresses = Arc::new(tokio::sync::RwLock::new(
+                            std::collections::HashSet::<String>::new(),
+                        ));
+                        let connection_generations =
+                            Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::<
+                                String,
+                                u64,
+                            >::new(
+                            )));
+                        let mut next_connection_generation = 1u64;
                         let mut peripheral_degradation_recorded = false;
-                        fn logical_ble_peer_count(
-                            address_to_identity: &std::collections::HashMap<String, String>,
-                        ) -> usize {
-                            let mut identities = std::collections::HashSet::new();
-                            let mut unidentified = 0usize;
-                            for identity in address_to_identity.values() {
-                                if identity.is_empty() {
-                                    unidentified += 1;
-                                } else {
-                                    identities.insert(identity.as_str());
-                                }
-                            }
-                            identities.len() + unidentified
-                        }
-
                         fn store_logical_ble_peer_count(
                             state: &AppState,
                             address_to_identity: &std::collections::HashMap<String, String>,
@@ -709,10 +864,7 @@ fn spawn_enable_ble_peer_task(
                             // Mirror into AppState so api_ble_peer_status can hand
                             // the current peer rows back after a webview reload.
                             if let Ok(mut peers) = state.ble_peers.lock() {
-                                *peers = address_to_identity
-                                    .iter()
-                                    .map(|(a, i)| (a.clone(), i.clone()))
-                                    .collect();
+                                *peers = verified_ble_peer_rows(address_to_identity);
                             }
                             peer_count
                         }
@@ -755,25 +907,57 @@ fn spawn_enable_ble_peer_task(
                                 }
                                 BlePeerEvent::Connected {
                                     address,
-                                    identity_hash,
+                                    identity_hash: _,
                                     protocol,
                                 } => {
-                                    address_to_identity
-                                        .insert(address.clone(), identity_hash.clone());
+                                    let fresh_connection = {
+                                        let mut connected = connected_addresses.write().await;
+                                        let mut verified = verified_addresses.write().await;
+                                        begin_ble_connection_generation(
+                                            &mut connected,
+                                            &mut verified,
+                                            &mut address_to_identity,
+                                            &address,
+                                        )
+                                    };
+                                    if fresh_connection {
+                                        connection_generations
+                                            .write()
+                                            .await
+                                            .insert(address.clone(), next_connection_generation);
+                                        next_connection_generation =
+                                            next_connection_generation.wrapping_add(1).max(1);
+                                    }
                                     emit_logical_ble_peer_status(
                                         &state_relay,
                                         &address_to_identity,
                                     );
+                                    let provisional_identity_hash = provisional_identity_by_address
+                                        .get(&address)
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    let resolved_identity_hash = address_to_identity
+                                        .get(&address)
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    let routable =
+                                        is_valid_identity_hash_hex(&resolved_identity_hash);
                                     state_relay.emit_to_all(
                                         "ble_peer_connected",
                                         json!({
                                             "address": address,
-                                            "identity_hash": identity_hash,
+                                            "identity_hash": resolved_identity_hash,
+                                            "provisional_identity_hash": provisional_identity_hash,
+                                            "readiness": if routable { "routable" } else { "connected" },
+                                            "routable": routable,
                                             "protocol": protocol,
                                         }),
                                     );
                                 }
                                 BlePeerEvent::Disconnected { address, reason } => {
+                                    connected_addresses.write().await.remove(&address);
+                                    verified_addresses.write().await.remove(&address);
+                                    connection_generations.write().await.remove(&address);
                                     let identity_hash = address_to_identity
                                         .remove(&address)
                                         .filter(|value| is_valid_identity_hash_hex(value));
@@ -841,18 +1025,98 @@ fn spawn_enable_ble_peer_task(
                                     address,
                                     identity_hash,
                                 } => {
+                                    let resolution = {
+                                        let connected = connected_addresses.read().await;
+                                        let mut verified = verified_addresses.write().await;
+                                        accept_ble_identity_for_live_connection(
+                                            &connected,
+                                            &mut verified,
+                                            &mut address_to_identity,
+                                            &address,
+                                            &identity_hash,
+                                        )
+                                    };
+                                    match resolution {
+                                        BleIdentityResolutionDisposition::Accepted => {}
+                                        BleIdentityResolutionDisposition::Duplicate => {
+                                            tracing::trace!(
+                                                peer = %address,
+                                                identity = %identity_hash,
+                                                "Ignored duplicate BLE identity resolution for live connection"
+                                            );
+                                            continue;
+                                        }
+                                        BleIdentityResolutionDisposition::Disconnected => {
+                                            tracing::debug!(
+                                                peer = %address,
+                                                identity = %identity_hash,
+                                                "Ignored BLE identity resolution without a live connection lease"
+                                            );
+                                            continue;
+                                        }
+                                        BleIdentityResolutionDisposition::Conflict => {
+                                            tracing::warn!(
+                                                peer = %address,
+                                                identity = %identity_hash,
+                                                "Rejected conflicting BLE identity resolution for live connection"
+                                            );
+                                            continue;
+                                        }
+                                        BleIdentityResolutionDisposition::Invalid => {
+                                            tracing::warn!(
+                                                peer = %address,
+                                                identity = %identity_hash,
+                                                "Rejected malformed BLE identity resolution"
+                                            );
+                                            continue;
+                                        }
+                                    }
                                     // Disconnect path persists recent reconnect records from this map.
-                                    address_to_identity
+                                    provisional_identity_by_address
                                         .insert(address.clone(), identity_hash.clone());
                                     emit_logical_ble_peer_status(
                                         &state_relay,
                                         &address_to_identity,
                                     );
+                                    let db = state_relay.db.clone();
+                                    let address_for_persist = address.clone();
+                                    let identity_for_persist = identity_hash.clone();
+                                    tokio::spawn(async move {
+                                        let _ = db::spawn_db(db, move |p| {
+                                            let records = db::get_setting(
+                                                &p,
+                                                BLE_RECENT_DISCONNECTS_V2_SETTING,
+                                            )
+                                            .and_then(|value| {
+                                                serde_json::from_str::<
+                                                    Vec<BleRecentDisconnectRecord>,
+                                                >(&value)
+                                                .ok()
+                                            })
+                                            .unwrap_or_default();
+                                            let records = update_ble_recent_disconnect_records(
+                                                records,
+                                                address_for_persist,
+                                                Some(identity_for_persist),
+                                                now_unix_secs(),
+                                            );
+                                            if let Ok(value) = serde_json::to_string(&records) {
+                                                db::set_setting(
+                                                    &p,
+                                                    BLE_RECENT_DISCONNECTS_V2_SETTING,
+                                                    &value,
+                                                );
+                                            }
+                                        })
+                                        .await;
+                                    });
                                     state_relay.emit_to_all(
                                         "ble_peer_identity_resolved",
                                         json!({
                                             "address": address,
                                             "identity_hash": identity_hash,
+                                            "readiness": "routable",
+                                            "routable": true,
                                         }),
                                     );
                                 }
@@ -880,64 +1144,99 @@ fn spawn_enable_ble_peer_task(
                                         json!({ "reason": reason }),
                                     );
                                 }
-                                BlePeerEvent::StatusChanged { state, peer_count } => {
-                                    state_relay.emit_to_all(
-                                        "ble_peer_status_changed",
-                                        json!({
-                                            "state": state,
-                                            "peer_count": peer_count,
-                                        }),
-                                    );
-                                }
-                                BlePeerEvent::SubscribeReady { .. } => {
-                                    // Kick-announce so the peer learns our identity.
-                                    let (packet, transport_tx, dest_hash) = {
-                                        let pkt = if let Ok(mut lxmf) = state_relay.lxmf.lock() {
-                                            lxmf.as_mut()
-                                                .and_then(|mgr| mgr.create_announce_packet().ok())
-                                        } else {
-                                            None
-                                        };
-                                        let tx = state_relay.rns.read().ok().and_then(|r| {
-                                            r.as_ref().map(|mgr| mgr.handle.transport_tx.clone())
-                                        });
-                                        let dh = if let Ok(lxmf) = state_relay.lxmf.lock() {
-                                            lxmf.as_ref().map(|mgr| mgr.lxmf_dest_hash)
-                                        } else {
-                                            None
-                                        };
-                                        (pkt, tx, dh)
-                                    };
-                                    if let (Some(raw), Some(tx), Some(dh)) =
-                                        (packet, transport_tx, dest_hash)
-                                    {
-                                        tokio::spawn(async move {
-                                            match tx
-                                                .send(
-                                                    rns_transport::messages::TransportMessage::Outbound(
-                                                        rns_transport::messages::OutboundRequest {
-                                                            raw: Bytes::from(raw),
-                                                            destination_hash: dh,
-                                                        },
-                                                    ),
-                                                )
-                                                .await
-                                            {
-                                                Ok(_) => tracing::info!(
-                                                    "Bluetooth Peer kick-announce sent on peer subscribe"
-                                                ),
-                                                Err(_) => tracing::warn!(
-                                                    reason = "announce_failed",
-                                                    "Bluetooth Peer kick-announce failed"
-                                                ),
-                                            }
-                                        });
-                                    } else {
-                                        tracing::debug!(
-                                            reason = "runtime_not_ready",
-                                            "Bluetooth Peer kick-announce skipped (RNS or LXMF not initialized)"
+                                BlePeerEvent::StatusChanged {
+                                    state,
+                                    peer_count: _,
+                                } => match state {
+                                    rns_interface::ble_peer::PeerState::Starting
+                                    | rns_interface::ble_peer::PeerState::On => {
+                                        emit_logical_ble_peer_status(
+                                            &state_relay,
+                                            &address_to_identity,
                                         );
                                     }
+                                    _ => {
+                                        state_relay.emit_to_all(
+                                            "ble_peer_status_changed",
+                                            json!({
+                                                "state": state,
+                                                "peer_count": 0,
+                                            }),
+                                        );
+                                    }
+                                },
+                                BlePeerEvent::SubscribeReady { address } => {
+                                    // A subscribe can race LXMF startup or lose
+                                    // its first broadcast during reconnect. Retry
+                                    // at bounded low duty until this exact BLE
+                                    // address delivers a signed announce.
+                                    let retry_state = Arc::clone(&state_relay);
+                                    let verified = Arc::clone(&verified_addresses);
+                                    let connected = Arc::clone(&connected_addresses);
+                                    let generations = Arc::clone(&connection_generations);
+                                    let Some(connection_generation) =
+                                        generations.read().await.get(&address).copied()
+                                    else {
+                                        tracing::debug!(
+                                            peer = %address,
+                                            "Ignored BLE subscribe without a live connection lease"
+                                        );
+                                        continue;
+                                    };
+                                    state_relay.bump_announce_interface_revision();
+                                    tokio::spawn(async move {
+                                        for delay_secs in BLE_IDENTITY_ANNOUNCE_RETRY_DELAYS_SECS {
+                                            if delay_secs > 0 {
+                                                tokio::time::sleep(std::time::Duration::from_secs(
+                                                    delay_secs,
+                                                ))
+                                                .await;
+                                            }
+                                            let generation_is_current = {
+                                                let current = generations.read().await;
+                                                ble_retry_owns_connection(
+                                                    &current,
+                                                    &address,
+                                                    connection_generation,
+                                                )
+                                            };
+                                            if !generation_is_current
+                                                || !connected.read().await.contains(&address)
+                                                || verified.read().await.contains(&address)
+                                            {
+                                                return;
+                                            }
+                                            if send_ble_identity_announce_once(&retry_state).await {
+                                                tracing::info!(
+                                                    peer = %address,
+                                                    "Bluetooth Peer identity announce covered"
+                                                );
+                                            } else {
+                                                tracing::debug!(
+                                                    peer = %address,
+                                                    reason = "runtime_not_ready",
+                                                    "Bluetooth Peer identity announce deferred"
+                                                );
+                                            }
+                                        }
+                                        let generation_is_current = {
+                                            let current = generations.read().await;
+                                            ble_retry_owns_connection(
+                                                &current,
+                                                &address,
+                                                connection_generation,
+                                            )
+                                        };
+                                        if generation_is_current
+                                            && connected.read().await.contains(&address)
+                                            && !verified.read().await.contains(&address)
+                                        {
+                                            tracing::warn!(
+                                                peer = %address,
+                                                "Bluetooth Peer remained connected without signed identity resolution"
+                                            );
+                                        }
+                                    });
                                 }
                             }
                         }
@@ -1403,12 +1702,16 @@ pub async fn apply_ble_rnode_bridge_ready(
                                     mode,
                                     st_alock,
                                     lt_alock,
-                                    flow_control: true,
+                                    // Match upstream RNodeInterface/Sideband. Official RNode
+                                    // firmware does not emit a fresh CMD_READY after each packet,
+                                    // so forcing flow control can permanently stall after the
+                                    // first outbound frame.
+                                    flow_control: false,
                                     id_interval,
                                     id_callsign,
                                 },
                                 tcp_port,
-                                RNodeStartupOptions::require_capability_admission(),
+                                ble_rnode_startup_options(),
                             )
                             .await
                             .map_err(|error| error.to_string());
@@ -1435,11 +1738,6 @@ pub async fn apply_ble_rnode_bridge_ready(
                                 Arc::clone(&state_arc),
                                 spawned.observer.clone(),
                                 rnode_activity_origin,
-                            );
-                            state_arc.publish_mobile_hardware_state(
-                                "ble_rnode",
-                                "reconnecting",
-                                None,
                             );
                         } else {
                             teardown_spawned_rnode_exact(&rns, &spawned).await;
@@ -1548,12 +1846,27 @@ pub async fn apply_ble_rnode_bridge_ready(
                                             &activity_operation,
                                         )
                                 {
-                                    let operation_failure =
-                                        if failure == RnodeReadinessFailure::Timeout {
+                                    let operation_failure = match failure {
+                                        RnodeReadinessFailure::Timeout => {
                                             crate::state::BleRnodeOperationFailure::StartupTimeout
-                                        } else {
-                                            crate::state::BleRnodeOperationFailure::Readiness
-                                        };
+                                        }
+                                        RnodeReadinessFailure::ReadyStatsPublication(
+                                            RnodeReadyStatsPublicationFailure::Timeout,
+                                        ) => {
+                                            crate::state::BleRnodeOperationFailure::ReadyStatsTimeout
+                                        }
+                                        RnodeReadinessFailure::ReadyStatsPublication(
+                                            RnodeReadyStatsPublicationFailure::ObservationLost,
+                                        ) => {
+                                            crate::state::BleRnodeOperationFailure::ReadyObservationLost
+                                        }
+                                        RnodeReadinessFailure::ReadyStatsPublication(
+                                            RnodeReadyStatsPublicationFailure::SessionReplaced,
+                                        ) => {
+                                            crate::state::BleRnodeOperationFailure::ReadySessionReplaced
+                                        }
+                                        _ => crate::state::BleRnodeOperationFailure::Readiness,
+                                    };
                                     if !complete_waiting_ble_rnode_operation(
                                         completion,
                                         crate::state::BleRnodeOperationResult::Failed(
@@ -2223,6 +2536,60 @@ mod tests {
             assert_eq!(code, "readiness_failed");
             assert!(matches!(outcome, BleRnodeActivityOutcome::RuntimeFailed));
         }
+
+        for (failure, status, code) in [
+            (
+                RnodeReadinessFailure::ReadyStatsPublication(
+                    RnodeReadyStatsPublicationFailure::Timeout,
+                ),
+                "RNode became ready, but its interface status timed out. Try connecting again.",
+                "ready_stats_timeout",
+            ),
+            (
+                RnodeReadinessFailure::ReadyStatsPublication(
+                    RnodeReadyStatsPublicationFailure::ObservationLost,
+                ),
+                "RNode disconnected before setup completed. Try connecting again.",
+                "ready_observation_lost",
+            ),
+            (
+                RnodeReadinessFailure::ReadyStatsPublication(
+                    RnodeReadyStatsPublicationFailure::SessionReplaced,
+                ),
+                "RNode setup was replaced before it completed. Try connecting again.",
+                "ready_session_replaced",
+            ),
+        ] {
+            let (actual_status, actual_code, outcome) =
+                ble_rnode_readiness_failure_feedback(failure);
+            assert_eq!(actual_status, status);
+            assert_eq!(actual_code, code);
+            assert!(matches!(outcome, BleRnodeActivityOutcome::RuntimeFailed));
+        }
+    }
+
+    #[test]
+    fn capability_admission_rejections_do_not_request_reprovisioning() {
+        use rns_interface::rnode::RNodeCapabilityAdmissionFailureClass as FailureClass;
+
+        for failure in [
+            RnodeReadinessFailure::CapabilityAdmissionRejected(None),
+            RnodeReadinessFailure::CapabilityAdmissionRejected(Some(
+                FailureClass::InvalidCapabilityImage,
+            )),
+            RnodeReadinessFailure::CapabilityAdmissionRejected(Some(
+                FailureClass::RadioSettingsRejected,
+            )),
+            RnodeReadinessFailure::CapabilityAdmissionRejected(Some(
+                FailureClass::UnsupportedFirmware,
+            )),
+            RnodeReadinessFailure::CapabilityAdmissionRejected(Some(FailureClass::DeviceError)),
+        ] {
+            let (status, code, outcome) = ble_rnode_readiness_failure_feedback(failure);
+            assert_eq!(status, "RNode did not become ready. Try connecting again.");
+            assert_eq!(code, "readiness_failed");
+            assert!(matches!(outcome, BleRnodeActivityOutcome::RuntimeFailed));
+        }
     }
 
     #[test]
@@ -2311,6 +2678,198 @@ mod tests {
                 "11:22:33:44:55:66".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn ble_recent_disconnect_identity_seeds_are_provisional_and_verified_shape_only() {
+        let v2 = serde_json::to_string(&vec![
+            BleRecentDisconnectRecord {
+                address: "AA:BB:CC:DD:EE:FF".into(),
+                identity_hash: "11111111111111111111111111111111".into(),
+                disconnected_at: 10,
+            },
+            BleRecentDisconnectRecord {
+                address: "11:22:33:44:55:66".into(),
+                identity_hash: String::new(),
+                disconnected_at: 9,
+            },
+        ])
+        .unwrap();
+
+        let seeds = ble_recent_disconnect_identity_seeds(Some(&v2));
+        assert_eq!(
+            seeds.get("AA:BB:CC:DD:EE:FF").map(String::as_str),
+            Some("11111111111111111111111111111111")
+        );
+        assert!(!seeds.contains_key("11:22:33:44:55:66"));
+    }
+
+    #[test]
+    fn ble_peer_count_and_snapshot_exclude_unverified_gatt_connections() {
+        let peers = std::collections::HashMap::from([
+            ("unverified".to_string(), String::new()),
+            (
+                "verified-a".to_string(),
+                "11111111111111111111111111111111".to_string(),
+            ),
+            (
+                "verified-a-second-role".to_string(),
+                "11111111111111111111111111111111".to_string(),
+            ),
+        ]);
+
+        assert_eq!(logical_ble_peer_count(&peers), 1);
+        let rows = verified_ble_peer_rows(&peers);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|(_, identity)| !identity.is_empty()));
+    }
+
+    #[test]
+    fn ble_identity_announce_retries_are_immediate_bounded_and_low_duty() {
+        assert_eq!(BLE_IDENTITY_ANNOUNCE_RETRY_DELAYS_SECS[0], 0);
+        assert_eq!(BLE_IDENTITY_ANNOUNCE_RETRY_DELAYS_SECS.len(), 5);
+        assert!(
+            BLE_IDENTITY_ANNOUNCE_RETRY_DELAYS_SECS
+                .windows(2)
+                .all(|window| window[1] > window[0])
+        );
+        assert!(BLE_IDENTITY_ANNOUNCE_RETRY_DELAYS_SECS.iter().sum::<u64>() < 60);
+    }
+
+    #[test]
+    fn ble_identity_announce_retry_is_exact_connection_owned() {
+        let address = "AA:BB:CC:DD:EE:FF";
+        let mut generations = std::collections::HashMap::from([(address.to_string(), 7)]);
+        assert!(ble_retry_owns_connection(&generations, address, 7));
+        generations.insert(address.to_string(), 8);
+        assert!(!ble_retry_owns_connection(&generations, address, 7));
+        assert!(ble_retry_owns_connection(&generations, address, 8));
+        generations.remove(address);
+        assert!(!ble_retry_owns_connection(&generations, address, 8));
+    }
+
+    #[test]
+    fn ble_identity_resolution_is_scoped_to_the_live_connection_generation() {
+        let address = "AA:BB:CC:DD:EE:FF";
+        let first_identity = "11111111111111111111111111111111";
+        let conflicting_identity = "22222222222222222222222222222222";
+        let mut connected = std::collections::HashSet::new();
+        let mut verified = std::collections::HashSet::from([address.to_string()]);
+        let mut identities = std::collections::HashMap::from([(
+            address.to_string(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        )]);
+
+        assert!(begin_ble_connection_generation(
+            &mut connected,
+            &mut verified,
+            &mut identities,
+            address,
+        ));
+        assert!(!verified.contains(address));
+        assert_eq!(identities.get(address).map(String::as_str), Some(""));
+        assert_eq!(
+            accept_ble_identity_for_live_connection(
+                &connected,
+                &mut verified,
+                &mut identities,
+                address,
+                first_identity,
+            ),
+            BleIdentityResolutionDisposition::Accepted
+        );
+
+        // Native central and peripheral callbacks can report Connected twice
+        // for the same still-live address. That is not a new generation and
+        // must not erase the verified announce that already won this one.
+        assert!(!begin_ble_connection_generation(
+            &mut connected,
+            &mut verified,
+            &mut identities,
+            address,
+        ));
+        assert!(verified.contains(address));
+        assert_eq!(
+            identities.get(address).map(String::as_str),
+            Some(first_identity)
+        );
+        assert_eq!(
+            accept_ble_identity_for_live_connection(
+                &connected,
+                &mut verified,
+                &mut identities,
+                address,
+                first_identity,
+            ),
+            BleIdentityResolutionDisposition::Duplicate
+        );
+        assert_eq!(
+            accept_ble_identity_for_live_connection(
+                &connected,
+                &mut verified,
+                &mut identities,
+                address,
+                conflicting_identity,
+            ),
+            BleIdentityResolutionDisposition::Conflict
+        );
+        assert_eq!(
+            identities.get(address).map(String::as_str),
+            Some(first_identity)
+        );
+
+        connected.remove(address);
+        verified.remove(address);
+        identities.remove(address);
+        assert_eq!(
+            accept_ble_identity_for_live_connection(
+                &connected,
+                &mut verified,
+                &mut identities,
+                address,
+                first_identity,
+            ),
+            BleIdentityResolutionDisposition::Disconnected
+        );
+
+        // A stable BLE address is deliberately re-armed after reconnect.
+        assert!(begin_ble_connection_generation(
+            &mut connected,
+            &mut verified,
+            &mut identities,
+            address,
+        ));
+        assert_eq!(
+            accept_ble_identity_for_live_connection(
+                &connected,
+                &mut verified,
+                &mut identities,
+                address,
+                first_identity,
+            ),
+            BleIdentityResolutionDisposition::Accepted
+        );
+    }
+
+    #[test]
+    fn ble_identity_resolution_rejects_malformed_destination_hashes() {
+        let address = "AA:BB:CC:DD:EE:FF";
+        let connected = std::collections::HashSet::from([address.to_string()]);
+        let mut verified = std::collections::HashSet::new();
+        let mut identities = std::collections::HashMap::new();
+
+        assert_eq!(
+            accept_ble_identity_for_live_connection(
+                &connected,
+                &mut verified,
+                &mut identities,
+                address,
+                "not-a-destination-hash",
+            ),
+            BleIdentityResolutionDisposition::Invalid
+        );
+        assert!(!verified.contains(address));
+        assert!(!identities.contains_key(address));
     }
 
     #[test]

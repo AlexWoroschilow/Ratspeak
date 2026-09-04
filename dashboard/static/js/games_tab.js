@@ -92,6 +92,10 @@
 
     function _isViewingSession(sessionId) {
         if (!sessionId || _selectedSessionId !== sessionId) return false;
+        if (typeof RS !== 'undefined' && typeof RS.isAttentionForeground === 'function' &&
+            !RS.isAttentionForeground()) {
+            return false;
+        }
         if (typeof currentView === 'undefined' || currentView !== 'games') return false;
         if (typeof isCompactLayout === 'function' && isCompactLayout()) {
             if (typeof RS === 'undefined' || !RS.viewStack || typeof RS.viewStack.top !== 'function') {
@@ -444,7 +448,7 @@
         if (!sessionId) return;
         if (!_canDeleteSession(_findSession(sessionId))) {
             if (typeof showToast === 'function') {
-                showToast('Finish the game before removing it', 'toast-red', 3000);
+                showToast('Finish the game before removing it', 'toast-warning', 3000);
             }
             return;
         }
@@ -461,7 +465,7 @@
                 if (ok) _deleteSession(sessionId);
             });
         } else if (typeof showToast === 'function') {
-            showToast('Confirmation dialog unavailable', 'toast-red', 3000);
+            showToast('Confirmation dialog unavailable', 'toast-error', 3000);
         }
     }
 
@@ -484,7 +488,7 @@
             _removeSessionLocal(sessionId);
         }).catch(function() {
             if (typeof showToast === 'function') {
-                showToast('Game could not be removed', 'toast-red', 3000);
+                showToast('Game could not be removed', 'toast-error', 3000);
             }
         });
     }
@@ -645,8 +649,8 @@
                     renderSessionList();
                     renderDetail();
                     if (typeof showToast === 'function') {
-                        var msg = (err && err.message) || 'Resend failed';
-                        showToast(msg, 'toast-red', 4000);
+                        var msg = (err && err.message) || 'Could not resend the game action';
+                        showToast(msg, 'toast-error', 4000);
                     }
                 });
             });
@@ -1516,7 +1520,7 @@
                     danger: true,
                 }).then(function(ok) { if (ok) doCancel(); });
             } else if (typeof showToast === 'function') {
-                showToast('Confirmation dialog unavailable', 'toast-red', 3000);
+                showToast('Confirmation dialog unavailable', 'toast-error', 3000);
             }
         });
         _bindBtn('games-resign-btn', function() {
@@ -1530,7 +1534,7 @@
                     if (ok) _sendAction(session, 'resign');
                 });
             } else if (typeof showToast === 'function') {
-                showToast('Confirmation dialog unavailable', 'toast-red', 3000);
+                showToast('Confirmation dialog unavailable', 'toast-error', 3000);
             }
         });
         _bindBtn('games-rematch-btn', function() {
@@ -1586,7 +1590,7 @@
         }).catch(function() {
             _finishSessionAction(sessionId);
             if (typeof showToast === 'function') {
-                showToast(_reasonToMessage('send_failed', action), 'toast-red', 4000);
+                showToast(_reasonToMessage('send_failed', action), 'toast-error', 4000);
             }
         });
     }
@@ -1685,7 +1689,7 @@
             renderSessionList();
             if (sid === _selectedSessionId) renderDetail();
             if (typeof showToast === 'function') {
-                showToast(_reasonToMessage(reason, data.command), 'toast-red', 5000);
+                showToast(_reasonToMessage(reason, data.command), 'toast-error', 5000);
             }
             return;
         }
@@ -1719,7 +1723,7 @@
         }
 
         if (typeof showToast === 'function') {
-            showToast(_reasonToMessage(reason, data.command), 'toast-red', 4000);
+            showToast(_reasonToMessage(reason, data.command), 'toast-error', 4000);
         }
         if (typeof haptic === 'function') haptic('error');
     }
@@ -1954,7 +1958,6 @@
                 // the event stream.
                 return;
             }
-            if (typeof showToast === 'function') showToast('Challenge sent', 'toast-green', 2000);
             _selectedSessionId = (ack && ack.session_id) ? ack.session_id : sessionId;
             RS.invoke('get_all_game_sessions').then(function(sessions) {
                 if (Array.isArray(sessions)) {
@@ -1966,7 +1969,7 @@
         }).catch(function() {
             _finishSessionAction(sessionId);
             if (typeof showToast === 'function') {
-                showToast('Challenge failed', 'toast-red', 4000);
+                showToast('Could not send the challenge', 'toast-error', 4000);
             }
         });
     }
@@ -2007,7 +2010,7 @@
                 ? String(data.message).slice(0, 180)
                 : _reasonToMessage(data.code || 'protocol_error', data.ref || 'action');
             if (typeof showToast === 'function') {
-                showToast('Game action rejected: ' + message, 'toast-red', 5000);
+                showToast('Game action rejected: ' + message, 'toast-error', 5000);
             }
             if (typeof haptic === 'function') haptic('error');
         });
@@ -2045,6 +2048,9 @@
         if (!record || !record.game_id) return;
 
         var prevStatus = prev ? prev.status : null;
+        var appForeground = typeof RS === 'undefined' ||
+            typeof RS.isAttentionForeground !== 'function' ||
+            RS.isAttentionForeground();
 
         var view = _gameView(_appId(record));
         if (view && view.onSessionDelta) {
@@ -2052,30 +2058,32 @@
         }
 
         var isNew = !prev;
-        if (isNew && typeof currentView !== 'undefined' && currentView !== 'games') {
-            if (record.status === 'pending' && !_isMe(record, record.challenger)) {
-                if (typeof showToast === 'function') showToast('\uD83C\uDFAE Game challenge from ' + _contactName(record.contact_hash), 'toast-green', 5000, function() { window.openGameSession(record.game_id); });
+        if (isNew && record.status === 'pending' && !_isMe(record, record.challenger)) {
+            if (appForeground && typeof currentView !== 'undefined' && currentView !== 'games') {
+                if (typeof showToast === 'function') showToast('Game challenge from ' + _contactName(record.contact_hash), 'toast-action', 5000, function() { window.openGameSession(record.game_id); });
                 if (typeof haptic === 'function') haptic('success');
-                if (!window.__TAURI_INTERNALS__ && document.hidden && typeof rsNotify !== 'undefined') {
-                    rsNotify.send({
-                        title: 'Game challenge',
-                        body: _contactName(record.contact_hash) + ' challenged you to a game'
-                    });
-                }
+            }
+            if (!window.__TAURI_INTERNALS__ && !appForeground && typeof rsNotify !== 'undefined') {
+                rsNotify.send({
+                    title: 'Game challenge',
+                    body: _contactName(record.contact_hash) + ' challenged you to a game'
+                });
             }
         }
 
-        // Toast on remote moves whenever the user isn't actively staring at
-        // this game's board. `currentView !== 'games'` catches every other tab;
-        // even on the games view a delta on a non-selected game still alerts.
+        // Foreground updates use an in-app action when this board is not
+        // visible. Background browser updates use only the OS fallback; Tauri
+        // background notifications are owned by the runtime.
         var movedSinceLast = prev &&
             _sessionValue(record, 'move_count', null) !==
             _sessionValue(prev, 'move_count', null);
         var notViewingThisGame = !_isViewingSession(record.game_id);
         if (movedSinceLast && notViewingThisGame && record.status === 'active') {
-            if (typeof showToast === 'function') showToast('Game update from ' + _contactName(record.contact_hash), 'toast-blue', 3000, function() { window.openGameSession(record.game_id); });
-            if (typeof haptic === 'function') haptic('light');
-            if (!window.__TAURI_INTERNALS__ && document.hidden && typeof rsNotify !== 'undefined') {
+            if (appForeground) {
+                if (typeof showToast === 'function') showToast('Game update from ' + _contactName(record.contact_hash), 'toast-action', 3000, function() { window.openGameSession(record.game_id); });
+                if (typeof haptic === 'function') haptic('light');
+            }
+            if (!window.__TAURI_INTERNALS__ && !appForeground && typeof rsNotify !== 'undefined') {
                 rsNotify.send({
                     title: 'Game update',
                     body: _contactName(record.contact_hash) + ' made a move'

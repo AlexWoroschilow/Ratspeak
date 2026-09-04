@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "product": {
+    "displayVersion": "1.0.31",
+    "marketingVersion": "1.0.31",
+    "androidArtifactTargets": [
+      "aarch64",
+      "armv7",
+      "x86_64"
+    ],
+    "platformBuilds": {
+      "androidVersionCode": 1000047,
+      "iosBundleVersion": "1000047"
+    },
+    "predecessor": {
+      "displayVersion": "1.0.30",
+      "tag": "v1.0.30",
+      "commit": "3c1bb1520eac14fbb3d7d097bd471369174df9c0",
+      "androidVersionCode": 1000046,
+      "iosBundleVersion": "1000046"
+    }
+  },
+  "toolchains": {
+    "rustRelease": "1.96.0",
+    "rustMsrv": "1.87.0",
+    "node": "22.22.0",
+    "tauriCli": "2.11.1",
+    "java": "17",
+    "androidNdk": "27.0.12077973",
+    "xcode": "26.3",
+    "iosSdk": "26.2"
+  },
+  "components": [
+    {
+      "id": "rsreticulum",
+      "name": "rsReticulum",
+      "repository": "https://github.com/ratspeak/rsReticulum.git",
+      "path": "../rsReticulum",
+      "commit": "3b3eb29c16c9dbc114c9b31d9f912a7b1a68652c",
+      "version": "1.2.0",
+      "integrationTag": "ratspeak-v1.0.31"
+    },
+    {
+      "id": "rslxmf",
+      "name": "rsLXMF",
+      "repository": "https://github.com/ratspeak/rsLXMF.git",
+      "path": "../rsLXMF",
+      "commit": "e210e0c244c76532faae99696f83c94d44c27dc6",
+      "version": "1.2.0",
+      "integrationTag": "ratspeak-v1.0.31"
+    },
+    {
+      "id": "rslxst",
+      "name": "rsLXST",
+      "repository": "https://github.com/ratspeak/rsLXST.git",
+      "path": "../rsLXST",
+      "commit": "f228e2e1b1c026728c728549f70ce22633770009",
+      "version": "0.2.0",
+      "integrationTag": "ratspeak-v1.0.31"
+    },
+    {
+      "id": "lrgp",
+      "name": "lrgp-rs",
+      "repository": "https://github.com/ratspeak/lrgp-rs.git",
+      "path": "../lrgp-rs",
+      "commit": "88c8665e1e7e1ad710e53e8da6425f3dbe4f5856",
+      "version": "0.4.1",
+      "integrationTag": "ratspeak-v1.0.31"
+    }
+  ]
+}

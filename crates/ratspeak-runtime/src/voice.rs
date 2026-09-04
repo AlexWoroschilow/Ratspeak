@@ -1,6 +1,10 @@
 //! LXST voice service and native audio bridge.
 
 use std::collections::{HashSet, VecDeque};
+#[cfg(target_os = "android")]
+use std::sync::OnceLock;
+#[cfg(any(target_os = "ios", target_os = "android", test))]
+use std::sync::atomic::AtomicU64;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -10,8 +14,8 @@ use std::time::{Duration, Instant};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use lxst_core::{CallRole, Profile, RawAudioFrame, SignallingStatus, TELEPHONY_DESTINATION_NAME};
 use lxst_telephony::{
-    ActiveCallSnapshot, TelephonyControl, TelephonyRnsEndpoint, TelephonyRuntimeCore,
-    TelephonyRuntimeSnapshot, TelephonyService, TelephonyServiceEvent,
+    ActiveCallSnapshot, TelephonyControl, TelephonyRuntimeSnapshot, TelephonyService,
+    TelephonyServiceChannelConfig, TelephonyServiceConfig, TelephonyServiceEvent, request_answer,
 };
 use ratspeak_core::{LXMF_DELIVERY_APP_NAME as LXMF_DELIVERY_DESTINATION_NAME, hex_to_array16};
 use rns_identity::destination::Destination;
@@ -37,6 +41,11 @@ const MICROPHONE_CAPTURE_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_millis(400),
 ];
 const MICROPHONE_DEVICE_ATTEMPT_LIMIT: usize = 16;
+#[cfg(target_os = "android")]
+const MICROPHONE_CONFIG_ATTEMPT_LIMIT: usize = 12;
+#[cfg(any(target_os = "android", test))]
+const ANDROID_MICROPHONE_NATIVE_SAMPLE_RATES: [u32; 6] =
+    [48_000, 44_100, 32_000, 22_050, 16_000, 8_000];
 const VOICE_AGC_TARGET_RMS: f32 = 0.14125375;
 const VOICE_AGC_MIN_GAIN: f32 = 0.35;
 const VOICE_AGC_MAX_GAIN: f32 = 3.0;
@@ -61,6 +70,8 @@ const VOICE_PROFILE_DOWNGRADE_COOLDOWN: Duration = Duration::from_secs(20);
 const VOICE_PROFILE_UPGRADE_LOCKOUT_AFTER_DOWNGRADE: Duration = Duration::from_secs(60);
 const VOICE_PROFILE_DROPPED_FRAME_THRESHOLD: usize = 4;
 const VOICE_AUDIO_FADE_IN_MS: usize = 20;
+#[cfg(target_os = "ios")]
+const VOICE_MEMO_OUTPUT_BUFFER_MS: usize = 2_100;
 #[cfg_attr(target_os = "android", allow(dead_code))]
 const VOICE_AUDIO_OUTPUT_PREBUFFER_MS: usize = 120;
 const VOICE_AUDIO_RECOVERY_TICK: Duration = Duration::from_millis(1500);
@@ -142,6 +153,16 @@ async fn await_or_abort(mut task: JoinHandle<()>) {
     }
 }
 
+fn coordinated_telephony_service_config() -> TelephonyServiceConfig {
+    TelephonyServiceConfig {
+        announce_on_start: false,
+        announce_interval: None,
+        startup_announce_retry_interval: None,
+        startup_announce_retries: 0,
+        ..TelephonyServiceConfig::default()
+    }
+}
+
 pub async fn start_voice_service(state: &Arc<AppState>) -> VoiceResult<()> {
     if voice_control_tx(state).is_some() {
         return Ok(());
@@ -149,14 +170,17 @@ pub async fn start_voice_service(state: &Arc<AppState>) -> VoiceResult<()> {
     let activity_origin = state.activity_request_fence();
 
     let (transport_tx, identity) = voice_runtime_inputs(state)?;
-    let endpoint = TelephonyRnsEndpoint::register(transport_tx, &identity)
-        .map_err(|e| format!("Failed to register LXST telephony destination: {e}"))?;
-
-    let (control_tx, control_rx) = mpsc::channel::<TelephonyControl>(32);
+    let parts = TelephonyService::registered_with_config(
+        transport_tx,
+        &identity,
+        coordinated_telephony_service_config(),
+        TelephonyServiceChannelConfig::default(),
+    )
+    .map_err(|e| format!("Failed to register LXST telephony destination: {e}"))?;
+    let control_tx = parts.control_tx;
+    let event_rx = parts.event_rx;
+    let service = parts.service;
     let (audio_control_tx, audio_control_rx) = mpsc::channel::<VoiceAudioControl>(8);
-    let (event_tx, event_rx) = mpsc::channel::<TelephonyServiceEvent>(128);
-    let service =
-        TelephonyService::new(endpoint, TelephonyRuntimeCore::new(), control_rx, event_tx);
 
     let service_task = tokio::spawn(async move {
         service.run().await;
@@ -196,10 +220,28 @@ pub async fn start_voice_service(state: &Arc<AppState>) -> VoiceResult<()> {
         }),
     );
     record_lxst_activity(state, activity_origin, LxstTransition::ServiceStarted);
+    state.bump_announce_content_revision();
+    crate::send_typed_announce_from_origin(
+        state,
+        crate::announce::AnnounceOrigin::ProfileChanged,
+        activity_origin,
+    )
+    .await;
     Ok(())
 }
 
 pub async fn shutdown_voice_service(state: &Arc<AppState>) {
+    shutdown_voice_service_with_presence_update(state, true).await;
+}
+
+pub(crate) async fn shutdown_voice_service_for_runtime_teardown(state: &Arc<AppState>) {
+    shutdown_voice_service_with_presence_update(state, false).await;
+}
+
+async fn shutdown_voice_service_with_presence_update(
+    state: &Arc<AppState>,
+    publish_presence_update: bool,
+) {
     let activity_origin = state.activity_request_fence();
     let handle = state
         .lxst_voice
@@ -212,6 +254,9 @@ pub async fn shutdown_voice_service(state: &Arc<AppState>) {
     }
     release_call_audio(state);
     VOICE_MICROPHONE_MUTED.store(false, Ordering::Relaxed);
+    if let Ok(mut persisted) = state.voice_call_snapshot.lock() {
+        *persisted = None;
+    }
 
     state.emit_to_all(
         "voice_call_update",
@@ -222,6 +267,15 @@ pub async fn shutdown_voice_service(state: &Arc<AppState>) {
         }),
     );
     record_lxst_activity(state, activity_origin, LxstTransition::ServiceStopped);
+    if publish_presence_update {
+        state.bump_announce_content_revision();
+        crate::send_typed_announce_from_origin(
+            state,
+            crate::announce::AnnounceOrigin::ProfileChanged,
+            activity_origin,
+        )
+        .await;
+    }
 }
 
 pub fn voice_status(state: &AppState) -> Value {
@@ -230,10 +284,16 @@ pub fn voice_status(state: &AppState) -> Value {
         .lock()
         .map(|voice| voice.is_some())
         .unwrap_or(false);
+    let snapshot = state
+        .voice_call_snapshot
+        .lock()
+        .ok()
+        .and_then(|snapshot| snapshot.clone());
     json!({
         "enabled": true,
         "running": running,
         "microphone_muted": microphone_muted(),
+        "snapshot": snapshot,
     })
 }
 
@@ -305,10 +365,18 @@ pub async fn call_identity(state: &Arc<AppState>, remote_identity: [u8; 16]) -> 
     }))
 }
 
-pub async fn answer(state: &Arc<AppState>) -> VoiceResult<Value> {
+pub async fn answer(state: &Arc<AppState>, expected_link_id: [u8; 16]) -> VoiceResult<Value> {
     ensure_voice_service_started(state).await?;
-    send_control(state, TelephonyControl::Answer).await?;
-    Ok(json!({ "ok": true }))
+    let tx =
+        voice_control_tx(state).ok_or_else(|| "LXST voice service is not running".to_string())?;
+    let active = request_answer(&tx, expected_link_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut result = active_call_payload(&active);
+    if let Some(object) = result.as_object_mut() {
+        object.insert("ok".to_string(), json!(true));
+    }
+    Ok(result)
 }
 
 pub async fn hangup(state: &Arc<AppState>) -> VoiceResult<Value> {
@@ -486,7 +554,7 @@ fn notify_incoming_call_if_background(
     remote_lxmf_destination: &str,
     link_id: [u8; 16],
 ) {
-    if state.is_foreground() || !state.native_notifications_enabled() {
+    if !state.should_surface_native_notification() {
         return;
     }
     let identity_id = crate::helpers::active_identity_id(state);
@@ -966,6 +1034,9 @@ async fn drive_voice_events(
                 audio_failure = None;
                 profile_adaptation.reset();
                 latest_snapshot = None;
+                if let Ok(mut persisted) = state.voice_call_snapshot.lock() {
+                    *persisted = None;
+                }
                 state.emit_to_all(
                     "voice_call_update",
                     json!({
@@ -1094,6 +1165,9 @@ async fn drive_voice_events(
                 release_call_audio(&state);
                 stop_audio_session(audio_session.take(), &control_tx).await;
                 profile_adaptation.reset();
+                if let Ok(mut persisted) = state.voice_call_snapshot.lock() {
+                    *persisted = None;
+                }
                 state.emit_to_all(
                     "voice_call_update",
                     json!({
@@ -1225,11 +1299,13 @@ async fn reconcile_audio_session(
         return;
     }
 
-    if audio_failure
+    if let Some(failure) = audio_failure
         .as_ref()
-        .is_some_and(|failure| failure.matches(active.link_id, profile))
+        .filter(|failure| failure.matches(active.link_id, profile))
     {
-        return;
+        if !failure.ready_to_retry(Instant::now()) {
+            return;
+        }
     }
 
     stop_audio_session(audio_session.take(), control_tx).await;
@@ -1263,17 +1339,42 @@ async fn reconcile_audio_session(
             );
         }
         Err(message) => {
+            let attempts = audio_failure
+                .as_ref()
+                .filter(|failure| failure.matches(active.link_id, profile))
+                .map(|failure| failure.attempts.saturating_add(1))
+                .unwrap_or(1);
+            let first_failure = attempts == 1;
             *audio_failure = Some(VoiceAudioFailure {
                 link_id: active.link_id,
                 profile,
+                attempts,
+                next_retry_at: Instant::now() + audio_recovery_delay(attempts - 1),
             });
-            state.emit_to_all(
-                "voice_call_update",
-                json!({
-                    "type": "error",
-                    "message": message,
-                }),
-            );
+            if first_failure {
+                state.emit_to_all(
+                    "voice_call_update",
+                    json!({
+                        "type": "audio",
+                        "state": "recovering",
+                        "link_id": hex::encode(active.link_id),
+                        "profile": profile_key(profile),
+                        "running": false,
+                        "microphone": false,
+                        "microphone_muted": microphone_muted(),
+                        "speaker": false,
+                        "warnings": [message],
+                    }),
+                );
+            } else {
+                tracing::warn!(
+                    link_id = %crate::short_id(&hex::encode(active.link_id)),
+                    profile = profile_key(profile),
+                    attempts,
+                    reason = "full_session_start_failed",
+                    "LXST native audio recovery failed"
+                );
+            }
         }
     }
 }
@@ -1360,23 +1461,24 @@ fn emit_snapshot(
     snapshot: &TelephonyRuntimeSnapshot,
     audio: Option<&VoiceAudioSession>,
 ) {
-    state.emit_to_all(
-        "voice_call_update",
-        json!({
-            "type": "snapshot",
-            "external_busy": snapshot.external_busy,
-            "pending_link_count": snapshot.pending_link_count,
-            "audio": audio.map(|session| json!({
-                "link_id": hex::encode(session.link_id),
-                "profile": profile_key(session.profile),
-                "running": session.running(),
-                "microphone": session.microphone,
-                "microphone_muted": microphone_muted(),
-                "speaker": session.speaker,
-            })),
-            "active_call": snapshot.active_call.as_ref().map(active_call_payload),
-        }),
-    );
+    let payload = json!({
+        "type": "snapshot",
+        "external_busy": snapshot.external_busy,
+        "pending_link_count": snapshot.pending_link_count,
+        "audio": audio.map(|session| json!({
+            "link_id": hex::encode(session.link_id),
+            "profile": profile_key(session.profile),
+            "running": session.running(),
+            "microphone": session.microphone,
+            "microphone_muted": microphone_muted(),
+            "speaker": session.speaker,
+        })),
+        "active_call": snapshot.active_call.as_ref().map(active_call_payload),
+    });
+    if let Ok(mut persisted) = state.voice_call_snapshot.lock() {
+        *persisted = Some(payload.clone());
+    }
+    state.emit_to_all("voice_call_update", payload);
 }
 
 fn emit_audio_session_state(state: &AppState, state_key: &str, session: &VoiceAudioSession) {
@@ -1692,7 +1794,12 @@ struct VoiceAudioSession {
 #[cfg(target_os = "ios")]
 pub(crate) type PlatformVoiceAudioSession = crate::platform_ios::VoiceAudioSessionGuard;
 
-#[cfg(not(target_os = "ios"))]
+#[cfg(target_os = "android")]
+pub(crate) struct PlatformVoiceAudioSession {
+    _guard: Option<android_voice_audio::VoiceMemoAudioSessionGuard>,
+}
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub(crate) struct PlatformVoiceAudioSession;
 
 pub(crate) fn start_platform_voice_audio_session() -> VoiceResult<PlatformVoiceAudioSession> {
@@ -1701,9 +1808,65 @@ pub(crate) fn start_platform_voice_audio_session() -> VoiceResult<PlatformVoiceA
         crate::platform_ios::VoiceAudioSessionGuard::activate()
     }
 
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(target_os = "android")]
+    {
+        Ok(PlatformVoiceAudioSession { _guard: None })
+    }
+
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         Ok(PlatformVoiceAudioSession)
+    }
+}
+
+fn start_platform_voice_memo_audio_session(
+    session_token: &str,
+) -> VoiceResult<PlatformVoiceAudioSession> {
+    #[cfg(target_os = "ios")]
+    {
+        let _ = session_token;
+        crate::platform_ios::VoiceAudioSessionGuard::activate()
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        android_voice_audio::VoiceMemoAudioSessionGuard::start(session_token).map(|guard| {
+            PlatformVoiceAudioSession {
+                _guard: Some(guard),
+            }
+        })
+    }
+
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        let _ = session_token;
+        Ok(PlatformVoiceAudioSession)
+    }
+}
+
+#[cfg(target_os = "ios")]
+pub(crate) type PlatformVoiceMemoPlaybackSession =
+    crate::platform_ios::VoiceMemoPlaybackSessionGuard;
+
+#[cfg(target_os = "android")]
+pub(crate) struct PlatformVoiceMemoPlaybackSession {
+    _guard: android_voice_audio::VoiceMemoPlaybackAudioSessionGuard,
+}
+
+#[cfg(any(target_os = "ios", target_os = "android"))]
+pub(crate) fn start_platform_voice_memo_playback_session(
+    lease_id: u64,
+) -> VoiceResult<PlatformVoiceMemoPlaybackSession> {
+    #[cfg(target_os = "ios")]
+    {
+        crate::platform_ios::VoiceMemoPlaybackSessionGuard::activate(lease_id)
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        let token = crate::voice_memo::format_playback_lease_id(lease_id);
+        android_voice_audio::VoiceMemoPlaybackAudioSessionGuard::start(&token)
+            .map(|guard| PlatformVoiceMemoPlaybackSession { _guard: guard })
     }
 }
 
@@ -1747,11 +1910,17 @@ impl Drop for AndroidVoiceOutput {
 struct VoiceAudioFailure {
     link_id: [u8; 16],
     profile: Profile,
+    attempts: u32,
+    next_retry_at: Instant,
 }
 
 impl VoiceAudioFailure {
     fn matches(&self, link_id: [u8; 16], profile: Profile) -> bool {
         self.link_id == link_id && self.profile == profile
+    }
+
+    fn ready_to_retry(&self, now: Instant) -> bool {
+        now >= self.next_retry_at
     }
 }
 
@@ -1939,6 +2108,7 @@ impl VoiceAudioSession {
         profile: Profile,
         control_tx: mpsc::Sender<TelephonyControl>,
     ) -> VoiceResult<Self> {
+        ensure_android_audio_context()?;
         VOICE_MICROPHONE_MUTED.store(false, Ordering::Relaxed);
         let mut call_audio_session = PlatformCallAudioSession::start(link_id)?;
         let platform_audio_session = start_platform_voice_audio_session()?;
@@ -2040,12 +2210,14 @@ async fn start_microphone_side(
 /// capture/resampling path instead of drifting into platform-specific codecs.
 pub(crate) fn start_microphone_capture(
     profile: Profile,
+    session_token: &str,
 ) -> VoiceResult<(
     PlatformVoiceAudioSession,
     cpal::Stream,
     mpsc::Receiver<RawAudioFrame>,
 )> {
-    let platform_audio_session = start_platform_voice_audio_session()?;
+    ensure_android_audio_context()?;
+    let platform_audio_session = start_platform_voice_memo_audio_session(session_token)?;
     let mut last_error = "No microphone is available".to_string();
     for delay in MICROPHONE_CAPTURE_RETRY_DELAYS {
         if !delay.is_zero() {
@@ -2103,7 +2275,34 @@ fn open_microphone_device(
     let target_channels = usize::from(profile.channels());
     let target_sample_rate = profile.sample_rate_hz();
     let target_frames = profile.sample_frames_per_packet();
-    let input_config = select_input_config(input_device, target_sample_rate)?;
+    let input_configs = select_input_configs(input_device, target_sample_rate)?;
+    let mut last_error = "No usable microphone configuration was found".to_string();
+
+    for (attempt, input_config) in input_configs.into_iter().enumerate() {
+        match open_microphone_config(
+            input_device,
+            &input_config,
+            target_channels,
+            target_sample_rate,
+            target_frames,
+        ) {
+            Ok(capture) => return Ok(capture),
+            Err(error) => {
+                last_error = format!("Microphone configuration {} failed: {error}", attempt + 1);
+            }
+        }
+    }
+
+    Err(last_error)
+}
+
+fn open_microphone_config(
+    input_device: &cpal::Device,
+    input_config: &cpal::SupportedStreamConfig,
+    target_channels: usize,
+    target_sample_rate: u32,
+    target_frames: usize,
+) -> VoiceResult<(cpal::Stream, mpsc::Receiver<RawAudioFrame>)> {
     let (capture_tx, capture_rx) = mpsc::channel::<RawAudioFrame>(AUDIO_FRAME_CHANNEL_DEPTH);
     let input_builder = Arc::new(Mutex::new(InputFrameBuilder::new(
         usize::from(input_config.channels()),
@@ -2112,7 +2311,7 @@ fn open_microphone_device(
         target_sample_rate,
         target_frames,
     )));
-    let input_stream = build_input_stream(input_device, &input_config, input_builder, capture_tx)?;
+    let input_stream = build_input_stream(input_device, input_config, input_builder, capture_tx)?;
     input_stream
         .play()
         .map_err(|e| format!("Failed to start microphone stream: {e}"))?;
@@ -2611,26 +2810,139 @@ fn build_input_stream(
     }
 }
 
-fn select_input_config(
+#[cfg(target_os = "android")]
+fn select_input_configs(
     device: &cpal::Device,
     preferred_sample_rate: u32,
-) -> VoiceResult<cpal::SupportedStreamConfig> {
-    match device.default_input_config() {
-        Ok(config) if supported_sample_format(config.sample_format()) => Ok(config),
-        Ok(config) => fallback_input_config(device, preferred_sample_rate).map_err(|fallback| {
-            format!(
-                "Default microphone sample format {:?} is unsupported, and no fallback configuration could be used: {fallback}",
-                config.sample_format()
-            )
-        }),
-        Err(default_error) => fallback_input_config(device, preferred_sample_rate).map_err(
-            |fallback| {
-                format!(
-                    "Failed to read microphone configuration: {default_error}; fallback configuration failed: {fallback}"
-                )
-            },
-        ),
+) -> VoiceResult<Vec<cpal::SupportedStreamConfig>> {
+    let ranges: Vec<_> = device
+        .supported_input_configs()
+        .map_err(|error| format!("failed to enumerate microphone configurations: {error}"))?
+        .collect();
+    let mut candidates = Vec::new();
+
+    for range in ranges {
+        for sample_rate in android_microphone_candidate_sample_rates(
+            range.min_sample_rate().0,
+            range.max_sample_rate().0,
+            preferred_sample_rate,
+        ) {
+            candidates.push(range.with_sample_rate(cpal::SampleRate(sample_rate)));
+        }
     }
+    if let Some(default) = device
+        .default_input_config()
+        .ok()
+        .filter(|default| supported_sample_format(default.sample_format()))
+    {
+        candidates.push(default);
+    }
+
+    candidates
+        .sort_by_key(|config| android_microphone_config_penalty(config, preferred_sample_rate));
+    candidates.dedup_by(|left, right| {
+        left.channels() == right.channels()
+            && left.sample_rate() == right.sample_rate()
+            && left.sample_format() == right.sample_format()
+    });
+    candidates.truncate(MICROPHONE_CONFIG_ATTEMPT_LIMIT);
+    if candidates.is_empty() {
+        Err("no supported microphone configuration was found".to_string())
+    } else {
+        Ok(candidates)
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn select_input_configs(
+    device: &cpal::Device,
+    preferred_sample_rate: u32,
+) -> VoiceResult<Vec<cpal::SupportedStreamConfig>> {
+    let mut candidates = Vec::new();
+    if let Some(default) = device
+        .default_input_config()
+        .ok()
+        .filter(|default| supported_sample_format(default.sample_format()))
+    {
+        candidates.push(default);
+    }
+    if let Some(fallback) = fallback_input_config(device, preferred_sample_rate)
+        .ok()
+        .filter(|fallback| {
+            !candidates.iter().any(|candidate| {
+                candidate.channels() == fallback.channels()
+                    && candidate.sample_rate() == fallback.sample_rate()
+                    && candidate.sample_format() == fallback.sample_format()
+            })
+        })
+    {
+        candidates.push(fallback);
+    }
+    if candidates.is_empty() {
+        Err("no supported microphone configuration was found".to_string())
+    } else {
+        Ok(candidates)
+    }
+}
+
+#[cfg(any(target_os = "android", test))]
+fn android_microphone_candidate_sample_rates(
+    min_sample_rate: u32,
+    max_sample_rate: u32,
+    preferred_sample_rate: u32,
+) -> Vec<u32> {
+    let mut rates = Vec::with_capacity(ANDROID_MICROPHONE_NATIVE_SAMPLE_RATES.len() + 1);
+    for sample_rate in
+        std::iter::once(preferred_sample_rate).chain(ANDROID_MICROPHONE_NATIVE_SAMPLE_RATES)
+    {
+        if sample_rate >= min_sample_rate
+            && sample_rate <= max_sample_rate
+            && !rates.contains(&sample_rate)
+        {
+            rates.push(sample_rate);
+        }
+    }
+    if rates.is_empty() && min_sample_rate <= max_sample_rate {
+        rates.push(preferred_sample_rate.clamp(min_sample_rate, max_sample_rate));
+    }
+    rates
+}
+
+#[cfg(any(target_os = "android", test))]
+fn android_microphone_sample_rate_penalty(
+    sample_rate: u32,
+    preferred_sample_rate: u32,
+) -> (u8, u32) {
+    if sample_rate == preferred_sample_rate {
+        return (0, 0);
+    }
+    let native_rank = ANDROID_MICROPHONE_NATIVE_SAMPLE_RATES
+        .iter()
+        .position(|candidate| *candidate == sample_rate)
+        .map(|index| index as u8 + 1)
+        .unwrap_or(u8::MAX);
+    (native_rank, sample_rate.abs_diff(preferred_sample_rate))
+}
+
+#[cfg(target_os = "android")]
+fn android_microphone_config_penalty(
+    config: &cpal::SupportedStreamConfig,
+    preferred_sample_rate: u32,
+) -> (u16, u8, u32, u8) {
+    let (rate_rank, rate_distance) =
+        android_microphone_sample_rate_penalty(config.sample_rate().0, preferred_sample_rate);
+    let format_penalty = match config.sample_format() {
+        cpal::SampleFormat::I16 => 0,
+        cpal::SampleFormat::F32 => 1,
+        cpal::SampleFormat::U16 => 2,
+        _ => 3,
+    };
+    (
+        config.channels().abs_diff(1),
+        rate_rank,
+        rate_distance,
+        format_penalty,
+    )
 }
 
 #[cfg_attr(target_os = "android", allow(dead_code))]
@@ -2656,6 +2968,7 @@ fn select_output_config(
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn fallback_input_config(
     device: &cpal::Device,
     preferred_sample_rate: u32,
@@ -2764,6 +3077,553 @@ fn build_output_stream(
             .map_err(|e| format!("Failed to build u16 speaker stream: {e}")),
         other => Err(format!("Unsupported speaker sample format: {other:?}")),
     }
+}
+
+/// Finite native PCM output used by iOS voice messages.
+///
+/// LXST calls and voice messages deliberately share CPAL's default output
+/// device selection, sample-format negotiation, resampling, and output
+/// leveling. The distinction is only ownership: a call receives frames from
+/// the LXST stream while a memo incrementally fills one bounded PCM ring.
+#[cfg(target_os = "ios")]
+pub(crate) struct NativeVoiceMemoOutput {
+    _stream: cpal::Stream,
+    queue: Arc<Mutex<FiniteAudioOutput>>,
+    progress: Arc<NativeVoiceMemoOutputProgress>,
+    source_sample_rate: u32,
+    output_sample_rate: u32,
+    output_channels: usize,
+}
+
+/// Android voice messages use the same proven AudioTrack bridge as LXST calls,
+/// but with media routing and exact finite-playback ownership.
+#[cfg(target_os = "android")]
+pub(crate) struct NativeVoiceMemoOutput {
+    progress: Arc<NativeVoiceMemoOutputProgress>,
+    source_sample_rate: u32,
+    startup_prime_frames: u64,
+}
+
+#[cfg(target_os = "ios")]
+#[derive(Clone)]
+pub(crate) struct NativeVoiceMemoOutputMonitor {
+    progress: Arc<NativeVoiceMemoOutputProgress>,
+}
+
+#[cfg(target_os = "android")]
+#[derive(Clone)]
+pub(crate) struct NativeVoiceMemoOutputMonitor {
+    progress: Arc<NativeVoiceMemoOutputProgress>,
+}
+
+#[cfg(target_os = "ios")]
+impl NativeVoiceMemoOutput {
+    pub(crate) fn position_ms(&self) -> u32 {
+        self.progress.position_ms()
+    }
+
+    pub(crate) fn finished(&self) -> bool {
+        self.progress.finished()
+    }
+
+    pub(crate) fn monitor(&self) -> NativeVoiceMemoOutputMonitor {
+        NativeVoiceMemoOutputMonitor {
+            progress: Arc::clone(&self.progress),
+        }
+    }
+
+    pub(crate) fn buffered_duration_ms(&self) -> u32 {
+        let buffered_samples = self
+            .queue
+            .lock()
+            .map(|queue| queue.len())
+            .unwrap_or_default();
+        let samples_per_second =
+            u64::from(self.output_sample_rate) * self.output_channels.max(1) as u64;
+        if samples_per_second == 0 {
+            return 0;
+        }
+        ((buffered_samples as u64 * 1_000) / samples_per_second).min(u64::from(u32::MAX)) as u32
+    }
+
+    pub(crate) fn needs_refill(&self) -> bool {
+        self.buffered_duration_ms() < crate::voice_memo::NATIVE_PLAYBACK_REFILL_TARGET_MS
+    }
+
+    pub(crate) fn enqueue_frame(&self, frame: &RawAudioFrame, skip_ms: u32) -> VoiceResult<()> {
+        let mut samples = resample_output_frame(
+            frame,
+            self.source_sample_rate,
+            self.output_sample_rate,
+            self.output_channels,
+        );
+        apply_voice_output_leveling(&mut samples);
+        let skip_samples = (u64::from(skip_ms)
+            * u64::from(self.output_sample_rate)
+            * self.output_channels.max(1) as u64
+            / 1_000)
+            .min(samples.len() as u64) as usize;
+        if skip_samples > 0 {
+            samples.drain(..skip_samples);
+        }
+        let submitted = samples.len() as u64;
+        self.queue
+            .lock()
+            .map_err(|_| "Voice message output queue is unavailable".to_string())?
+            .push_samples(samples)?;
+        self.progress
+            .submitted_samples
+            .fetch_add(submitted, Ordering::AcqRel);
+        Ok(())
+    }
+
+    pub(crate) fn finish_input(&self) -> VoiceResult<()> {
+        self.progress.input_complete.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    pub(crate) fn play(&self) -> VoiceResult<()> {
+        if self
+            .queue
+            .lock()
+            .map(|queue| queue.is_empty())
+            .unwrap_or(true)
+        {
+            return Err("Voice message decoded to empty PCM".to_string());
+        }
+        self._stream
+            .play()
+            .map_err(|error| format!("Failed to start voice message speaker stream: {error}"))
+    }
+
+    pub(crate) fn healthy(&self) -> bool {
+        true
+    }
+}
+
+#[cfg(target_os = "android")]
+impl NativeVoiceMemoOutput {
+    const OUTPUT_SAMPLE_RATE: u32 = 48_000;
+    const OUTPUT_CHANNELS: usize = 1;
+
+    pub(crate) fn position_ms(&self) -> u32 {
+        self.progress.position_ms()
+    }
+
+    pub(crate) fn finished(&self) -> bool {
+        self.progress.finished()
+    }
+
+    pub(crate) fn monitor(&self) -> NativeVoiceMemoOutputMonitor {
+        NativeVoiceMemoOutputMonitor {
+            progress: Arc::clone(&self.progress),
+        }
+    }
+
+    pub(crate) fn needs_refill(&self) -> bool {
+        let submitted = self.progress.submitted_samples.load(Ordering::Acquire);
+        let played = android_voice_audio::played_frames().unwrap_or_default();
+        android_memo_needs_refill(submitted, played, self.startup_prime_frames)
+    }
+
+    pub(crate) fn enqueue_frame(&self, frame: &RawAudioFrame, skip_ms: u32) -> VoiceResult<()> {
+        let mut samples = resample_output_frame(
+            frame,
+            self.source_sample_rate,
+            Self::OUTPUT_SAMPLE_RATE,
+            Self::OUTPUT_CHANNELS,
+        );
+        apply_voice_output_leveling(&mut samples);
+        let skip_samples = (u64::from(skip_ms) * u64::from(Self::OUTPUT_SAMPLE_RATE) / 1_000)
+            .min(samples.len() as u64) as usize;
+        if skip_samples > 0 {
+            samples.drain(..skip_samples);
+        }
+        write_android_voice_samples(&samples)?;
+        self.progress
+            .submitted_samples
+            .fetch_add(samples.len() as u64, Ordering::AcqRel);
+        Ok(())
+    }
+
+    pub(crate) fn finish_input(&self) -> VoiceResult<()> {
+        android_voice_audio::finish_voice_memo_input()?;
+        self.progress.input_complete.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    pub(crate) fn play(&self) -> VoiceResult<()> {
+        if self.progress.submitted_samples.load(Ordering::Acquire) == 0 {
+            return Err("Voice message decoded to empty PCM".to_string());
+        }
+        if !android_voice_audio::is_active().unwrap_or(false) {
+            return Err("Android voice message output did not start".to_string());
+        }
+        if !android_voice_audio::voice_memo_playback_started().unwrap_or(false) {
+            return Err("Android voice message playback clock did not start".to_string());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn healthy(&self) -> bool {
+        android_voice_audio::is_active().unwrap_or(false)
+    }
+}
+
+#[cfg(target_os = "android")]
+impl Drop for NativeVoiceMemoOutput {
+    fn drop(&mut self) {
+        android_voice_audio::stop();
+    }
+}
+
+#[cfg(target_os = "ios")]
+impl NativeVoiceMemoOutputMonitor {
+    pub(crate) fn position_ms(&self) -> u32 {
+        self.progress.position_ms()
+    }
+}
+
+#[cfg(target_os = "android")]
+impl NativeVoiceMemoOutputMonitor {
+    pub(crate) fn position_ms(&self) -> u32 {
+        self.progress.position_ms()
+    }
+}
+
+#[cfg(target_os = "ios")]
+struct NativeVoiceMemoOutputProgress {
+    rendered_samples: AtomicU64,
+    submitted_samples: AtomicU64,
+    input_complete: AtomicBool,
+    output_sample_rate: u32,
+    output_channels: usize,
+    start_position_ms: u32,
+    duration_ms: u32,
+}
+
+#[cfg(target_os = "android")]
+struct NativeVoiceMemoOutputProgress {
+    submitted_samples: AtomicU64,
+    input_complete: AtomicBool,
+    output_sample_rate: u32,
+    start_position_ms: u32,
+    duration_ms: u32,
+}
+
+#[cfg(target_os = "ios")]
+impl NativeVoiceMemoOutputProgress {
+    fn position_ms(&self) -> u32 {
+        let samples_per_second =
+            u64::from(self.output_sample_rate) * self.output_channels.max(1) as u64;
+        let rendered_ms = if samples_per_second == 0 {
+            0
+        } else {
+            self.rendered_samples.load(Ordering::Acquire) * 1_000 / samples_per_second
+        };
+        self.start_position_ms
+            .saturating_add(rendered_ms.min(u64::from(u32::MAX)) as u32)
+            .min(self.duration_ms)
+    }
+
+    fn finished(&self) -> bool {
+        finite_output_finished(
+            &self.input_complete,
+            &self.submitted_samples,
+            self.rendered_samples.load(Ordering::Acquire),
+        )
+    }
+}
+
+#[cfg(target_os = "android")]
+impl NativeVoiceMemoOutputProgress {
+    fn played_samples(&self) -> u64 {
+        android_voice_audio::played_frames().unwrap_or_default()
+    }
+
+    fn position_ms(&self) -> u32 {
+        let rendered_ms = self.played_samples() * 1_000 / u64::from(self.output_sample_rate.max(1));
+        self.start_position_ms
+            .saturating_add(rendered_ms.min(u64::from(u32::MAX)) as u32)
+            .min(self.duration_ms)
+    }
+
+    fn finished(&self) -> bool {
+        finite_output_finished(
+            &self.input_complete,
+            &self.submitted_samples,
+            self.played_samples(),
+        )
+    }
+}
+
+#[cfg(any(target_os = "ios", target_os = "android", test))]
+fn finite_output_finished(
+    input_complete: &AtomicBool,
+    submitted_samples: &AtomicU64,
+    rendered_samples: u64,
+) -> bool {
+    input_complete.load(Ordering::Acquire)
+        && rendered_samples >= submitted_samples.load(Ordering::Acquire)
+}
+
+#[cfg(any(target_os = "android", test))]
+fn android_memo_needs_refill(submitted: u64, played: u64, startup_prime_frames: u64) -> bool {
+    const STEADY_REFILL_FRAMES: u64 = 48_000 * 180 / 1_000;
+    if played == 0 {
+        submitted < startup_prime_frames.max(1)
+    } else {
+        submitted.saturating_sub(played) < STEADY_REFILL_FRAMES
+    }
+}
+
+#[cfg(any(target_os = "ios", test))]
+struct FiniteAudioOutput {
+    samples: VecDeque<f32>,
+    max_samples: usize,
+}
+
+#[cfg(any(target_os = "ios", test))]
+impl FiniteAudioOutput {
+    #[cfg(test)]
+    fn new(samples: Vec<f32>, start_sample: usize) -> Self {
+        let remaining = samples
+            .len()
+            .saturating_sub(start_sample.min(samples.len()));
+        Self {
+            samples: samples.into_iter().skip(start_sample).collect(),
+            max_samples: remaining,
+        }
+    }
+
+    fn bounded(max_samples: usize) -> Self {
+        Self {
+            samples: VecDeque::with_capacity(max_samples),
+            max_samples,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.samples.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.samples.is_empty()
+    }
+
+    fn push_samples(&mut self, samples: Vec<f32>) -> VoiceResult<()> {
+        if self.samples.len().saturating_add(samples.len()) > self.max_samples {
+            return Err("Voice message output exceeded its bounded PCM queue".to_string());
+        }
+        self.samples.extend(samples);
+        Ok(())
+    }
+
+    fn fill_f32(&mut self, output: &mut [f32]) -> usize {
+        let mut consumed = 0;
+        for target in output.iter_mut() {
+            let Some(sample) = self.samples.pop_front() else {
+                break;
+            };
+            *target = sample;
+            consumed += 1;
+        }
+        output[consumed..].fill(0.0);
+        consumed
+    }
+
+    fn fill_i16(&mut self, output: &mut [i16]) -> usize {
+        let mut consumed = 0;
+        for target in output.iter_mut() {
+            let Some(sample) = self.samples.pop_front() else {
+                break;
+            };
+            *target = (sample * i16::MAX as f32) as i16;
+            consumed += 1;
+        }
+        output[consumed..].fill(0);
+        consumed
+    }
+
+    fn fill_u16(&mut self, output: &mut [u16]) -> usize {
+        let mut consumed = 0;
+        for target in output.iter_mut() {
+            let Some(sample) = self.samples.pop_front() else {
+                break;
+            };
+            *target = ((sample * 0.5 + 0.5) * u16::MAX as f32) as u16;
+            consumed += 1;
+        }
+        output[consumed..].fill(u16::MAX / 2);
+        consumed
+    }
+}
+
+#[cfg(target_os = "ios")]
+pub(crate) fn start_voice_memo_output(
+    source_sample_rate: u32,
+    start_position_ms: u32,
+    duration_ms: u32,
+) -> VoiceResult<NativeVoiceMemoOutput> {
+    let host = cpal::default_host();
+    let output_device = host
+        .default_output_device()
+        .ok_or_else(|| "No default speaker is available".to_string())?;
+    let output_config = select_output_config(&output_device, source_sample_rate)?;
+    let output_channels = usize::from(output_config.channels());
+    let output_sample_rate = output_config.sample_rate().0;
+    let start_position_ms = start_position_ms.min(duration_ms);
+    let progress = Arc::new(NativeVoiceMemoOutputProgress {
+        rendered_samples: AtomicU64::new(0),
+        submitted_samples: AtomicU64::new(0),
+        input_complete: AtomicBool::new(false),
+        output_sample_rate,
+        output_channels,
+        start_position_ms,
+        duration_ms,
+    });
+    let max_samples = (output_sample_rate as usize)
+        .saturating_mul(output_channels.max(1))
+        .saturating_mul(VOICE_MEMO_OUTPUT_BUFFER_MS)
+        / 1_000;
+    let queue = Arc::new(Mutex::new(FiniteAudioOutput::bounded(max_samples)));
+    let stream = build_finite_output_stream(
+        &output_device,
+        &output_config,
+        Arc::clone(&queue),
+        Arc::clone(&progress),
+    )?;
+    Ok(NativeVoiceMemoOutput {
+        _stream: stream,
+        queue,
+        progress,
+        source_sample_rate,
+        output_sample_rate,
+        output_channels,
+    })
+}
+
+#[cfg(target_os = "android")]
+pub(crate) fn start_voice_memo_output(
+    source_sample_rate: u32,
+    start_position_ms: u32,
+    duration_ms: u32,
+) -> VoiceResult<NativeVoiceMemoOutput> {
+    let output_sample_rate = NativeVoiceMemoOutput::OUTPUT_SAMPLE_RATE;
+    let start_position_ms = start_position_ms.min(duration_ms);
+    android_voice_audio::start_voice_memo_playback(
+        output_sample_rate,
+        NativeVoiceMemoOutput::OUTPUT_CHANNELS,
+    )?;
+    let startup_frames = android_voice_audio::voice_memo_startup_prime_frames()?;
+    if startup_frames == 0 {
+        android_voice_audio::stop();
+        return Err("Android voice message output reported no startup capacity".to_string());
+    }
+    Ok(NativeVoiceMemoOutput {
+        progress: Arc::new(NativeVoiceMemoOutputProgress {
+            submitted_samples: AtomicU64::new(0),
+            input_complete: AtomicBool::new(false),
+            output_sample_rate,
+            start_position_ms,
+            duration_ms,
+        }),
+        source_sample_rate,
+        startup_prime_frames: startup_frames,
+    })
+}
+
+#[cfg(target_os = "ios")]
+fn build_finite_output_stream(
+    device: &cpal::Device,
+    supported: &cpal::SupportedStreamConfig,
+    queue: Arc<Mutex<FiniteAudioOutput>>,
+    progress: Arc<NativeVoiceMemoOutputProgress>,
+) -> VoiceResult<cpal::Stream> {
+    let config = supported.config();
+    match supported.sample_format() {
+        cpal::SampleFormat::F32 => device
+            .build_output_stream(
+                &config,
+                move |data: &mut [f32], _| fill_finite_output_f32(data, &queue, &progress),
+                log_output_stream_error,
+                None,
+            )
+            .map_err(|error| format!("Failed to build f32 voice message stream: {error}")),
+        cpal::SampleFormat::I16 => device
+            .build_output_stream(
+                &config,
+                move |data: &mut [i16], _| fill_finite_output_i16(data, &queue, &progress),
+                log_output_stream_error,
+                None,
+            )
+            .map_err(|error| format!("Failed to build i16 voice message stream: {error}")),
+        cpal::SampleFormat::U16 => device
+            .build_output_stream(
+                &config,
+                move |data: &mut [u16], _| fill_finite_output_u16(data, &queue, &progress),
+                log_output_stream_error,
+                None,
+            )
+            .map_err(|error| format!("Failed to build u16 voice message stream: {error}")),
+        other => Err(format!(
+            "Unsupported voice message speaker sample format: {other:?}"
+        )),
+    }
+}
+
+#[cfg(target_os = "ios")]
+fn fill_finite_output_f32(
+    data: &mut [f32],
+    queue: &Arc<Mutex<FiniteAudioOutput>>,
+    progress: &Arc<NativeVoiceMemoOutputProgress>,
+) {
+    let consumed = queue
+        .try_lock()
+        .map(|mut queue| queue.fill_f32(data))
+        .unwrap_or_else(|_| {
+            data.fill(0.0);
+            0
+        });
+    progress
+        .rendered_samples
+        .fetch_add(consumed as u64, Ordering::AcqRel);
+}
+
+#[cfg(target_os = "ios")]
+fn fill_finite_output_i16(
+    data: &mut [i16],
+    queue: &Arc<Mutex<FiniteAudioOutput>>,
+    progress: &Arc<NativeVoiceMemoOutputProgress>,
+) {
+    let consumed = queue
+        .try_lock()
+        .map(|mut queue| queue.fill_i16(data))
+        .unwrap_or_else(|_| {
+            data.fill(0);
+            0
+        });
+    progress
+        .rendered_samples
+        .fetch_add(consumed as u64, Ordering::AcqRel);
+}
+
+#[cfg(target_os = "ios")]
+fn fill_finite_output_u16(
+    data: &mut [u16],
+    queue: &Arc<Mutex<FiniteAudioOutput>>,
+    progress: &Arc<NativeVoiceMemoOutputProgress>,
+) {
+    let consumed = queue
+        .try_lock()
+        .map(|mut queue| queue.fill_u16(data))
+        .unwrap_or_else(|_| {
+            data.fill(u16::MAX / 2);
+            0
+        });
+    progress
+        .rendered_samples
+        .fetch_add(consumed as u64, Ordering::AcqRel);
 }
 
 fn push_input_samples(
@@ -2955,6 +3815,91 @@ fn log_input_stream_error(_err: cpal::StreamError) {
     tracing::warn!(reason = "stream_error", "LXST microphone stream error");
 }
 
+#[cfg(target_os = "android")]
+struct AndroidAudioContextOwner {
+    // ndk-context stores the raw jobject. Keep the corresponding global JNI
+    // reference alive for the entire process so CPAL/Oboe can safely attach
+    // audio workers after the Activity has been recreated.
+    _application: jni::objects::GlobalRef,
+}
+
+#[cfg(target_os = "android")]
+static ANDROID_AUDIO_CONTEXT: OnceLock<Result<AndroidAudioContextOwner, String>> = OnceLock::new();
+
+/// CPAL's Android backend calls `ndk_context::android_context()` before it can
+/// enumerate or open Oboe devices. Tauri embeds Rust in an Activity and does
+/// not initialize ndk-context for application crates, so establish the
+/// process-owned Application context before *any* `cpal::default_host()` call.
+/// Cache both success and failure: initialization is process-scoped and the
+/// ndk-context API must be invoked exactly once.
+#[cfg(target_os = "android")]
+fn ensure_android_audio_context() -> VoiceResult<()> {
+    match ANDROID_AUDIO_CONTEXT.get_or_init(initialize_android_audio_context) {
+        Ok(_) => Ok(()),
+        Err(error) => Err(error.clone()),
+    }
+}
+
+#[cfg(target_os = "android")]
+fn initialize_android_audio_context() -> Result<AndroidAudioContextOwner, String> {
+    let vm = rns_interface::android_usb::java_vm()
+        .ok_or_else(|| "JavaVM not initialized for Android microphone capture".to_string())?;
+    let env = vm
+        .attach_current_thread()
+        .map_err(|error| format!("JNI attach for Android microphone capture: {error}"))?;
+    let activity_thread = env
+        .find_class("android/app/ActivityThread")
+        .map_err(|error| {
+            clear_pending_android_exception(&env);
+            format!("Android microphone ActivityThread class: {error}")
+        })?;
+    let application = env
+        .call_static_method(
+            activity_thread,
+            "currentApplication",
+            "()Landroid/app/Application;",
+            &[],
+        )
+        .map_err(|error| {
+            clear_pending_android_exception(&env);
+            format!("Android microphone currentApplication: {error}")
+        })?
+        .l()
+        .map_err(|error| format!("Android microphone Application object: {error}"))?;
+    if application.is_null() {
+        return Err("Android microphone Application context is unavailable".to_string());
+    }
+    let application = env
+        .new_global_ref(application)
+        .map_err(|error| format!("Android microphone Application global reference: {error}"))?;
+
+    // SAFETY: JNI_OnLoad stores this process's JavaVM before any Tauri command
+    // can reach voice capture. `application` is a GlobalRef retained in the
+    // process-scoped OnceLock above, and get_or_init serializes this exactly-once
+    // initialization before any CPAL/Oboe access.
+    unsafe {
+        ndk_context::initialize_android_context(
+            vm.get_java_vm_pointer().cast(),
+            application.as_obj().into_inner().cast(),
+        );
+    }
+    Ok(AndroidAudioContextOwner {
+        _application: application,
+    })
+}
+
+#[cfg(target_os = "android")]
+fn clear_pending_android_exception(env: &jni::JNIEnv) {
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_clear();
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn ensure_android_audio_context() -> VoiceResult<()> {
+    Ok(())
+}
+
 #[cfg_attr(target_os = "android", allow(dead_code))]
 fn log_output_stream_error(_err: cpal::StreamError) {
     tracing::warn!(reason = "stream_error", "LXST speaker stream error");
@@ -2970,7 +3915,157 @@ mod android_voice_audio {
 
     const CLASS_NAME: &str = "org.ratspeak.android.RatspeakVoiceAudio";
     const CALL_CLASS_NAME: &str = "org.ratspeak.android.RatspeakCallAudio";
+    const VOICE_MEMO_CLASS_NAME: &str = "org.ratspeak.android.RatspeakVoiceMemoAudio";
     static APP_CLASS_LOADER: OnceLock<GlobalRef> = OnceLock::new();
+
+    pub struct VoiceMemoAudioSessionGuard {
+        token: String,
+    }
+
+    pub struct VoiceMemoPlaybackAudioSessionGuard {
+        token: String,
+    }
+
+    impl VoiceMemoAudioSessionGuard {
+        pub fn start(token: &str) -> VoiceResult<Self> {
+            match start_voice_memo_session(token)? {
+                0 => {}
+                1 => {
+                    return Err("Another app or call is using the microphone".to_string());
+                }
+                _ => {
+                    let phase = last_voice_memo_start_failure()
+                        .unwrap_or_else(|_| "native_unknown".to_string());
+                    tracing::warn!(
+                        phase = %phase,
+                        "Android voice message native audio admission failed"
+                    );
+                    return Err("Android microphone audio session is unavailable".to_string());
+                }
+            }
+            Ok(Self {
+                token: token.to_string(),
+            })
+        }
+    }
+
+    impl Drop for VoiceMemoAudioSessionGuard {
+        fn drop(&mut self) {
+            let _ = voice_memo_session_method(&self.token, "stopForSession");
+        }
+    }
+
+    impl VoiceMemoPlaybackAudioSessionGuard {
+        pub fn start(token: &str) -> VoiceResult<Self> {
+            match start_voice_memo_playback_session(token)? {
+                0 => Ok(Self {
+                    token: token.to_string(),
+                }),
+                1 => Err("Another app or call is using audio".to_string()),
+                _ => {
+                    let phase = last_voice_memo_start_failure()
+                        .unwrap_or_else(|_| "native_unknown".to_string());
+                    tracing::warn!(
+                        phase = %phase,
+                        "Android voice message playback admission failed"
+                    );
+                    Err("Android voice message playback is unavailable".to_string())
+                }
+            }
+        }
+    }
+
+    impl Drop for VoiceMemoPlaybackAudioSessionGuard {
+        fn drop(&mut self) {
+            let _ = voice_memo_session_method(&self.token, "stopPlaybackForSession");
+        }
+    }
+
+    fn voice_memo_session_method(token: &str, method: &str) -> VoiceResult<bool> {
+        with_env(|env| {
+            let class = find_app_class(env, VOICE_MEMO_CLASS_NAME)?;
+            let context = get_app_context(env)?;
+            let token = env
+                .new_string(token)
+                .map_err(|e| format!("voice memo session token: {e}"))?;
+            env.call_static_method(
+                class,
+                method,
+                "(Landroid/content/Context;Ljava/lang/String;)Z",
+                &[JValue::Object(context), JValue::Object(token.into())],
+            )
+            .map_err(|e| {
+                clear_exception(env);
+                format!("RatspeakVoiceMemoAudio.{method}: {e}")
+            })?
+            .z()
+            .map_err(|e| format!("RatspeakVoiceMemoAudio.{method} result: {e}"))
+        })
+    }
+
+    fn start_voice_memo_session(token: &str) -> VoiceResult<i32> {
+        with_env(|env| {
+            let class = find_app_class(env, VOICE_MEMO_CLASS_NAME)?;
+            let context = get_app_context(env)?;
+            let token = env
+                .new_string(token)
+                .map_err(|e| format!("voice memo session token: {e}"))?;
+            env.call_static_method(
+                class,
+                "startForSession",
+                "(Landroid/content/Context;Ljava/lang/String;)I",
+                &[JValue::Object(context), JValue::Object(token.into())],
+            )
+            .map_err(|e| {
+                clear_exception(env);
+                format!("RatspeakVoiceMemoAudio.startForSession: {e}")
+            })?
+            .i()
+            .map_err(|e| format!("RatspeakVoiceMemoAudio.startForSession result: {e}"))
+        })
+    }
+
+    fn start_voice_memo_playback_session(token: &str) -> VoiceResult<i32> {
+        with_env(|env| {
+            let class = find_app_class(env, VOICE_MEMO_CLASS_NAME)?;
+            let context = get_app_context(env)?;
+            let token = env
+                .new_string(token)
+                .map_err(|e| format!("voice memo playback token: {e}"))?;
+            env.call_static_method(
+                class,
+                "startPlaybackForSession",
+                "(Landroid/content/Context;Ljava/lang/String;)I",
+                &[JValue::Object(context), JValue::Object(token.into())],
+            )
+            .map_err(|e| {
+                clear_exception(env);
+                format!("RatspeakVoiceMemoAudio.startPlaybackForSession: {e}")
+            })?
+            .i()
+            .map_err(|e| format!("RatspeakVoiceMemoAudio.startPlaybackForSession result: {e}"))
+        })
+    }
+
+    fn last_voice_memo_start_failure() -> VoiceResult<String> {
+        with_env(|env| {
+            let class = find_app_class(env, VOICE_MEMO_CLASS_NAME)?;
+            let value = env
+                .call_static_method(class, "lastStartFailureCode", "()Ljava/lang/String;", &[])
+                .map_err(|e| {
+                    clear_exception(env);
+                    format!("RatspeakVoiceMemoAudio.lastStartFailureCode: {e}")
+                })?
+                .l()
+                .map_err(|e| format!("RatspeakVoiceMemoAudio.lastStartFailureCode result: {e}"))?;
+            if value.is_null() {
+                return Ok("native_unknown".to_string());
+            }
+            env.get_string(JString::from(value))
+                .map(|value| value.into())
+                .map_err(|e| format!("RatspeakVoiceMemoAudio.lastStartFailureCode string: {e}"))
+        })
+    }
 
     pub struct CallAudioSessionGuard {
         token: String,
@@ -3119,6 +4214,124 @@ mod android_voice_audio {
                     ))
                 }
             }
+        })
+    }
+
+    pub fn start_voice_memo_playback(sample_rate_hz: u32, channels: usize) -> VoiceResult<()> {
+        with_env(|env| {
+            let class = find_app_class(env, CLASS_NAME)?;
+            let ok = env
+                .call_static_method(
+                    class,
+                    "startVoiceMemoPlayback",
+                    "(II)Z",
+                    &[
+                        JValue::Int(sample_rate_hz as i32),
+                        JValue::Int(channels as i32),
+                    ],
+                )
+                .map_err(|e| {
+                    clear_exception(env);
+                    format!("RatspeakVoiceAudio.startVoiceMemoPlayback: {e}")
+                })?
+                .z()
+                .map_err(|e| format!("RatspeakVoiceAudio.startVoiceMemoPlayback result: {e}"))?;
+            if ok {
+                Ok(())
+            } else {
+                let detail = last_error(env, class);
+                if detail.is_empty() {
+                    Err("Android voice message AudioTrack could not be initialized".to_string())
+                } else {
+                    Err(format!(
+                        "Android voice message AudioTrack could not be initialized: {detail}"
+                    ))
+                }
+            }
+        })
+    }
+
+    pub fn voice_memo_startup_prime_frames() -> VoiceResult<u64> {
+        with_env(|env| {
+            let class = find_app_class(env, CLASS_NAME)?;
+            let frames = env
+                .call_static_method(class, "voiceMemoStartupPrimeFrames", "()J", &[])
+                .map_err(|e| {
+                    clear_exception(env);
+                    format!("RatspeakVoiceAudio.voiceMemoStartupPrimeFrames: {e}")
+                })?
+                .j()
+                .map_err(|e| {
+                    format!("RatspeakVoiceAudio.voiceMemoStartupPrimeFrames result: {e}")
+                })?;
+            Ok(frames.max(0) as u64)
+        })
+    }
+
+    pub fn voice_memo_playback_started() -> VoiceResult<bool> {
+        with_env(|env| {
+            let class = find_app_class(env, CLASS_NAME)?;
+            env.call_static_method(class, "voiceMemoPlaybackStarted", "()Z", &[])
+                .map_err(|e| {
+                    clear_exception(env);
+                    format!("RatspeakVoiceAudio.voiceMemoPlaybackStarted: {e}")
+                })?
+                .z()
+                .map_err(|e| format!("RatspeakVoiceAudio.voiceMemoPlaybackStarted result: {e}"))
+        })
+    }
+
+    pub fn finish_voice_memo_input() -> VoiceResult<()> {
+        with_env(|env| {
+            let class = find_app_class(env, CLASS_NAME)?;
+            let ok = env
+                .call_static_method(class, "finishVoiceMemoInput", "()Z", &[])
+                .map_err(|e| {
+                    clear_exception(env);
+                    format!("RatspeakVoiceAudio.finishVoiceMemoInput: {e}")
+                })?
+                .z()
+                .map_err(|e| format!("RatspeakVoiceAudio.finishVoiceMemoInput result: {e}"))?;
+            if ok {
+                Ok(())
+            } else {
+                let detail = last_error(env, class);
+                if detail.is_empty() {
+                    Err("Android voice message output could not finish startup priming".to_string())
+                } else {
+                    Err(format!(
+                        "Android voice message output could not finish startup priming: {detail}"
+                    ))
+                }
+            }
+        })
+    }
+
+    pub fn played_frames() -> VoiceResult<u64> {
+        with_env(|env| {
+            let class = find_app_class(env, CLASS_NAME)?;
+            let frames = env
+                .call_static_method(class, "playbackHeadFrames", "()J", &[])
+                .map_err(|e| {
+                    clear_exception(env);
+                    format!("RatspeakVoiceAudio.playbackHeadFrames: {e}")
+                })?
+                .j()
+                .map_err(|e| format!("RatspeakVoiceAudio.playbackHeadFrames result: {e}"))?;
+            Ok(frames.max(0) as u64)
+        })
+    }
+
+    pub fn is_active() -> VoiceResult<bool> {
+        with_env(|env| {
+            let class = find_app_class(env, CLASS_NAME)?;
+            env.call_static_method(class, "isActive", "()Z", &[])
+                .map_err(|e| {
+                    clear_exception(env);
+                    format!("RatspeakVoiceAudio.isActive: {e}")
+                })?
+                .z()
+                .map_err(|e| format!("RatspeakVoiceAudio.isActive result: {e}"))
         })
     }
 
@@ -3280,6 +4493,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn embedded_telephony_has_no_autonomous_announce_schedule() {
+        let config = coordinated_telephony_service_config();
+        assert!(!config.announce_on_start);
+        assert_eq!(config.announce_interval, None);
+        assert_eq!(config.startup_announce_retry_interval, None);
+        assert_eq!(config.startup_announce_retries, 0);
+    }
+
+    #[test]
     fn microphone_capture_retries_are_short_and_bounded() {
         assert_eq!(MICROPHONE_CAPTURE_RETRY_DELAYS.len(), 3);
         assert_eq!(MICROPHONE_CAPTURE_RETRY_DELAYS[0], Duration::ZERO);
@@ -3295,6 +4517,33 @@ mod tests {
                 .sum::<Duration>()
                 <= Duration::from_millis(750)
         );
+    }
+
+    #[test]
+    fn android_microphone_candidates_prefer_profile_then_native_rates() {
+        assert_eq!(
+            android_microphone_candidate_sample_rates(8_000, 48_000, 24_000),
+            vec![24_000, 48_000, 44_100, 32_000, 22_050, 16_000, 8_000]
+        );
+        assert_eq!(
+            android_microphone_candidate_sample_rates(44_100, 44_100, 44_100),
+            vec![44_100]
+        );
+        assert_eq!(
+            android_microphone_candidate_sample_rates(11_025, 11_025, 24_000),
+            vec![11_025]
+        );
+    }
+
+    #[test]
+    fn android_microphone_rate_priority_is_deterministic() {
+        let preferred = android_microphone_sample_rate_penalty(24_000, 24_000);
+        let native = android_microphone_sample_rate_penalty(48_000, 24_000);
+        let secondary = android_microphone_sample_rate_penalty(44_100, 24_000);
+        let unusual = android_microphone_sample_rate_penalty(11_025, 24_000);
+        assert!(preferred < native);
+        assert!(native < secondary);
+        assert!(secondary < unusual);
     }
     use crate::config::DashboardConfig;
     use r2d2_sqlite::SqliteConnectionManager;
@@ -3361,6 +4610,7 @@ mod tests {
         let notifier = Arc::new(RecordingNotifier::default());
         let state = make_notification_state(notifier.clone());
         state.is_foreground.store(false, Ordering::Relaxed);
+        state.set_notification_foreground(false);
         db::save_identity(&state.db, "identity-a", "lxmf-a", "Me", "Me");
         db::set_active_identity(&state.db, "identity-a").unwrap();
 
@@ -3573,5 +4823,107 @@ mod tests {
         assert_eq!(queue.pop_sample(), 0.4);
         assert_eq!(queue.pop_sample(), 0.5);
         assert_eq!(queue.pop_sample(), 0.0);
+    }
+
+    #[test]
+    fn full_audio_session_failures_retry_with_bounded_exact_link_backoff() {
+        let now = Instant::now();
+        let failure = VoiceAudioFailure {
+            link_id: [0x44; 16],
+            profile: Profile::QualityHigh,
+            attempts: 1,
+            next_retry_at: now + VOICE_AUDIO_RECOVERY_INITIAL_DELAY,
+        };
+
+        assert!(failure.matches([0x44; 16], Profile::QualityHigh));
+        assert!(!failure.matches([0x45; 16], Profile::QualityHigh));
+        assert!(!failure.ready_to_retry(now));
+        assert!(
+            failure.ready_to_retry(
+                now + VOICE_AUDIO_RECOVERY_INITIAL_DELAY + Duration::from_millis(1)
+            )
+        );
+        assert_eq!(audio_recovery_delay(0), VOICE_AUDIO_RECOVERY_INITIAL_DELAY);
+        assert_eq!(
+            audio_recovery_delay(u32::MAX),
+            VOICE_AUDIO_RECOVERY_MAX_DELAY
+        );
+    }
+
+    #[test]
+    fn finite_memo_output_reports_only_pcm_consumed_by_the_device_callback() {
+        let mut queue = FiniteAudioOutput::new(vec![0.25, -0.5, 0.75], 1);
+        let mut output = [9.0; 4];
+
+        let consumed = queue.fill_f32(&mut output);
+
+        assert_eq!(consumed, 2);
+        assert_eq!(output, [-0.5, 0.75, 0.0, 0.0]);
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn finite_memo_output_converts_without_allocating_in_the_audio_callback() {
+        let mut signed = FiniteAudioOutput::new(vec![-1.0, 0.0, 1.0], 0);
+        let mut signed_output = [7i16; 4];
+        assert_eq!(signed.fill_i16(&mut signed_output), 3);
+        assert_eq!(signed_output, [i16::MIN + 1, 0, i16::MAX, 0]);
+
+        let mut unsigned = FiniteAudioOutput::new(vec![-1.0, 0.0, 1.0], 0);
+        let mut unsigned_output = [7u16; 4];
+        assert_eq!(unsigned.fill_u16(&mut unsigned_output), 3);
+        assert_eq!(unsigned_output[0], 0);
+        assert_eq!(unsigned_output[1], u16::MAX / 2);
+        assert_eq!(unsigned_output[2], u16::MAX);
+        assert_eq!(unsigned_output[3], u16::MAX / 2);
+    }
+
+    #[test]
+    fn finite_memo_output_rejects_growth_past_its_pcm_budget() {
+        let mut queue = FiniteAudioOutput::bounded(3);
+        queue.push_samples(vec![0.1, 0.2]).unwrap();
+
+        assert!(queue.push_samples(vec![0.3, 0.4]).is_err());
+        assert_eq!(queue.len(), 2);
+    }
+
+    #[test]
+    fn finite_memo_completion_uses_exact_submitted_samples_after_input_is_sealed() {
+        let input_complete = AtomicBool::new(false);
+        let submitted_samples = AtomicU64::new(1_608);
+
+        assert!(!finite_output_finished(
+            &input_complete,
+            &submitted_samples,
+            1_608
+        ));
+        input_complete.store(true, Ordering::Release);
+        assert!(!finite_output_finished(
+            &input_complete,
+            &submitted_samples,
+            1_607
+        ));
+        assert!(finite_output_finished(
+            &input_complete,
+            &submitted_samples,
+            1_608
+        ));
+
+        // A seek may leave a non-millisecond-aligned tail as well. Completion
+        // follows the actual enqueued PCM, not a rounded millisecond target.
+        submitted_samples.store(1_296, Ordering::Release);
+        assert!(finite_output_finished(
+            &input_complete,
+            &submitted_samples,
+            1_296
+        ));
+    }
+
+    #[test]
+    fn android_memo_refill_uses_exact_frames_without_rounding_deadlock() {
+        assert!(android_memo_needs_refill(10_560, 0, 10_561));
+        assert!(!android_memo_needs_refill(10_561, 0, 10_561));
+        assert!(android_memo_needs_refill(9_639, 1_000, 10_561));
+        assert!(!android_memo_needs_refill(9_640, 1_000, 10_561));
     }
 }

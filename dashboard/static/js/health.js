@@ -288,12 +288,52 @@ function buildIfaceActionItems(ifaceType, ifaceName) {
     var live = supportsPause ? getInterfaceLiveStatus(ifaceName) : null;
     var statusKnown = !!(lastStats && lastStats.interface_stats);
     var unavailable = supportsPause && statusKnown && !paused && (!live || live.online === false);
+    var port = supportsPause ? String(record.iface.port || '') : '';
+    var isBleRnode = ifaceType === 'rnode' && port.indexOf('ble://') === 0;
+    var bleState = isBleRnode && _cachedConfigIfaces && _cachedConfigIfaces.mobile_hardware
+        ? _cachedConfigIfaces.mobile_hardware.ble_rnode
+        : null;
+    var bleStateName = bleState && typeof bleState.state === 'string' ? bleState.state : '';
+    var bleInFlight = bleStateName === 'waiting_for_radio' ||
+        bleStateName === 'reconnecting' ||
+        bleStateName === 'connecting' ||
+        bleStateName === 'initializing';
     if (supportsPause) {
-        items.push({
-            label: (paused || unavailable) ? 'Resume Interface' : 'Pause Interface',
-            icon: (paused || unavailable) ? ICON_PLAY : ICON_PAUSE,
-            onSelect: function() { setInterfacePaused(ifaceType, ifaceName, !(paused || unavailable)); }
-        });
+        if (paused) {
+            items.push({
+                label: 'Resume Interface',
+                icon: ICON_PLAY,
+                onSelect: function() { setInterfacePaused(ifaceType, ifaceName, false); }
+            });
+        } else if (isBleRnode && bleInFlight) {
+            // The native supervisor already owns the durable retry. Re-running
+            // Resume here would replace that valid owner and reset its retry
+            // generation, so expose progress without a destructive action.
+            items.push({ label: 'Connecting…', icon: ICON_RADIO, disabled: true });
+        } else if (isBleRnode && bleStateName === 'conflict') {
+            items.push({ label: 'Radio conflict', icon: ICON_RADIO, disabled: true });
+        } else if (isBleRnode && (bleStateName === 'failed' || bleStateName === 'disabled')) {
+            items.push({
+                label: 'Retry Connection',
+                icon: ICON_PLAY,
+                onSelect: function() { setInterfacePaused(ifaceType, ifaceName, false); }
+            });
+        } else if (isBleRnode) {
+            // Enabled configuration remains owned by its runtime even while
+            // live stats are absent or offline. Missing stats alone must never
+            // turn Pause into the destructive Resume/replacement path.
+            items.push({
+                label: 'Pause Interface',
+                icon: ICON_PAUSE,
+                onSelect: function() { setInterfacePaused(ifaceType, ifaceName, true); }
+            });
+        } else {
+            items.push({
+                label: unavailable ? 'Resume Interface' : 'Pause Interface',
+                icon: unavailable ? ICON_PLAY : ICON_PAUSE,
+                onSelect: function() { setInterfacePaused(ifaceType, ifaceName, !unavailable); }
+            });
+        }
         items.push({ separator: true });
     }
     if (isLoraInterfaceType(ifaceType)) {
@@ -328,10 +368,9 @@ function setInterfacePaused(ifaceType, ifaceName, paused) {
         return invokeLifecycle();
     }).then(function(result) {
         if (result === null) return;
-        showToast(paused ? 'Pausing interface...' : 'Resuming interface...', 'toast-blue', 2500);
         refreshConfigInterfaces();
     }).catch(function(err) {
-        showToast((err && err.message) || 'Failed to update interface', 'toast-red', 8000);
+        showToast((err && err.message) || 'Could not update interface', 'toast-error', 8000);
     });
 }
 
@@ -397,7 +436,7 @@ function openInterfaceEdit(ifaceType, ifaceName) {
     var record = (_cachedConfigByName && _cachedConfigByName[ifaceName]) || null;
     var iface = record ? record.iface : null;
     if (!iface) {
-        showToast('Interface settings are still loading', 'toast-yellow', 2500);
+        showToast('Interface settings are still loading', 'toast-warning', 2500);
         refreshConfigInterfaces();
         return;
     }
@@ -734,14 +773,10 @@ function classifyInterface(iface) {
 // the same Ratspeak peer.
 window._blePeers = window._blePeers || {};
 
-// Grace window: render 'Identifying peer\u2026' before the first signed
-// announce arrives, then fall back to the BLE address.
-var BLE_PEER_IDENTIFYING_GRACE_MS = 5000;
-
-// Identity-aware label: contact name > truncated hash > grace placeholder >
-// raw BLE address. Returns { label, title } for tooltip preservation.
+// Identity-aware label. A BLE address is transport metadata, never a peer
+// identity; persisted identity is only a provisional reconnect hint until a
+// fresh signed announce makes the row routable.
 function _resolveBlePeerLabel(peer) {
-    var addr = peer.address || '';
     var idHash = peer.identity_hash || '';
     if (idHash) {
         if (typeof PeersCache !== 'undefined' && PeersCache && typeof PeersCache.get === 'function') {
@@ -752,12 +787,14 @@ function _resolveBlePeerLabel(peer) {
         }
         return { label: typeof shortHash === 'function' ? shortHash(idHash, 8, 4) : idHash.substring(0, 12) + '\u2026', title: idHash };
     }
-    // Defer raw BLE address until grace window elapses to avoid a 1-2s UUID flash.
-    var connectedAt = peer.connected_at || 0;
-    if (connectedAt && Date.now() - connectedAt < BLE_PEER_IDENTIFYING_GRACE_MS) {
-        return { label: 'Identifying peer\u2026', title: addr || 'Identifying peer' };
+    var provisional = peer.provisional_identity_hash || '';
+    if (provisional && typeof PeersCache !== 'undefined' && PeersCache && typeof PeersCache.get === 'function') {
+        var provisionalEntry = PeersCache.get(provisional);
+        if (provisionalEntry && provisionalEntry.display_name && provisionalEntry.display_name !== provisional) {
+            return { label: 'Verifying ' + provisionalEntry.display_name + '\u2026', title: 'Awaiting a signed identity announce' };
+        }
     }
-    return { label: addr, title: addr };
+    return { label: 'Identifying peer\u2026', title: 'Awaiting a signed identity announce' };
 }
 
 function _blePeerRepresentativeScore(peer) {
@@ -781,7 +818,9 @@ function _betterBlePeerRepresentative(current, candidate) {
 function _bleVisiblePeersFromCache() {
     var raw = Object.keys(window._blePeers || {})
         .map(function(k) { return window._blePeers[k]; })
-        .filter(function(p) { return p && p.connected === true; });
+        .filter(function(p) {
+            return p && p.connected === true && p.routable === true && !!p.identity_hash;
+        });
     var byIdentity = {};
     var unidentified = [];
 
@@ -856,7 +895,15 @@ function _renderBleSection(bodyEl, sectionEl, countEl) {
     }
     if (count === 0) {
         var msg;
-        if (window._blePeerEnabled && window._blePeerPeripheralUnavailable) {
+        var verifyingCount = Object.keys(window._blePeers || {}).filter(function(key) {
+            var peer = window._blePeers[key];
+            return peer && peer.connected === true && peer.routable !== true;
+        }).length;
+        if (verifyingCount > 0) {
+            msg = verifyingCount === 1
+                ? 'Connected \u00b7 verifying peer identity\u2026'
+                : 'Connected \u00b7 verifying ' + verifyingCount + ' peer identities\u2026';
+        } else if (window._blePeerEnabled && window._blePeerPeripheralUnavailable) {
             msg = 'Central-only \u2014 scanning for peers\u2026';
         } else if (window._blePeerEnabled) {
             msg = 'Scanning for peers\u2026';
@@ -912,7 +959,9 @@ function _mobileRnodeHealth(port, mobileHardware) {
         if (!state || state.state === 'connected') return null;
         var bleLabels = {
             connecting: 'Connecting',
-            reconnecting: 'Reconnecting',
+            waiting_for_radio: 'Waiting for radio',
+            reconnecting: 'Waiting for radio',
+            initializing: 'Initializing',
             disabled: 'Disconnected',
             conflict: 'Radio conflict',
         };
@@ -923,7 +972,8 @@ function _mobileRnodeHealth(port, mobileHardware) {
             bond_timeout: 'Pairing timed out',
             stale_bond: 'Pair again',
             bridge_unavailable: 'Radio service unavailable',
-            radio_disconnected: 'Reconnecting',
+            radio_disconnected: 'Waiting for radio',
+            auto_resume_disabled: 'Reconnect paused',
             connect_failed: 'Connection failed',
             multiple_configured_radios: 'Radio conflict',
         };
@@ -934,10 +984,26 @@ function _mobileRnodeHealth(port, mobileHardware) {
             label: state.state === 'failed'
                 ? (failedLabels[state.reason] || 'Connection failed')
                 : (bleLabels[state.state] || 'Waiting for radio'),
-            actionable: state.state === 'failed' || state.state === 'conflict' || state.state === 'disabled',
+            actionable: state.state === 'failed' || state.state === 'disabled',
         };
     }
     return null;
+}
+
+function _configuredInterfaceFallback(record, mobileHardware) {
+    var iface = record && record.iface ? record.iface : {};
+    var enabled = isInterfaceConfigEnabled(iface);
+    var port = String(iface.port || '');
+    var waitingForDevice = enabled && port.indexOf('androidusb://') === 0;
+    var mobileHealth = enabled
+        ? _mobileRnodeHealth(port, mobileHardware)
+        : null;
+    return {
+        paused: !enabled,
+        waitingForDevice: waitingForDevice,
+        mobileHealth: mobileHealth,
+        connecting: enabled && record.ifaceType === 'rnode' && !waitingForDevice && !mobileHealth,
+    };
 }
 
 function _interfaceConfigByName(ifaces) {
@@ -1053,22 +1119,21 @@ function _renderConnectionsFromCache() {
             if (matchedConfigNames[cn]) return;
             var record = configByName[cn];
             if (!record || !record.iface) return;
-            var enabled = isInterfaceConfigEnabled(record.iface);
-            var port = String(record.iface.port || '');
-            var waitingForAndroidUsb = enabled && port.indexOf('androidusb://') === 0;
-            var mobileHealth = enabled
-                ? _mobileRnodeHealth(port, ifaces.mobile_hardware)
-                : null;
-            if (enabled && !waitingForAndroidUsb && !mobileHealth) return;
             var section = interfaceSectionForConfigType(record.ifaceType);
             if (!section) return;
+            // Configuration is authoritative for row existence. A newly added
+            // interface can precede its first live-statistics snapshot; hiding
+            // it until traffic (for example, the first announce) makes a
+            // successful add look as if it was discarded.
+            var fallback = _configuredInterfaceFallback(record, ifaces.mobile_hardware);
             allIfaces.push({
                 iface: record.iface,
                 section: section,
                 ifaceType: record.ifaceType,
-                paused: !enabled,
-                waitingForDevice: waitingForAndroidUsb,
-                mobileHealth: mobileHealth,
+                paused: fallback.paused,
+                waitingForDevice: fallback.waitingForDevice,
+                mobileHealth: fallback.mobileHealth,
+                connecting: fallback.connecting,
             });
         });
 
@@ -1121,6 +1186,7 @@ function _renderConnectionsFromCache() {
                 var ifaceType = item.ifaceType;
                 var paused = !!item.paused;
                 var waitingForDevice = !!item.waitingForDevice;
+                var connecting = !!item.connecting;
                 var name = iface.name || 'unknown';
                 var typeName = iface.type || '';
                 var mobileHealth = item.mobileHealth || _mobileRnodeHealth(
@@ -1162,34 +1228,27 @@ function _renderConnectionsFromCache() {
 
                 var displayName = (typeof friendlyInterfaceName === 'function') ? friendlyInterfaceName(name, typeName, iface.role || 'normal') : name;
 
-                // Multicast join rejected (iOS entitlement / Linux NIC vanish);
-                // pill surfaces this so the empty peer list isn't mistaken for a bug.
-                var pillHtml = '';
+                // Multicast join rejected (for example, permission denied or NIC vanished);
+                // persistent status keeps the empty peer list from looking like a bug.
+                var statusHtml = '';
                 if (sectionKey === 'local' && window._autoUnavailable &&
                     window._autoUnavailable.interface === name) {
-                    var iosPill = (typeof isIOS === 'function') && isIOS();
-                    if (iosPill) {
-                        pillHtml = '<span class="conn-iface-pill" ' +
-                            'title="Apple multicast entitlement is required for local Wi-Fi peer discovery. We have requested it; coverage will appear automatically once approved." ' +
-                            '>' +
-                            'Pending Apple approval' +
-                            '</span>';
-                    } else {
-                        pillHtml = '<span class="conn-iface-pill" ' +
-                            'title="' + escapeHtml(window._autoUnavailable.reason || 'Multicast unavailable') + '" ' +
-                            '>' +
-                            'Multicast unavailable' +
-                            '</span>';
-                    }
+                    statusHtml = '<span class="conn-iface-status-text is-warning" ' +
+                        'title="' + escapeHtml(window._autoUnavailable.reason || 'Multicast unavailable') + '" ' +
+                        '>' +
+                        'Multicast unavailable' +
+                        '</span>';
                 }
                 if (paused) {
-                    pillHtml += '<span class="conn-iface-pill conn-iface-pill-paused">Paused</span>';
+                    statusHtml += '<span class="conn-iface-status-text">Paused</span>';
                 } else if (mobileHealth) {
-                    pillHtml += '<span class="conn-iface-pill" role="status" title="' +
+                    statusHtml += '<span class="conn-iface-status-text is-warning" role="status" title="' +
                         escapeHtml(mobileHealth.label) + '">' +
                         escapeHtml(mobileHealth.label) + '</span>';
                 } else if (waitingForDevice) {
-                    pillHtml += '<span class="conn-iface-pill" role="status">Waiting for USB</span>';
+                    statusHtml += '<span class="conn-iface-status-text is-warning" role="status">Waiting for USB</span>';
+                } else if (connecting) {
+                    statusHtml += '<span class="conn-iface-status-text is-warning" role="status">Connecting</span>';
                 }
 
                 // Augment label with non-default group ID (matches Python rnsd).
@@ -1203,7 +1262,7 @@ function _renderConnectionsFromCache() {
                     '<span class="conn-iface-main">' +
                         '<span class="conn-iface-titleline">' +
                             '<span class="conn-iface-name" title="' + escapeHtml(name) + '">' + escapeHtml(displayName) + groupSuffix + '</span>' +
-                            pillHtml +
+                            statusHtml +
                         '</span>' +
                         '<span class="conn-iface-stats">' +
                             '<span title="TX">\u2191 ' + prettySize(txb) + '</span>' +
@@ -1399,7 +1458,7 @@ function renderTrafficTable(rateTable) {
 }
 
 function renderAlert(alert) {
-    var colorClass = alert.level === 'critical' ? 'toast-red' : 'toast-orange';
+    var colorClass = alert.level === 'critical' ? 'toast-error' : 'toast-warning';
     var duration = 5000;
     showToast(alert.message, colorClass, duration);
 }
@@ -1458,12 +1517,6 @@ if (networkAnnounceBtn) {
         networkAnnounceBtn.disabled = true;
         if (networkAnnounceBtn.dataset) networkAnnounceBtn.dataset.announcePending = '1';
         networkAnnounceLabel.textContent = 'Announcing...';
-        setTimeout(function() {
-            if (networkAnnounceBtn.dataset && networkAnnounceBtn.dataset.announcePending !== '1') return;
-            if (networkAnnounceBtn.dataset) delete networkAnnounceBtn.dataset.announcePending;
-            networkAnnounceBtn.disabled = false;
-            networkAnnounceLabel.textContent = 'Announce';
-        }, 10000);
     });
 }
 

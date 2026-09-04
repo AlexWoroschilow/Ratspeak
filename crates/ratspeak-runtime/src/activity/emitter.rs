@@ -166,7 +166,7 @@ fn legacy_message(event: &ActivityEventV1) -> Option<&'static str> {
         "rns.path.discovered" => "Path discovered",
         "rns.path.observed" => "Path observed",
         "rns.path.timed_out" => "Path request timed out",
-        "rns.announce.sent" => "Announce sent",
+        "rns.announce.queued" | "rns.announce.sent" => "Announce queued",
         "rns.announce.failed" => "Announce failed",
         "rns.announce.held" => "Announce queued",
         "rns.announce.observed" => "Announce observed",
@@ -526,8 +526,9 @@ fn legacy_detail(event: &ActivityEventV1) -> String {
                 " hops",
             );
         }
-        "rns.announce.sent" => {
+        "rns.announce.queued" | "rns.announce.sent" => {
             push_code(&mut fragments, event, ActivityAttributeKey::Method);
+            push_code(&mut fragments, event, ActivityAttributeKey::State);
         }
         "rns.announce.failed" => {
             push_code(&mut fragments, event, ActivityAttributeKey::Reason);
@@ -767,8 +768,15 @@ fn friendly_code(value: &str) -> Option<&'static str> {
         "startup" => "Startup",
         "transport" => "Transport",
         "interface_online" => "Interface online",
+        "identity_changed" => "Identity changed",
         "lxmf_delivery" => "LXMF delivery",
-        "lxst_service" => "LXST service",
+        "lxmf_delivery_lxst" => "LXMF delivery + LXST",
+        "lxmf_delivery_propagation" => "LXMF delivery + propagation",
+        "lxmf_delivery_propagation_lxst" => "LXMF delivery + propagation + LXST",
+        "periodic" => "Periodic",
+        "profile_changed" => "Profile changed",
+        "propagation_changed" => "Propagation changed",
+        "coordinated" => "Coordinated",
         "direct" => "Direct",
         "opportunistic" => "Opportunistic",
         "paper" => "Paper",
@@ -965,6 +973,7 @@ mod tests {
             | "lxst.service.failed"
             | "lxst.media.warning" => ActivityDirection::Local,
             "rns.path.requested"
+            | "rns.announce.queued"
             | "rns.announce.sent"
             | "rns.announce.failed"
             | "lxmf.delivery.queued"
@@ -1007,7 +1016,8 @@ mod tests {
             | "lxst.service.started"
             | "lxst.call.ringing"
             | "lxst.call.link_requested" => ActivityOutcome::Started,
-            "rns.announce.held"
+            "rns.announce.sent"
+            | "rns.announce.held"
             | "lxmf.delivery.path_pending"
             | "lxmf.delivery.link_establishing"
             | "lxmf.delivery.link_ready"
@@ -1027,7 +1037,7 @@ mod tests {
             | "interface.removed"
             | "rns.path.discovered"
             | "rns.path.observed"
-            | "rns.announce.sent"
+            | "rns.announce.queued"
             | "rns.announce.ingress_burst_cleared"
             | "rns.announce.observed"
             | "lxmf.delivery.delivered"
@@ -1242,11 +1252,11 @@ mod tests {
     #[test]
     fn real_stage_2a_producers_preserve_typed_and_legacy_parity() {
         use producer::{
-            AnnounceFailureReason, AnnounceMethod, AnnounceSuppressionReason, AppRuntimeTransition,
-            DeliveryFailureReason, InboundLxmfMethod, InterfaceClass, InterfaceFailureReason,
-            InterfaceRollback, InterfaceTransition, LxmfDeliveryMethod, LxmfDeliveryState,
-            LxmfProgressStep, LxmfSubmissionFailureReason, LxstCallReason, LxstTransition,
-            PathEvidence, PathRequestMethod,
+            AnnounceComponents, AnnounceFailureReason, AnnounceMethod, AnnounceSuppressionReason,
+            AppRuntimeTransition, DeliveryFailureReason, InboundLxmfMethod, InterfaceClass,
+            InterfaceFailureReason, InterfaceRollback, InterfaceTransition, LxmfDeliveryMethod,
+            LxmfDeliveryState, LxmfProgressStep, LxmfSubmissionFailureReason, LxstCallReason,
+            LxstTransition, PathEvidence, PathRequestMethod,
         };
 
         let cases = vec![
@@ -1560,34 +1570,40 @@ mod tests {
             ),
             projection_case!(
                 producer::rns_announce_activity(producer::RnsAnnounceActivity {
-                    transition: producer::RnsAnnounceTransition::Sent {
+                    transition: producer::RnsAnnounceTransition::Queued {
                         method: AnnounceMethod::Manual,
+                        components: AnnounceComponents::LxmfDeliveryAndLxst,
+                        count: 2,
+                        correlation_id: CorrelationId::random(),
                     },
                     interface: Some(InterfaceClass::Auto),
                 }),
-                "rns.announce.sent",
+                "rns.announce.queued",
                 Network,
                 Info,
                 Normal,
-                [Method, InterfaceClass],
+                [Method, State, Count, InterfaceClass],
                 "announce",
-                "Announce sent",
+                "Announce queued",
                 "standard"
             ),
             projection_case!(
                 producer::rns_announce_activity(producer::RnsAnnounceActivity {
-                    transition: producer::RnsAnnounceTransition::Sent {
+                    transition: producer::RnsAnnounceTransition::Queued {
                         method: AnnounceMethod::Startup,
+                        components: AnnounceComponents::LxmfDelivery,
+                        count: 1,
+                        correlation_id: CorrelationId::random(),
                     },
                     interface: None,
                 }),
-                "rns.announce.sent",
+                "rns.announce.queued",
                 Network,
                 Info,
                 Normal,
-                [Method],
+                [Method, State, Count],
                 "announce",
-                "Announce sent",
+                "Announce queued",
                 "standard"
             ),
             projection_case!(
@@ -2313,6 +2329,7 @@ mod tests {
             "rns.path.requested",
             "rns.path.discovered",
             "rns.path.observed",
+            "rns.announce.queued",
             "rns.announce.sent",
             "rns.announce.failed",
             "rns.announce.held",

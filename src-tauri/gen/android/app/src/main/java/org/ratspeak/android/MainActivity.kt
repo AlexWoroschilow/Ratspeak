@@ -134,16 +134,9 @@ class MainActivity : TauriActivity() {
     private var callRingtoneMode: String? = null
     private var callRingtoneTrack: AudioTrack? = null
     private var callRingtoneFocusRequest: Any? = null
-    private var voiceMemoAudioFocusRequest: Any? = null
     private val callRingtoneFocusListener = AudioManager.OnAudioFocusChangeListener { change ->
         if (change == AudioManager.AUDIOFOCUS_LOSS || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
             handler.post { stopNativeCallRingtone() }
-        }
-    }
-    private val voiceMemoAudioFocusListener = AudioManager.OnAudioFocusChangeListener { change ->
-        if (change == AudioManager.AUDIOFOCUS_LOSS ||
-            change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
-            handler.post { dispatchVoiceMemoAudioInterruption() }
         }
     }
 
@@ -280,9 +273,11 @@ class MainActivity : TauriActivity() {
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
 
-            // No native top/bottom padding — CSS handles safe areas
-            // Only IME keyboard pushes content up
-            view.setPadding(bars.left, 0, bars.right, if (ime.bottom > 0) ime.bottom else 0)
+            // Keep the established Android keyboard pipeline used through
+            // v1.0.29: native padding moves the WebView immediately, while the
+            // original IME inset continues downstream so WebView can update
+            // its visual viewport during the same transition.
+            view.setPadding(bars.left, 0, bars.right, ime.bottom)
 
             // Convert physical pixels to CSS pixels (dp)
             val density = view.resources.displayMetrics.density
@@ -329,7 +324,6 @@ class MainActivity : TauriActivity() {
 
     override fun onPause() {
         super.onPause()
-        stopNativeVoiceMemoAudioSession()
         refreshServicePoll()
     }
 
@@ -368,11 +362,9 @@ class MainActivity : TauriActivity() {
 
     override fun onDestroy() {
         RatspeakAndroidObservers.detach(this)
-        // Ringtone and voice-memo sessions are UI-owned. Established-call
-        // routing and playback are process-owned and intentionally survive an
-        // Activity recreation.
+        // Ringtone is UI-owned. Rust-owned call and voice-memo sessions survive
+        // Activity recreation and clean up only through their exact tokens.
         stopNativeCallRingtone()
-        stopNativeVoiceMemoAudioSession()
         RatspeakCallAudio.cancelInteractivePrime(this)
         if (!RatspeakCallAudio.isActive()) RatspeakVoiceAudio.stop()
         super.onDestroy()
@@ -608,57 +600,6 @@ class MainActivity : TauriActivity() {
         }
     }
 
-    private fun startNativeVoiceMemoAudioSession(): Boolean {
-        if (RatspeakCallAudio.isActive() || callRingtoneMode != null) return false
-        val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return false
-        val result = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val attributes = AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_ASSISTANT)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                .build()
-            val existing = voiceMemoAudioFocusRequest as? AudioFocusRequest
-            if (existing != null) return true
-            val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
-                .setAudioAttributes(attributes)
-                .setOnAudioFocusChangeListener(voiceMemoAudioFocusListener, handler)
-                .build()
-            val focusResult = audioManager.requestAudioFocus(request)
-            if (focusResult == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
-                voiceMemoAudioFocusRequest = request
-            }
-            focusResult
-        } else {
-            @Suppress("DEPRECATION")
-            audioManager.requestAudioFocus(
-                voiceMemoAudioFocusListener,
-                AudioManager.STREAM_MUSIC,
-                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE
-            )
-        }
-        return result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
-    }
-
-    private fun stopNativeVoiceMemoAudioSession() {
-        val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val request = voiceMemoAudioFocusRequest as? AudioFocusRequest
-            if (request != null) {
-                audioManager.abandonAudioFocusRequest(request)
-                voiceMemoAudioFocusRequest = null
-                return
-            }
-        }
-        @Suppress("DEPRECATION")
-        audioManager.abandonAudioFocus(voiceMemoAudioFocusListener)
-    }
-
-    private fun dispatchVoiceMemoAudioInterruption() {
-        webViewRef?.evaluateJavascript(
-            "window.RS && window.RS.voiceMemos && window.RS.voiceMemos.handleAudioInterruption && window.RS.voiceMemos.handleAudioInterruption();",
-            null
-        )
-    }
-
     private fun callRingtoneAudioAttributes(mode: String): AudioAttributes {
         val usage = if (mode == "incoming") {
             AudioAttributes.USAGE_NOTIFICATION_RINGTONE
@@ -686,7 +627,6 @@ class MainActivity : TauriActivity() {
     }
 
     private fun primeNativeCallAudioRoute(role: String) {
-        stopNativeVoiceMemoAudioSession()
         volumeControlStream = AudioManager.STREAM_VOICE_CALL
         if (!RatspeakCallAudio.primeInteractive(applicationContext, role)) {
             volumeControlStream = AudioManager.USE_DEFAULT_STREAM_TYPE
@@ -1774,6 +1714,13 @@ class MainActivity : TauriActivity() {
             return this@MainActivity.hasMediaPermissions(audio, camera)
         }
 
+        /** Exact-token fence evaluated in the WebView immediately before interruption cleanup. */
+        @JavascriptInterface
+        fun isVoiceMemoAudioSessionActive(sessionToken: String): Boolean {
+            return RatspeakMobilePolicy.validCallSessionToken(sessionToken) &&
+                RatspeakVoiceMemoAudio.isSessionActive(sessionToken)
+        }
+
         @JavascriptInterface
         fun notificationAuthorizationStatus(): String {
             val status = RatspeakNativeBridge.notificationAuthorizationStatus()
@@ -1885,20 +1832,6 @@ class MainActivity : TauriActivity() {
             }
         }
 
-        @JavascriptInterface
-        fun startVoiceMemoAudioSession(): Boolean {
-            return this@MainActivity.runOnMainForBoolean {
-                this@MainActivity.startNativeVoiceMemoAudioSession()
-            }
-        }
-
-        @JavascriptInterface
-        fun stopVoiceMemoAudioSession() {
-            handler.post {
-                this@MainActivity.stopNativeVoiceMemoAudioSession()
-            }
-        }
-
         /**
          * Start a native BLE scan. Results are delivered via window._onNativeBleScanResult(data).
          * This uses BluetoothManager (modern API), not the deprecated getDefaultAdapter().
@@ -1988,6 +1921,26 @@ class MainActivity : TauriActivity() {
                 null,
             )
         }
+    }
+
+    internal fun onNativeVoiceMemoAudioInterruption(sessionToken: String): Boolean {
+        if (!RatspeakMobilePolicy.validCallSessionToken(sessionToken) || webViewRef == null) {
+            return false
+        }
+        val encodedToken = JSONObject.quote(sessionToken)
+        handler.post {
+            webViewRef?.evaluateJavascript(
+                "(function(token){" +
+                    "if(!window.RatspeakAndroid||" +
+                    "!window.RatspeakAndroid.isVoiceMemoAudioSessionActive(token))return;" +
+                    "var vm=window.RS&&window.RS.voiceMemos;" +
+                    "if(vm&&typeof vm.handleAudioInterruption==='function')" +
+                    "vm.handleAudioInterruption();" +
+                    "})($encodedToken);",
+                null,
+            )
+        }
+        return true
     }
 
     internal fun onNativeUsbPermission(deviceName: String, granted: Boolean, error: String?) {

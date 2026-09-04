@@ -116,6 +116,53 @@
         input.scrollTop = 0;
     };
 
+    // Keep chat typing assistance identical between Direct Messages and
+    // Channels. Desktop WebViews disable replacements and writing assistance;
+    // native mobile keyboards retain their platform defaults.
+    RS.composer.usesNativeTypingDefaults = function() {
+        if (typeof isTauriMobile === 'function' && isTauriMobile()) return true;
+        if (typeof isIOS === 'function' && isIOS()) return true;
+        return typeof isAndroid === 'function' && isAndroid();
+    };
+
+    RS.composer.applyTypingPolicy = function(input) {
+        if (!input) return false;
+        var useNativeDefaults = RS.composer.usesNativeTypingDefaults();
+        var assistanceAttributes = [
+            'autocomplete',
+            'autocorrect',
+            'autocapitalize',
+            'spellcheck',
+            'writingsuggestions'
+        ];
+        if (useNativeDefaults) {
+            assistanceAttributes.forEach(function(attribute) {
+                input.removeAttribute(attribute);
+            });
+            return true;
+        }
+        input.setAttribute('autocomplete', 'off');
+        input.setAttribute('autocorrect', 'off');
+        input.setAttribute('autocapitalize', 'off');
+        input.setAttribute('spellcheck', 'false');
+        input.setAttribute('writingsuggestions', 'false');
+        return false;
+    };
+
+    RS.composer.handleBeforeInput = function(event, useNativeDefaults) {
+        if (useNativeDefaults || !event || event.inputType !== 'insertReplacementText') return;
+        event.preventDefault();
+    };
+
+    RS.composer.bindTypingPolicy = function(input) {
+        if (!input || input._rsTypingPolicyBound) return;
+        input._rsTypingPolicyBound = true;
+        var useNativeDefaults = RS.composer.applyTypingPolicy(input);
+        input.addEventListener('beforeinput', function(event) {
+            RS.composer.handleBeforeInput(event, useNativeDefaults);
+        });
+    };
+
     RS.text.utf8Length = function(value) {
         var text = String(value == null ? '' : value);
         if (window.TextEncoder) return new TextEncoder().encode(text).length;
@@ -326,7 +373,7 @@
             badge.setAttribute('data-value', mode);
         }
         if (opts.toastSuppressed && data && data.suppressed && typeof showToast === 'function') {
-            showToast('Transport Mode is handled by the shared instance on this device.', 'toast-yellow', 5000);
+            showToast('Transport Mode is managed by Ratspeak\u2019s shared service on this device.', 'toast-info', 5000);
         }
     };
 
@@ -356,7 +403,7 @@
                     else badge.removeAttribute('data-value');
                 }
                 if (typeof showToast === 'function') {
-                    showToast((err && err.message) || 'Failed to update transport mode', 'toast-red', 8000);
+                    showToast((err && err.message) || 'Could not update Transport Mode', 'toast-error', 8000);
                 }
                 return null;
             });
@@ -498,7 +545,7 @@
                         if (disconnectBle) {
                             RS.invoke('disconnect_ble_rnode', { name: iface.name }).catch(function(err) {
                                 if (typeof showToast === 'function') {
-                                    showToast((err && err.message) || 'Failed to disconnect BLE LoRa radio', 'toast-red', 8000);
+                                    showToast((err && err.message) || 'Could not disconnect the Bluetooth LoRa radio', 'toast-error', 8000);
                                 }
                             });
                         } else if (typeof removeHubInterface === 'function') {
