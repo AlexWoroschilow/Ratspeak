@@ -9,16 +9,17 @@ import "./Settings.scss";
 import {MdOutlinePrivacyTip} from "react-icons/md";
 import {IoSettingsOutline} from "react-icons/io5";
 import {IoIosGitNetwork} from "react-icons/io";
-import {CiMail} from "react-icons/ci";
+import {CiMail, CiServer} from "react-icons/ci";
 import {Reset} from "./Settings/Reset";
 import {RxReset} from "react-icons/rx";
+import {InboxHost} from "./Settings/InboxHost";
 
 interface SettingsProps {
 }
 
 
 interface SettingsState {
-    screen: "general" | "inbox" | "reset" | "privacy" | "network";
+    screen: "general" | "inbox" | "reset" | "privacy" | "network" | "inboxHost";
 }
 
 type Screen = SettingsState['screen']
@@ -69,7 +70,13 @@ export class Settings extends React.Component<SettingsProps, SettingsState> {
                             <a className={`peers-row ${this.state.screen == "inbox" && "selected"}`} title="Offline Inbox"
                                onClick={() => this.route("inbox")}>
                                 <CiMail size={20}/>
-                                <span className="nav-label">Inbox</span>
+                                <span className="nav-label">Offline inbox</span>
+                                <span className="settings-nav-desc">Offline message storage and relay status</span>
+                            </a>
+                            <a className={`peers-row ${this.state.screen == "inboxHost" && "selected"}`} title="Offline Inbox"
+                               onClick={() => this.route("inboxHost")}>
+                                <CiServer size={20}/>
+                                <span className="nav-label">Hosted inbox</span>
                                 <span className="settings-nav-desc">Offline message storage and relay status</span>
                             </a>
                             <a className={`peers-row ${this.state.screen == "reset" && "selected"}`} title="Offline Inbox"
@@ -83,6 +90,7 @@ export class Settings extends React.Component<SettingsProps, SettingsState> {
                         <div className={"main-content"}>
                             {this?.state?.screen == "general" && <General/>}
                             {this?.state?.screen == "inbox" && <Inbox/>}
+                            {this?.state?.screen == "inboxHost" && <InboxHost/>}
                             {this?.state?.screen == "privacy" && <Privacy/>}
                             {this?.state?.screen == "network" && <Network/>}
                             {this?.state?.screen == "reset" && <Reset/>}

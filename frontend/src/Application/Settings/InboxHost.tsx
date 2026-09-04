@@ -6,17 +6,17 @@ import {inject, observer} from "mobx-react";
 import {info} from "@tauri-apps/plugin-log";
 import {IoMdAdd} from "react-icons/io";
 
-interface InboxProps {
+interface InboxHostProps {
     settings?: SettingsStore | undefined;
 }
 
-interface InboxState {
+interface InboxHostState {
 }
 
 @inject("settings")
 @observer
-export class Inbox extends React.Component<InboxProps, InboxState> {
-    constructor(props: InboxProps) {
+export class InboxHost extends React.Component<InboxHostProps, InboxHostState> {
+    constructor(props: InboxHostProps) {
         super(props);
 
         this.state = {}
@@ -131,75 +131,33 @@ export class Inbox extends React.Component<InboxProps, InboxState> {
 
                     <div className="panel settings-panel settings-panel-selected" id="panel-settings-offline-inbox" aria-hidden="false">
                         <div className="panel-header">
-                            Offline Inbox
+                            Hosted Offline Inbox
                         </div>
                         <div className="panel-body">
-
-                            <label className="settings-row">
-                                <div className="settings-row-info">
-                                    <span
-                                        className="settings-row-desc">When contacts can't reach you directly, your Offline Inbox stores their messages until you come back online.</span>
-                                </div>
-                                <Switcher value={inbox?.mode} states={[
-                                    {value: "manual", name: "On"},
-                                    {value: "auto", name: "Auto", isDefault: true},
-                                    {value: "off", name: "Off"},
-                                ]} onChanged={this.onChangedInboxMode.bind(this)}/>
-                            </label>
-
-                            <div className="settings-row">
-                                <div className="settings-row-info">
-                                    <span className="settings-row-label">Offline Inbox</span>
-                                    <span className="settings-row-desc">Store messages on an Offline Inbox when you're away</span>
-                                </div>
-
-                                {!inbox?.connected &&
-                                    <span className="settings-relay-badge">
-                                        {inbox?.mode != "off" && "Finding inbox..."}
-                                        {inbox?.mode == "off" && "Off"}
-                                </span>}
-
-                                {inbox?.connected &&
-                                    <span className="settings-relay-badge connected">
-                                        {inbox?.mode == "auto" && "Auto: ready"}
-                                </span>}
-                            </div>
-
-                            <label className="settings-row">
-                                <div className="settings-row-info">
-                                    <span className="settings-row-label">Favor Ratspeak inbox nodes</span><span className="settings-row-desc">Prefer reachable Ratspeak inbox nodes, with fallback when none can be reached.</span>
-                                </div>
-                                <Switcher value={inbox?.favor_static ? 1 : 0} onChanged={this.onChangedInboxFavorStatic.bind(this)}/>
-                            </label>
-
-                            <div id="settings-propagation-status">
-
-
-                                <div className="relay-card relay-card-empty">
-                                    <div className="inline-hint">Looking for a reachable Offline Inbox…</div>
-                                </div>
-                            </div>
-
-
                             <div className="settings-row propagation-settings-row">
-                                <div className="settings-row-info"><span className="settings-row-label">Require stamps</span>
-                                    <span className="settings-row-desc">Advertise and require proof-of-work on messages sent directly to you.</span>
+                                <div className="settings-row-info">
+                                    <span className="settings-row-label">Host inbox node</span>
+                                    <span className="settings-row-desc">Store offline LXMF messages for other people using this device.</span>
                                 </div>
-                                <Switcher value={inbox?.enforce_stamps ? 1 : 0} onChanged={this.onChangedStampEnforce.bind(this)}/>
+                                <Switcher value={inbox?.hosting_enabled ? 1 : 0} onChanged={this.onChangedHosting.bind(this)}/>
                             </div>
 
                             <div className="settings-row propagation-settings-row">
                                 <div className="settings-row-info">
-                                    <span className="settings-row-label">Required work</span><span className="settings-row-desc">Higher values make spam harder but slow down senders.</span>
+                                    <span className="settings-row-label">Host inbox node</span>
+                                    <span className="settings-row-desc">Store offline LXMF messages for other people using this device.</span>
                                 </div>
-
+                                <button className="nr-btn nr-btn-sm" id="prop-host-announce-btn">Announce</button>
+                            </div>
+                            <div className="settings-row propagation-settings-row" style={{borderBottom: "none"}}>
+                                <div className="settings-row-info">
+                                    <span className="settings-row-label">Inbox Stamp Cost</span><span className="settings-row-desc">Higher values make spam harder but slow down senders.</span>
+                                </div>
                                 <Switcher value={inbox?.required_stamp_cost} states={[
-                                    {name: 'Off', value: '0'},
                                     {name: '8', value: '8'},
                                     {name: '12', value: '12'},
                                     {name: '16', value: '16'}
-                                ]} onChanged={this.onChangedStampCost.bind(this)}/>
-
+                                ]}/>
                             </div>
 
                         </div>
