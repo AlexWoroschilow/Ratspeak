@@ -1005,9 +1005,28 @@ function debounce(fn, delay) {
     };
 }
 
+// Dashboard is a desktop quickview, not a destination in the native/compact
+// tab bar. Native WebViews can briefly report a wide viewport during first
+// layout, so the injected platform flag is authoritative and width is only a
+// browser/responsive fallback.
+function appUsesMobileNavigation() {
+    var nativeMobile = typeof isTauriMobile === 'function' && isTauriMobile();
+    var compact = typeof isCompactLayout === 'function' && isCompactLayout();
+    return nativeMobile || compact;
+}
+
+function appLandingView() {
+    return appUsesMobileNavigation() ? 'peers' : 'dashboard';
+}
+
+function reloadToAppLanding() {
+    window.location.href = '/#' + appLandingView();
+    window.location.reload();
+}
+
 function waitForServerAndReload(maxRetries, targetPath) {
     maxRetries = maxRetries || 30;
-    var target = targetPath || '/#dashboard';
+    var target = targetPath || '/#' + appLandingView();
     var attempt = 0;
     function getDelay() {
         if (attempt <= 10) return 1000;
@@ -1100,8 +1119,15 @@ function _currentLifecycleForeground() {
     if (window.__RATSPEAK_DESKTOP__) {
         return !document.hidden && document.hasFocus();
     }
+    if (!window.__TAURI_INTERNALS__ && typeof document.hasFocus === 'function') {
+        return !document.hidden && document.hasFocus();
+    }
     return !document.hidden;
 }
+
+window.RS.isAttentionForeground = function() {
+    return _currentLifecycleForeground();
+};
 
 // On Android the service keeps the process alive, so a resume doesn't
 // trigger backend deltas — explicitly re-fetch on hidden→visible.
@@ -1153,5 +1179,8 @@ if (!window.__RATSPEAK_DESKTOP__) {
 RS.listen('attachment_memory_pressure', function(payload) {
     if (typeof handleAttachmentMemoryPressure === 'function') {
         handleAttachmentMemoryPressure(!!(payload && payload.critical));
+    }
+    if (window.RS && RS.voiceMemos && typeof RS.voiceMemos.releaseInactiveMedia === 'function') {
+        RS.voiceMemos.releaseInactiveMedia(!!(payload && payload.critical));
     }
 }).catch(function() {});

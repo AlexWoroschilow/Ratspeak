@@ -25,6 +25,7 @@ src-tauri/target/
 # Generated Tauri metadata and local icon source manifests
 /src-tauri/gen/schemas/
 /src-tauri/icon-manifest.json
+/src-tauri/gen/apple/assets/
 
 # Runtime data
 .ratspeak/
@@ -45,6 +46,8 @@ scripts/windows/*.pfx
 # OS
 .DS_Store
 Thumbs.db
+__pycache__/
+*.pyc
 
 # IDE
 .idea/

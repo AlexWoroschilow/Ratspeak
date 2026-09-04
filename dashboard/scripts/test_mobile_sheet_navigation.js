@@ -172,6 +172,10 @@ assert(contactCardSource.includes('built.sheet._ratspeakDismiss = closeAll;'),
     'the QR scanner must stop its camera through its native Back hook');
 assert(dialogsSource.includes('return _rsHandleNativeBack(opts, dismiss);'),
     'rich sheets must preserve their state-aware dismissal callback');
+assert(dialogsSource.includes("sheet.classList.add('rs-dialog-sheet');"),
+    'rich sheets must expose their single-scroll layout contract without changing simple menu sheets');
+assert(channelsSource.includes("handleSelector: '.bottom-sheet-handle'"),
+    'channel sheet content must remain native-scrollable while drag dismissal stays on the handle');
 
 var dialogBackContext = {};
 vm.createContext(dialogBackContext);
@@ -247,6 +251,10 @@ vm.createContext(gameViewContext);
 vm.runInContext(functionSource(gamesSource, '_isViewingSession'), gameViewContext);
 assert.strictEqual(gameViewContext._isViewingSession('game-1'), true,
     'touch-tablet desktop layouts consider their selected game visible');
+gameViewContext.RS.isAttentionForeground = function() { return false; };
+assert.strictEqual(gameViewContext._isViewingSession('game-1'), false,
+    'a selected game is not actively viewed while Ratspeak is backgrounded');
+gameViewContext.RS.isAttentionForeground = function() { return true; };
 gameViewContext.isCompactLayout = function() { return true; };
 assert.strictEqual(gameViewContext._isViewingSession('game-1'), false,
     'compact layouts require the game detail stack entry');

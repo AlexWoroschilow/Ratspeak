@@ -54,4 +54,22 @@ assert(html.includes('aria-describedby="rnode-interface-mode-hint"'),
 assert(html.includes('Show advanced interface controls and developer settings when available.'),
     'Developer Mode settings copy must explain that it reveals interface controls');
 
+var nameStart = modalSource.indexOf('function _rnodeDefaultInterfaceName');
+var nameEnd = modalSource.indexOf('\nfunction rnodeUpdateNextBtn', nameStart);
+assert(nameStart >= 0 && nameEnd > nameStart, 'missing RNode default-name normalizer');
+var nameContext = { String: String };
+vm.runInNewContext(modalSource.slice(nameStart, nameEnd), nameContext, {
+    filename: 'rnode-default-name.js'
+});
+assert.strictEqual(nameContext._rnodeDefaultInterfaceName('RNode a8eb'), 'RNode_A8EB',
+    'advertised BLE identifiers must use the product default interface shape');
+assert.strictEqual(nameContext._rnodeDefaultInterfaceName('RNode BFC5'), 'RNode_BFC5',
+    'the observed firmware advertisement must remain the canonical product identifier');
+assert.strictEqual(nameContext._rnodeDefaultInterfaceName('Unknown device'), 'RNode',
+    'unexpected local names must not become product identifiers');
+assert(!modalSource.includes("RS.invoke('api_rnode_default_name'"),
+    'serial setup must not substitute the unrelated provisioning serial');
+assert(modalSource.includes("nameInput.value = 'RNode';"),
+    'USB-only setup must use an honest editable fallback when no advertisement is observable');
+
 console.log('RNode interface mode tests passed');

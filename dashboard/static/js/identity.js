@@ -721,7 +721,7 @@ function renderActiveIdentityCard() {
                 // The backend retired the old name from saved hub bookmarks;
                 // reload them so an open session sees it without a restart.
                 if (typeof channelsRefreshSavedHubs === 'function') channelsRefreshSavedHubs();
-                showToast('Display name saved and announced', 'toast-green', 3000);
+                showToast('Display name saved and announced', 'toast-success', 3000);
                 saveBtn.textContent = 'Saved!';
                 saveBtn.className = 'nr-btn nr-btn-success';
                 setTimeout(function() {
@@ -734,7 +734,7 @@ function renderActiveIdentityCard() {
             }).catch(function(err) {
                 saveBtn.textContent = 'Save';
                 saveBtn.disabled = false;
-                showToast((err && err.message) ? err.message : 'Failed to save', 'toast-red', 3000);
+                showToast((err && err.message) ? err.message : 'Could not save the display name', 'toast-error', 3000);
             });
         });
     }
@@ -883,22 +883,22 @@ function createNewIdentity() {
                 var hash = data && (data.hash || data.identity_hash);
                 var protect = passcode ? protectIdentityWithPasscode(hash, passcode).catch(function(err) {
                     var msg = identityPinError(err, 'Could not encrypt identity with PIN');
-                    showToast('Identity created, but PIN setup failed: ' + msg, 'toast-red', 7000);
+                    showToast('Identity created, but the PIN could not be set: ' + msg, 'toast-error', 7000);
                 }) : Promise.resolve();
                 var mnemonic = data && data.mnemonic;
                 return protect.then(function() {
                     if (mnemonic) {
                         showRecoveryPhraseBackup(mnemonic, function() {
-                            showToast('Identity created', 'toast-green', 3000);
+                            showToast('Identity created', 'toast-success', 3000);
                             loadIdentities();
                         }, { passcodeProtected: !!passcode });
                     } else {
-                        showToast('Identity created', 'toast-green', 3000);
+                        showToast('Identity created', 'toast-success', 3000);
                         loadIdentities();
                     }
                 });
             }).catch(function(err) {
-                showToast(err && err.message ? err.message : 'Failed to create identity', 'toast-red', 3000);
+                showToast(err && err.message ? err.message : 'Could not create the identity', 'toast-error', 3000);
                 loadIdentities();
             });
         }
@@ -995,7 +995,7 @@ function showRecoveryPhraseBackup(mnemonic, onDone, opts) {
             copyBtn.addEventListener('click', function() {
                 RS.copyText(mnemonic).then(function(ok) {
                     if (ok) showCopyConfirmationToast('Recovery phrase');
-                    else showToast('Could not copy phrase', 'toast-orange', 2000);
+                    else showToast('Could not copy the recovery phrase', 'toast-error', 2000);
                 });
             });
         }
@@ -1053,7 +1053,7 @@ function viewRecoveryPhrase(target) {
         RS.invoke('reveal_identity_mnemonic', { args: { hash: target.hash } }).then(function(data) {
             showRecoveryPhraseBackup(data && data.mnemonic, null, viewOpts);
         }).catch(function(err) {
-            showToast((err && err.message) || 'Could not reveal phrase', 'toast-red', 3000);
+            showToast((err && err.message) || 'Could not reveal phrase', 'toast-error', 3000);
         });
     }
 }
@@ -1111,7 +1111,7 @@ function openRestorePhraseModal(fromSetup) {
                 var hash = data && (data.hash || data.identity_hash);
                 var protect = passcode ? protectIdentityWithPasscode(hash, passcode).catch(function(err) {
                     var msg = identityPinError(err, 'Could not encrypt identity with PIN');
-                    showToast('Identity restored, but PIN setup failed: ' + msg, 'toast-red', 7000);
+                    showToast('Identity restored, but the PIN could not be set: ' + msg, 'toast-error', 7000);
                 }) : Promise.resolve();
                 return protect.then(function() {
                     closeIdentityModal();
@@ -1122,18 +1122,17 @@ function openRestorePhraseModal(fromSetup) {
                         if (typeof completeSetupAfterIdentityImport === 'function') {
                             completeSetupAfterIdentityImport(data);
                         } else {
-                            window.location.href = '/#dashboard';
-                            window.location.reload();
+                            reloadToAppLanding();
                         }
                         return;
                     }
-                    showToast('Identity restored', 'toast-green', 3000);
+                    showToast('Identity restored', 'toast-success', 3000);
                     loadIdentities();
                 });
             }).catch(function(err) {
                 var msg = (err && err.message) ? err.message : 'Failed to restore identity';
                 if (errEl) { errEl.textContent = msg; errEl.style.display = ''; }
-                else showToast(msg, 'toast-red', 4000);
+                else showToast(msg, 'toast-error', 4000);
             });
         }
     );
@@ -1194,10 +1193,8 @@ function startIdentityFileImport(format) {
             );
         }).catch(function(err) {
             resetPendingIdentityImport();
-            if (err && err.cancelled) {
-                showToast('Identity import cancelled', 'toast-orange', 2500);
-            } else {
-                showToast(err && err.message ? err.message : 'Identity import failed', 'toast-red', 4000);
+            if (!(err && err.cancelled)) {
+                showToast(err && err.message ? err.message : 'Could not import the identity', 'toast-error', 4000);
             }
         });
         return;
@@ -1228,7 +1225,7 @@ function handleImportFile(file) {
         );
     }).catch(function(err) {
         resetPendingIdentityImport();
-        showToast(err && err.message ? err.message : 'Identity import failed', 'toast-red', 4000);
+        showToast(err && err.message ? err.message : 'Could not import the identity', 'toast-error', 4000);
     });
 }
 
@@ -1239,7 +1236,7 @@ function handleImportBackupPayload(fileName, fileSize, b64, expectedFormat) {
     var importPasscode = importFormat === 'ratspeak' ? (window._identityImportPasscode || '') : '';
     if (importFormat === 'ratspeak' && !importPasscode) {
         resetPendingIdentityImport();
-        showToast('Backup PIN required', 'toast-red', 3000);
+        showToast('Enter the backup PIN to continue', 'toast-warning', 3000);
         return Promise.resolve();
     }
     return RS.invoke('api_preview_identity_import_base64', {
@@ -1248,12 +1245,12 @@ function handleImportBackupPayload(fileName, fileSize, b64, expectedFormat) {
         var isRatspeakBackup = preview.format === 'ratspeak.identity.v2' || preview.format === 'ratspeak.identity.v1';
         if (importFormat === 'ratspeak' && !isRatspeakBackup) {
             resetPendingIdentityImport();
-            showToast('That is a Reticulum identity. Choose Reticulum Identity Key import.', 'toast-red', 4000);
+            showToast('Choose Reticulum Identity Key to import this file.', 'toast-warning', 4000);
             return;
         }
         if (importFormat === 'reticulum' && isRatspeakBackup) {
             resetPendingIdentityImport();
-            showToast('That is a Ratspeak backup. Choose Ratspeak Identity Backup import.', 'toast-red', 4000);
+            showToast('Choose Ratspeak Identity Backup to import this file.', 'toast-warning', 4000);
             return;
         }
         var duplicate = false;
@@ -1262,7 +1259,7 @@ function handleImportBackupPayload(fileName, fileSize, b64, expectedFormat) {
         }
         if (duplicate) {
             resetPendingIdentityImport();
-            showToast('Identity is already on this device', 'toast-red', 3000);
+            showToast('This identity is already on this device', 'toast-info', 3000);
             return;
         }
         var activateHtml = fromSetup ? '' :
@@ -1291,11 +1288,11 @@ function handleImportBackupPayload(fileName, fileSize, b64, expectedFormat) {
                     var protect = (importFormat === 'ratspeak' && importPasscode && data && data.hash)
                         ? protectIdentityWithPasscode(data.hash, importPasscode).catch(function(err) {
                             var msg = (err && err.message) ? err.message : 'Could not encrypt identity on this device';
-                            showToast('Identity imported, but local PIN setup failed: ' + msg, 'toast-red', 7000);
+                            showToast('Identity imported, but the local PIN could not be set: ' + msg, 'toast-error', 7000);
                         })
                         : Promise.resolve();
                     return protect.then(function() {
-                        showToast('Identity imported', 'toast-green', 3000);
+                        showToast('Identity imported', 'toast-success', 3000);
                         closeIdentityModal();
                         loadIdentities();
                         if (fromSetup || window._identityImportFromSetup) {
@@ -1303,8 +1300,7 @@ function handleImportBackupPayload(fileName, fileSize, b64, expectedFormat) {
                             if (typeof completeSetupAfterIdentityImport === 'function') {
                                 completeSetupAfterIdentityImport(data);
                             } else {
-                                window.location.href = '/#dashboard';
-                                window.location.reload();
+                                reloadToAppLanding();
                             }
                             return;
                         }
@@ -1314,7 +1310,7 @@ function handleImportBackupPayload(fileName, fileSize, b64, expectedFormat) {
                     });
                 }).catch(function(err) {
                     resetPendingIdentityImport();
-                    showToast(err && err.message ? err.message : 'Failed to import identity', 'toast-red', 3000);
+                    showToast(err && err.message ? err.message : 'Could not import the identity', 'toast-error', 3000);
                 });
             }
         );
@@ -1378,18 +1374,16 @@ function saveIdentityExportPayload(payload) {
         }).then(function(result) {
             if (!result) return;
             if (result.method === 'android-document') {
-                showToast((result.label || 'Identity export') + ' saved', 'toast-green', 3000);
+                showToast((result.label || 'Identity export') + ' saved', 'toast-success', 3000);
             } else {
-                showToast('Save prompt opened for ' + result.fileName, 'toast-blue', 4000);
+                showToast('Save prompt opened for ' + result.fileName, 'toast-info', 4000);
             }
         });
 }
 
 function handleIdentityExportError(err) {
-    if (err && err.cancelled) {
-        showToast('Identity export cancelled', 'toast-orange', 2500);
-    } else {
-        showToast(err && err.message ? err.message : 'Export failed', 'toast-red', 3000);
+    if (!(err && err.cancelled)) {
+        showToast(err && err.message ? err.message : 'Could not export the identity', 'toast-error', 3000);
     }
 }
 
@@ -1511,7 +1505,7 @@ function openSetPasscodeModal(target, isChange) {
         if (isChange) args.current = cur;
         return RS.invoke('set_identity_passcode', { args: args }).then(function() {
             closeIdentityModal();
-            showToast(isChange ? 'PIN changed' : 'PIN set', 'toast-green', 3000);
+            showToast(isChange ? 'PIN changed' : 'PIN set', 'toast-success', 3000);
             loadIdentities();
         }).catch(function(err) {
             if (errEl) { errEl.textContent = identityPinError(err, 'Could not set PIN'); errEl.style.display = ''; }
@@ -1551,7 +1545,7 @@ function openHardwareChangePinModal(target) {
         }
         return RS.invoke('hw_change_pin', { hash: target.hash, currentPin: current, newPin: pin }).then(function() {
             closeIdentityModal();
-            showToast('PIN changed', 'toast-green', 3000);
+            showToast('PIN changed', 'toast-success', 3000);
         }).catch(function(err) {
             if (errEl) { errEl.textContent = identityPinError(err, 'Could not change PIN'); errEl.style.display = ''; }
         });
@@ -1575,7 +1569,7 @@ function openRemovePasscodeModal(target) {
             }
             return RS.invoke('remove_identity_passcode', { args: { hash: target.hash, passcode: pw } }).then(function() {
                 closeIdentityModal();
-                showToast('PIN removed', 'toast-green', 3000);
+                showToast('PIN removed', 'toast-success', 3000);
                 loadIdentities();
             }).catch(function(err) {
                 if (errEl) { errEl.textContent = identityPinError(err, 'Could not remove PIN'); errEl.style.display = ''; }
@@ -1658,12 +1652,12 @@ function deleteIdentityByHash(hash) {
 
         deletePromise
             .then(function() {
-                showToast('Identity deleted', 'toast-green', 3000);
+                showToast('Identity deleted', 'toast-success', 3000);
                 selectedIdentityHash = null;
                 loadIdentities();
             })
             .catch(function(err) {
-                showToast(err && err.message ? err.message : 'Failed to delete identity', 'toast-red', 3000);
+                showToast(err && err.message ? err.message : 'Could not delete the identity', 'toast-error', 3000);
             });
     });
 }
@@ -1859,9 +1853,12 @@ RS.listen('identity_switched', function(data) {
     if (typeof _conversationCache !== 'undefined') {
         for (var k in _conversationCache) delete _conversationCache[k];
     }
+    if (typeof _conversationCacheSizes !== 'undefined') _conversationCacheSizes = {};
+    if (typeof _conversationCacheBytes !== 'undefined') _conversationCacheBytes = 0;
     if (typeof _cacheLru !== 'undefined') _cacheLru = [];
 
-    if (typeof lxmfActiveContact !== 'undefined') lxmfActiveContact = null;
+    if (typeof _resetConversationSession === 'function') _resetConversationSession('identity_replaced');
+    else if (typeof lxmfActiveContact !== 'undefined') lxmfActiveContact = null;
     if (typeof lxmfPendingFile !== 'undefined') lxmfPendingFile = null;
     if (typeof lxmfIdentity !== 'undefined') lxmfIdentity = null;
     if (typeof _ghostConversationHash !== 'undefined') _ghostConversationHash = null;
@@ -1894,7 +1891,7 @@ RS.listen('identity_switched', function(data) {
 
     setTimeout(function() { window._identitySwitchInProgress = false; }, 2000);
 
-    showToast('Identity switched', 'toast-green', 3000);
+    showToast('Identity switched', 'toast-success', 3000);
 });
 
 // ---------------------------------------------------------------------------
@@ -2221,7 +2218,7 @@ function _hwResetPivWithConfirmation(opts) {
             RS.invoke('hw_reset_piv').then(function() {
                 resolve(true);
             }).catch(function(e) {
-                showToast((e && e.message) ? e.message : 'Failed to reset security key', 'toast-red', 7000);
+                showToast((e && e.message) ? e.message : 'Could not reset the security key', 'toast-error', 7000);
                 resolve(false);
             });
         });
@@ -2277,7 +2274,7 @@ function _hwProvisionFailure(err) {
         _hwRecoverNonFactoryPinForProvision(msg);
         return;
     }
-    showToast(msg, 'toast-red', 5000);
+    showToast(msg, 'toast-error', 5000);
     _hwShowPinStep();
     var errEl = document.getElementById('hw-pin-error');
     if (errEl) {
@@ -2416,7 +2413,7 @@ function _hwDoRestore() {
                 });
                 return;
             }
-            showToast(msg, 'toast-red', 5000);
+            showToast(msg, 'toast-error', 5000);
         });
 }
 
@@ -2437,7 +2434,7 @@ function _hwDoImport() {
     RS.invoke('hw_import_existing', { nickname: nickname })
         .then(function(res) { _hwFinish(res || {}); })
         .catch(function(e) {
-            showToast((e && e.message) ? e.message : 'Failed to register key', 'toast-red', 5000);
+            showToast((e && e.message) ? e.message : 'Could not register the security key', 'toast-error', 5000);
             _hwShowImportStep();
         });
 }
@@ -2459,8 +2456,7 @@ function _hwFinish(result) {
             if (typeof completeSetupAfterIdentityImport === 'function') {
                 completeSetupAfterIdentityImport(result);
             } else {
-                window.location.href = '/#dashboard';
-                window.location.reload();
+                reloadToAppLanding();
             }
         };
         if (pinForSetup) {
@@ -2474,7 +2470,7 @@ function _hwFinish(result) {
         }
         return;
     }
-    showToast('Hardware identity added', 'toast-green', 3000);
+    showToast('Hardware identity added', 'toast-success', 3000);
     loadIdentities();
     if (newHash) switchToIdentity(newHash);
 }
@@ -2644,11 +2640,11 @@ function removeHardwareIdentity(target) {
             removePromise = RS.invoke('hw_remove', { hash: target.hash });
         }
         removePromise.then(function() {
-            showToast('Hardware identity removed', 'toast-green', 3000);
+            showToast('Hardware identity removed', 'toast-success', 3000);
             selectedIdentityHash = null;
             loadIdentities();
         }).catch(function(err) {
-            showToast((err && err.message) ? err.message : 'Failed to remove identity', 'toast-red', 3000);
+            showToast((err && err.message) ? err.message : 'Could not remove the identity', 'toast-error', 3000);
         });
     });
 }

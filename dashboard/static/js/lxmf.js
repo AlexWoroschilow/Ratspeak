@@ -2,6 +2,8 @@ var lxmfIdentity = null;
 var lxmfContacts = [];
 var lxmfConversations = [];
 var lxmfActiveContact = null;
+var _conversationEpoch = 0;
+var _conversationIdentityGeneration = 0;
 var lxmfConversation = [];
 var lxmfPendingFile = null;
 var contactIdentityStatus = {};
@@ -30,12 +32,93 @@ var _lxmfMessageScrollStates = new WeakMap();
 var _messageLongPressDetachFns = [];
 var _pendingAttachmentToken = 0;
 var _pendingLxmfCancelByClientId = {};
+var _deferredConversationRenderOptions = null;
+var _deferredConversationRenderOwnerHash = null;
+var _deferredConversationRenderGeneration = 0;
+var _deferredConversationRenderRelease = null;
 var lxmfLimits = {
     max_attachment_bytes: 128000000,
     max_message_bytes: 134217727,
     efficient_resource_bytes: 1048575,
+    image_size_prompt_bytes: 1000000,
     default_propagation_limit_kb: 256,
     propagation_transfer_limit_kb: null,
+};
+
+function _canonicalConversationHash(value) {
+    return String(value == null ? '' : value).trim().toLowerCase();
+}
+
+function _lxmfAttentionForeground() {
+    if (window.RS && typeof RS.isAttentionForeground === 'function') {
+        return !!RS.isAttentionForeground();
+    }
+    if (typeof _currentLifecycleForeground === 'function') {
+        return !!_currentLifecycleForeground();
+    }
+    return typeof document === 'undefined' || !document.hidden;
+}
+
+function _isConversationActivelyVisible(hash) {
+    if (!_lxmfAttentionForeground()) return false;
+    if (typeof currentView !== 'undefined' && currentView !== 'message') return false;
+    return !!hash &&
+        _canonicalConversationHash(hash) === _canonicalConversationHash(lxmfActiveContact);
+}
+
+function _notifyConversationOwnerChanged(hash, reason) {
+    if (window.RS && RS.voiceMemos && typeof RS.voiceMemos.onConversationChanged === 'function') {
+        RS.voiceMemos.onConversationChanged(hash || null, reason || 'navigation');
+    }
+}
+
+function _conversationOwnerSnapshot() {
+    return {
+        hash: _canonicalConversationHash(lxmfActiveContact),
+        epoch: _conversationEpoch,
+        identityGeneration: _conversationIdentityGeneration,
+    };
+}
+
+function _conversationOwnerIsCurrent(owner) {
+    return !!owner &&
+        _canonicalConversationHash(owner.hash) === _canonicalConversationHash(lxmfActiveContact) &&
+        owner.epoch === _conversationEpoch &&
+        owner.identityGeneration === _conversationIdentityGeneration;
+}
+
+function _conversationOwnerIdentityIsCurrent(owner) {
+    return !!owner && owner.identityGeneration === _conversationIdentityGeneration;
+}
+
+function _activateConversation(hash, reason) {
+    var next = _canonicalConversationHash(hash);
+    var current = _canonicalConversationHash(lxmfActiveContact);
+    if (next === current) {
+        lxmfActiveContact = next || null;
+        return _conversationOwnerSnapshot();
+    }
+    _conversationEpoch += 1;
+    lxmfActiveContact = next || null;
+    _notifyConversationOwnerChanged(next, reason || 'navigation');
+    return _conversationOwnerSnapshot();
+}
+
+function _resetConversationSession(reason) {
+    _conversationIdentityGeneration += 1;
+    _conversationEpoch += 1;
+    lxmfActiveContact = null;
+    _notifyConversationOwnerChanged(null, reason || 'identity_replaced');
+}
+
+window.RS = window.RS || {};
+RS.conversationOwner = {
+    canonicalHash: _canonicalConversationHash,
+    snapshot: _conversationOwnerSnapshot,
+    isCurrent: _conversationOwnerIsCurrent,
+    isIdentityCurrent: _conversationOwnerIdentityIsCurrent,
+    activate: _activateConversation,
+    reset: _resetConversationSession,
 };
 
 function _detachMessageLongPressHandlers() {
@@ -68,13 +151,16 @@ var _voiceNativeAudioRoutePrimed = false;
 var _voiceNativeAudioRouteLastSyncAt = 0;
 var _voiceSpeakerRestartToken = 0;
 var _voiceDialToken = 0;
+var _voiceAnswerToken = 0;
 
 function _voiceStatusLabel(status) {
     switch (status) {
         case 'calling': return 'Calling';
         case 'available': return 'Calling';
         case 'ringing': return 'Ringing';
+        case 'answering': return 'Answering';
         case 'connecting': return 'Connecting';
+        case 'ending': return 'Ending call';
         case 'established': return 'In call';
         case 'busy': return 'Busy';
         case 'rejected': return 'Rejected';
@@ -104,7 +190,9 @@ function _voiceIcon(name, size) {
 }
 
 function _voicePrimaryActionLabel(hash) {
-    if (_voiceIncomingMatchesContact(hash)) return 'Answer call';
+    if (_voiceIncomingMatchesContact(hash)) {
+        return lxstVoiceState.incoming.status === 'ringing' ? 'Answer call' : 'Hang up';
+    }
     if (_voiceActiveMatchesContact(hash)) {
         var active = lxstVoiceState.active;
         return active && active.status === 'established' ? 'Hang up' : 'Cancel call';
@@ -119,7 +207,9 @@ function _voicePrimaryActionIcon(hash) {
 }
 
 function _voiceRunPrimaryAction(hash) {
-    if (_voiceIncomingMatchesContact(hash)) return _voiceAnswerCall();
+    if (_voiceIncomingMatchesContact(hash)) {
+        return lxstVoiceState.incoming.status === 'ringing' ? _voiceAnswerCall() : _voiceHangupCall();
+    }
     if (_voiceActiveMatchesContact(hash)) return _voiceHangupCall();
     return _voiceStartCall(hash);
 }
@@ -134,7 +224,7 @@ function _voiceActionState(hash) {
     return {
         available: true,
         disabled: busyElsewhere,
-        danger: activeMatches,
+        danger: activeMatches || (incomingMatches && lxstVoiceState.incoming.status !== 'ringing'),
         label: busyElsewhere ? 'Call in Progress' : _voicePrimaryActionLabel(hash),
         icon: busyElsewhere ? _voiceIcon('phone', 18) : _voicePrimaryActionIcon(hash)
     };
@@ -470,7 +560,10 @@ function _voiceRenderCallSurface(ids) {
     surface.hidden = !peer;
     surface.classList.toggle('is-incoming', !!incoming && !active);
     surface.classList.toggle('is-active', !!(active && active.status === 'established'));
-    surface.classList.toggle('is-connecting', !!(active && active.status !== 'established'));
+    surface.classList.toggle('is-connecting', !!(
+        (active && active.status !== 'established') ||
+        (incoming && incoming.status !== 'ringing')
+    ));
     if (!peer) return;
 
     if (avatarEl) {
@@ -483,17 +576,18 @@ function _voiceRenderCallSurface(ids) {
     if (statusEl) {
         var status = active
             ? (ids.global ? _voiceGlobalStatusLabel(active) : _voiceActiveStatusLabel(active))
-            : 'Incoming call';
+            : (incoming.status === 'ringing' ? 'Incoming call' : _voiceStatusLabel(incoming.status));
         var audioIssue = active && !ids.global ? _voiceAudioIssueLabel() : '';
         if (audioIssue) status += ' - ' + audioIssue;
         statusEl.textContent = status;
     }
 
-    var showIncomingActions = !!incoming && !active;
+    var showIncomingActions = !!incoming && !active && incoming.status === 'ringing';
+    var showIncomingHangup = !!incoming && !active && incoming.status !== 'ringing';
     if (answerBtn) answerBtn.style.display = showIncomingActions ? '' : 'none';
     if (rejectBtn) rejectBtn.style.display = showIncomingActions ? '' : 'none';
     if (hangupBtn) {
-        hangupBtn.style.display = active ? '' : 'none';
+        hangupBtn.style.display = active || showIncomingHangup ? '' : 'none';
         hangupBtn.innerHTML = _voiceIcon('phone', 16) + '<span>Hang up</span>';
     }
 
@@ -542,7 +636,7 @@ function _voiceIncomingMatchesContact(hash) {
 
 function _voiceNotify(message, className) {
     if (typeof showToast === 'function') {
-        showToast(message, className || 'toast-orange', 2500);
+        showToast(message, className || 'toast-warning', 2500);
     }
 }
 
@@ -572,6 +666,10 @@ function _voiceAfterNextPaint() {
 
 function _voiceCancelPendingDial() {
     _voiceDialToken++;
+}
+
+function _voiceIncomingIsExact(linkId) {
+    return !!(linkId && lxstVoiceState.incoming && lxstVoiceState.incoming.link_id === linkId);
 }
 
 function _voiceSetOptimisticOutgoing(hash) {
@@ -643,20 +741,41 @@ function _voiceStartCall(hash) {
 }
 
 function _voiceAnswerCall() {
+    var incoming = lxstVoiceState.incoming;
+    if (!incoming || !incoming.link_id || incoming.status !== 'ringing') return Promise.resolve();
+    var expectedLinkId = incoming.link_id;
+    var answerToken = ++_voiceAnswerToken;
     _voiceStopRingtone();
     _voiceHaptic('selection');
+    incoming.status = 'answering';
+    renderVoiceUi();
     return _voiceCancelMemoForCall().then(_voiceEnsurePlaybackReady).then(_voiceEnsureMicrophonePermission).then(function() {
+        if (answerToken !== _voiceAnswerToken || !_voiceIncomingIsExact(expectedLinkId)) return;
         _voiceResetCallControls();
         _voicePrimeNativeCallRoute();
-        return RS.invoke('voice_answer').then(function() {
+        return RS.invoke('voice_answer', { args: { link_id: expectedLinkId } }).then(function(result) {
+            if (answerToken !== _voiceAnswerToken || !_voiceIncomingIsExact(expectedLinkId)) return;
             _voiceHaptic('success');
-            lxstVoiceState.incoming = null;
+            // Command completion confirms exact call admission, not remote
+            // establishment. Keep the call visible until the authoritative
+            // same-link snapshot observes the peer's Established response.
+            lxstVoiceState.incoming.status = (result && result.status) || 'connecting';
             renderVoiceUi();
         }).catch(function(err) {
+            if (answerToken !== _voiceAnswerToken || !_voiceIncomingIsExact(expectedLinkId)) return;
+            lxstVoiceState.incoming.status = 'ringing';
             _voiceReleaseNativeCallRoutePrime();
             _voiceHaptic('error');
             _voiceNotify((err && err.message) || 'Could not answer call');
+            renderVoiceUi();
         });
+    }).catch(function(err) {
+        if (answerToken !== _voiceAnswerToken || !_voiceIncomingIsExact(expectedLinkId)) return;
+        lxstVoiceState.incoming.status = 'ringing';
+        _voiceReleaseNativeCallRoutePrime();
+        _voiceHaptic('error');
+        _voiceNotify((err && err.message) || 'Could not answer call');
+        renderVoiceUi();
     });
 }
 
@@ -665,31 +784,25 @@ function _voiceRejectCall() {
     _voiceCancelPendingDial();
     _voiceHaptic('warning');
     _voiceSuppressNoAnswerCueUntil = Date.now() + 2000;
-    return RS.invoke('voice_reject').catch(function() {}).then(function() {
-        lxstVoiceState.incoming = null;
-        renderVoiceUi();
-    });
+    return RS.invoke('voice_reject').catch(function() {});
 }
 
 function _voiceHangupCall() {
     _voiceStopRingtone();
     _voiceCancelPendingDial();
+    _voiceAnswerToken++;
     _voiceHaptic('warning');
     _voiceSuppressNoAnswerCueUntil = Date.now() + 2000;
+    var previousActiveStatus = lxstVoiceState.active && lxstVoiceState.active.status;
+    var previousIncomingStatus = lxstVoiceState.incoming && lxstVoiceState.incoming.status;
+    if (lxstVoiceState.active) lxstVoiceState.active.status = 'ending';
+    if (lxstVoiceState.incoming) lxstVoiceState.incoming.status = 'ending';
+    renderVoiceUi();
     return RS.invoke('voice_hangup').catch(function(err) {
+        if (lxstVoiceState.active && previousActiveStatus) lxstVoiceState.active.status = previousActiveStatus;
+        if (lxstVoiceState.incoming && previousIncomingStatus) lxstVoiceState.incoming.status = previousIncomingStatus;
         _voiceHaptic('error');
         _voiceNotify((err && err.message) || 'Could not hang up call');
-    }).then(function() {
-        lxstVoiceState.active = null;
-        lxstVoiceState.incoming = null;
-        lxstVoiceState.audioRunning = false;
-        lxstVoiceState.audioMicrophone = false;
-        lxstVoiceState.audioSpeaker = false;
-        _voiceReleaseNativeCallRoutePrime();
-        _voiceResetCallControls();
-        lxstVoiceState.lastDialHash = null;
-        lxstVoiceState.establishedAtMs = null;
-        lxstVoiceState.establishedLinkId = null;
         renderVoiceUi();
     });
 }
@@ -794,7 +907,7 @@ function renderVoiceIncomingSheet() {
     var incoming = lxstVoiceState.incoming;
     var existing = document.getElementById('lxst-incoming-call-overlay');
     var sheet = document.getElementById('lxst-incoming-call-sheet');
-    if (!incoming) {
+    if (!incoming || incoming.status !== 'ringing') {
         if (existing) existing.remove();
         if (sheet) sheet.remove();
         return;
@@ -875,12 +988,14 @@ function _voiceHandleUpdate(data) {
             _voiceResetCallControls();
         }
     } else if (data.type === 'incoming') {
-        lxstVoiceState.incoming = {
-            link_id: data.link_id,
-            remote_identity: data.remote_identity,
-            remote_lxmf_destination: data.remote_lxmf_destination || null,
-            status: 'ringing'
-        };
+        if (!_voiceIncomingIsExact(data.link_id)) {
+            lxstVoiceState.incoming = {
+                link_id: data.link_id,
+                remote_identity: data.remote_identity,
+                remote_lxmf_destination: data.remote_lxmf_destination || null,
+                status: 'ringing'
+            };
+        }
     } else if (data.type === 'outgoing_pending') {
         lxstVoiceState.active = {
             link_id: data.link_id || null,
@@ -970,6 +1085,11 @@ function _voiceHandleUpdate(data) {
             lxstVoiceState.microphoneMuted = data.microphone_muted;
         }
     } else if (data.type === 'terminated') {
+        var terminatedMatches = (!data.link_id) ||
+            (lxstVoiceState.active && lxstVoiceState.active.link_id === data.link_id) ||
+            (lxstVoiceState.incoming && lxstVoiceState.incoming.link_id === data.link_id);
+        if (!terminatedMatches) return;
+        _voiceAnswerToken++;
         shouldPlayNoAnswerCue = !!(previousActive
             && previousActive.role === 'outgoing'
             && previousActive.status !== 'established'
@@ -999,7 +1119,7 @@ function normalizeContactRecord(c) {
     if (!c || typeof c !== 'object') return null;
     var hash = c.hash || c.dest_hash || '';
     if (hash === null || hash === undefined) hash = '';
-    hash = String(hash).trim();
+    hash = _canonicalConversationHash(hash);
     if (!hash) return null;
     var services = Array.isArray(c.services) ? c.services.slice() : [];
     return {
@@ -1485,7 +1605,7 @@ function _messageStateIconHtml(msg) {
 
     if (state === 'read') return wrap('msg-state-read', 'Read', ICON.read);
     if (state === 'failed' || state === 'timeout') return wrap('msg-state-failed', 'Failed', ICON.x);
-    if (state === 'cancelled') return wrap('msg-state-cancelled', 'Cancelled', ICON.x);
+    if (state === 'cancelled') return wrap('msg-state-cancelled', 'Sending cancelled', ICON.x);
     if (state === 'rejected') return wrap('msg-state-rejected', 'Rejected', ICON.rejected) + ' <span class="msg-state-label">Rejected</span>';
     if (state === 'propagated') return wrap('msg-state-propagated', 'Stored in Offline Inbox', ICON.envelope);
     if (state === 'delivered') return wrap('msg-state-delivered', 'Delivered', ICON.check);
@@ -1581,7 +1701,7 @@ function _messageSendCancelOverlayHtml(msg, percent) {
     var pct = percent === null ? 0 : percent;
     return '<button type="button" class="lxmf-send-cancel" ' +
         'data-msg-id="' + escapeHtml(msg.id || '') + '" ' +
-        'style="--send-progress:' + pct + '%" aria-label="Cancel send">' +
+        'style="--send-progress:' + pct + '%" aria-label="Cancel sending message">' +
         '<span aria-hidden="true">&times;</span>' +
     '</button>';
 }
@@ -1589,7 +1709,7 @@ function _messageSendCancelOverlayHtml(msg, percent) {
 function _messageInlineCancelHtml(msg) {
     if (!_messageCanCancelSend(msg)) return '';
     return '<button type="button" class="msg-send-cancel-inline" ' +
-        'data-msg-id="' + escapeHtml(msg.id || '') + '" aria-label="Cancel send">Cancel</button>';
+        'data-msg-id="' + escapeHtml(msg.id || '') + '" aria-label="Cancel sending message">Cancel</button>';
 }
 
 function _findLxmfMessageById(msgId) {
@@ -1616,47 +1736,103 @@ function _invokeLxmfCancel(msgId) {
     });
 }
 
+function _showLxmfStopResult(resp) {
+    if (!resp) return;
+    if (resp.live_owner_stopped) {
+        showToast('Cancelled local retries. A copy already handed to the network may still arrive.', 'toast-info', 5200);
+        return;
+    }
+    if (resp.cancelled && resp.row_marked_stopped) {
+        showToast('No live send remained. The local message was cancelled, but a copy may still arrive.', 'toast-info', 5200);
+        return;
+    }
+    if (resp.cancelled && !resp.may_have_left_device) {
+        showToast('Cancelled before the message left this device.', 'toast-info', 3200);
+        return;
+    }
+    if (resp.may_have_left_device) {
+        showToast('No local send remained to cancel. A copy may already have left this device.', 'toast-info', 5200);
+    }
+}
+
 function _flushPendingLxmfCancel(clientMsgId, serverMsgId) {
     if (!clientMsgId || !serverMsgId || !_pendingLxmfCancelByClientId[clientMsgId]) return;
     delete _pendingLxmfCancelByClientId[clientMsgId];
-    _invokeLxmfCancel(serverMsgId).catch(function(err) {
-        showToast('Cancel failed: ' + ((err && err.message) || 'error'), 'toast-red', 3500);
+    _invokeLxmfCancel(serverMsgId).then(function(resp) {
+        if (resp && resp.cancelled) {
+            _markLxmfMessageCancelled(serverMsgId);
+        }
+        _showLxmfStopResult(resp);
+    }).catch(function(err) {
+        showToast('Could not stop sending: ' + ((err && err.message) || 'error'), 'toast-error', 3500);
     });
 }
 
 function _cancelLxmfSend(msgId) {
     msgId = String(msgId || '');
     if (!msgId) return;
-    _markLxmfMessageCancelled(msgId);
-    if (!_isCanonicalLxmfMsgId(msgId)) {
-        _pendingLxmfCancelByClientId[msgId] = true;
-        // Native tracks optimistic IDs before a canonical LXMF hash exists.
-        // Keep the pending fallback as well: an extremely fast click can race
-        // command admission, in which case canonical reconciliation retries.
-        _invokeLxmfCancel(msgId).catch(function(err) {
-            showToast('Cancel failed: ' + ((err && err.message) || 'error'), 'toast-red', 3500);
+    rsConfirm({
+        title: 'Cancel sending?',
+        message: 'Cancel preparation and retries for this message?',
+        confirmText: 'Cancel sending'
+    }).then(function(confirmed) {
+        if (!confirmed) return;
+        if (!_isCanonicalLxmfMsgId(msgId)) {
+            _pendingLxmfCancelByClientId[msgId] = true;
+        }
+        return _invokeLxmfCancel(msgId).then(function(resp) {
+            if (resp && resp.cancelled) {
+                _markLxmfMessageCancelled(resp.msg_id || resp.client_msg_id || msgId);
+            }
+            _showLxmfStopResult(resp);
         });
-        return;
-    }
-    _invokeLxmfCancel(msgId).catch(function(err) {
-        showToast('Cancel failed: ' + ((err && err.message) || 'error'), 'toast-red', 3500);
+    }).catch(function(err) {
+        showToast('Could not stop sending: ' + ((err && err.message) || 'error'), 'toast-error', 3500);
     });
 }
 
-function _handleLxmfSendAccepted(resp, clientMsgId) {
+function _conversationMessagesFor(hash) {
+    hash = _canonicalConversationHash(hash);
+    if (hash && hash === _canonicalConversationHash(lxmfActiveContact)) {
+        return { messages: lxmfConversation, active: true };
+    }
+    return { messages: (cacheGet(hash) || []).slice(), active: false };
+}
+
+function _commitConversationMessages(hash, target) {
+    hash = _canonicalConversationHash(hash);
+    if (target.active && hash === _canonicalConversationHash(lxmfActiveContact)) {
+        lxmfConversation = target.messages;
+        _cacheActiveConversation();
+        return;
+    }
+    if (hash) cacheSet(hash, target.messages);
+}
+
+function _appendConversationMessage(hash, message) {
+    var target = _conversationMessagesFor(hash);
+    target.messages.push(message);
+    _commitConversationMessages(hash, target);
+    return target.active;
+}
+
+function _handleLxmfSendAccepted(resp, clientMsgId, targetHash) {
+    var owner = arguments.length > 3 ? arguments[3] : null;
+    if (owner && !_conversationOwnerIdentityIsCurrent(owner)) return;
     var serverMsgId = resp && resp.msg_id;
     if (!clientMsgId) return;
     if (!serverMsgId) {
         if (resp && resp.cancelled) delete _pendingLxmfCancelByClientId[clientMsgId];
         return;
     }
-    for (var i = 0; i < lxmfConversation.length; i++) {
-        if (lxmfConversation[i].id === clientMsgId) {
-            lxmfConversation[i].id = serverMsgId;
+    var target = _conversationMessagesFor(targetHash || lxmfActiveContact);
+    for (var i = 0; i < target.messages.length; i++) {
+        if (target.messages[i].id === clientMsgId) {
+            target.messages[i].id = serverMsgId;
             break;
         }
     }
-    _cacheActiveConversation();
+    _commitConversationMessages(targetHash || lxmfActiveContact, target);
     if (resp && resp.cancelled) {
         delete _pendingLxmfCancelByClientId[clientMsgId];
     } else {
@@ -1665,6 +1841,7 @@ function _handleLxmfSendAccepted(resp, clientMsgId) {
 }
 
 function cacheGet(hash) {
+    hash = _canonicalConversationHash(hash);
     var msgs = _conversationCache[hash];
     if (msgs) {
         var idx = _cacheLru.indexOf(hash);
@@ -1673,6 +1850,8 @@ function cacheGet(hash) {
     return msgs;
 }
 function cacheSet(hash, messages) {
+    hash = _canonicalConversationHash(hash);
+    if (!hash) return;
     var size = 0;
     try { size = _utf8ByteLength(JSON.stringify(messages || [])); }
     catch (_) { size = _conversationCacheMaxBytes + 1; }
@@ -1692,6 +1871,7 @@ function cacheSet(hash, messages) {
     }
 }
 function cacheDel(hash) {
+    hash = _canonicalConversationHash(hash);
     _conversationCacheBytes = Math.max(0, _conversationCacheBytes - (_conversationCacheSizes[hash] || 0));
     delete _conversationCache[hash];
     delete _conversationCacheSizes[hash];
@@ -1704,6 +1884,7 @@ function _cacheActiveConversation() {
 }
 
 function _mergeConversationMessages(hash, serverMessages) {
+    hash = _canonicalConversationHash(hash);
     var merged = Array.isArray(serverMessages) ? serverMessages.slice() : [];
     var cached = cacheGet(hash) || [];
     if (!cached.length) return merged;
@@ -2050,26 +2231,27 @@ function _promoteGhostConversationRow(hash) {
 function _onChatDetailExit() {
     var exitingHash = lxmfActiveContact;
     _clearImageBlobUrlCache();
-    if (window.RS && RS.voiceMemos && typeof RS.voiceMemos.onConversationChanged === 'function') {
-        RS.voiceMemos.onConversationChanged(null);
-    }
     var input = document.getElementById('lxmf-input');
     if (input && exitingHash) {
         if (input.value.trim()) { _lxmfDrafts[exitingHash] = input.value; }
         else { delete _lxmfDrafts[exitingHash]; }
     }
 
-    if (!_ghostConversationHash || _ghostConversationHash !== exitingHash) return;
+    if (!_ghostConversationHash || _ghostConversationHash !== exitingHash) {
+        _activateConversation(null, 'left_conversation');
+        return;
+    }
 
     if (_conversationHasVisibleMessages()) {
         _promoteGhostConversationRow(exitingHash);
         loadConversations();
+        _activateConversation(null, 'left_conversation');
         return;
     }
 
     _removeGhostRow();
     cacheDel(exitingHash);
-    lxmfActiveContact = null;
+    _activateConversation(null, 'left_conversation');
     lxmfConversation = [];
     if (input) {
         input.value = '';
@@ -2081,9 +2263,8 @@ function _onChatDetailExit() {
 
 // Cache-first render to avoid an empty-spinner flash; reconciles via fetch.
 function _loadConversation(hash) {
-    if (window.RS && RS.voiceMemos && typeof RS.voiceMemos.onConversationChanged === 'function') {
-        RS.voiceMemos.onConversationChanged(hash);
-    }
+    hash = _canonicalConversationHash(hash);
+    var loadOwner = _conversationOwnerSnapshot();
     // Reactions are keyed per message; drop the previous conversation's
     // entries so the map doesn't accumulate across switches.
     _msgReactions = {};
@@ -2096,6 +2277,7 @@ function _loadConversation(hash) {
     renderConversation({ forceScrollBottom: true });
     // get_conversation fetches messages AND marks-read; broadcasts unread_total.
     RS.invoke('get_conversation', { hash: hash }).then(function(result) {
+        if (!_conversationOwnerIdentityIsCurrent(loadOwner)) return;
         var messages = _mergeConversationMessages(hash, (result && result.messages) || []);
         cacheSet(hash, messages);
         if (hash === lxmfActiveContact) {
@@ -2152,7 +2334,7 @@ function _ensureGhostRow(hash) {
     row.addEventListener('click', function() {
         if (_convSwipedRecently) return;
         var clickHash = this.dataset.hash;
-        lxmfActiveContact = clickHash;
+        clickHash = _activateConversation(clickHash, 'navigation').hash;
         container.querySelectorAll('.conv-row.active').forEach(function(r) { r.classList.remove('active'); });
         this.classList.add('active');
         _loadConversation(clickHash);
@@ -2204,7 +2386,7 @@ function _updateConversationPreview(hash, previewText, timestamp) {
         newRow.addEventListener('click', function() {
             if (_convSwipedRecently) return;
             var clickHash = this.dataset.hash;
-            lxmfActiveContact = clickHash;
+            clickHash = _activateConversation(clickHash, 'navigation').hash;
             container.querySelectorAll('.conv-row.active').forEach(function(r) { r.classList.remove('active'); });
             this.classList.add('active');
             _loadConversation(clickHash);
@@ -2219,9 +2401,8 @@ function _updateConversationPreview(hash, previewText, timestamp) {
 
 function _conversationPreviewForMessage(message) {
     if (!message) return '';
-    if (Array.isArray(message.attachments) && message.attachments.some(function(attachment) {
-        return window.RS && RS.voiceMemos && RS.voiceMemos.isAttachment(attachment);
-    })) return 'Voice message';
+    if (message.audio && Number(message.audio.mode) === 0x10) return 'Voice message';
+    if (message.audio) return 'Unsupported audio';
     var content = (message.content || '').trim();
     if (content) return content;
     if (message.image) return 'Photo';
@@ -2317,7 +2498,7 @@ function renderDashboardRecentMessages() {
         container.querySelectorAll('.conv-row').forEach(function(el) {
             el.addEventListener('click', function() {
                 var hash = this.dataset.hash;
-                lxmfActiveContact = hash;
+                hash = _activateConversation(hash, 'navigation').hash;
                 switchView('message');
                 _loadConversation(hash);
                 loadConversations();
@@ -2410,6 +2591,11 @@ function _renderConversationsFromCache(convos) {
     if (!container) return;
 
     convos = _mergeOptimisticConversation(convos);
+    convos = convos.map(function(conversation) {
+        if (!conversation || typeof conversation !== 'object') return conversation;
+        conversation.hash = _canonicalConversationHash(conversation.hash);
+        return conversation;
+    });
 
     if (!convos || convos.length === 0) {
         if (_ghostConversationHash && _ghostConversationHash === lxmfActiveContact) {
@@ -2484,7 +2670,7 @@ function _renderConversationsFromCache(convos) {
                     if (input.value.trim()) { _lxmfDrafts[lxmfActiveContact] = input.value; }
                     else { delete _lxmfDrafts[lxmfActiveContact]; }
                 }
-                lxmfActiveContact = hash;
+                hash = _activateConversation(hash, 'navigation').hash;
                 if (input) { input.value = _lxmfDrafts[hash] || ''; input.style.height = ''; }
                 container.querySelectorAll('.conv-row.active').forEach(function(r) { r.classList.remove('active'); });
                 this.classList.add('active');
@@ -2631,8 +2817,7 @@ function renderContactList() {
 
     container.querySelectorAll('.lxmf-contact').forEach(function(el) {
         function activateContact() {
-            var hash = el.dataset.hash;
-            lxmfActiveContact = hash;
+            var hash = _activateConversation(el.dataset.hash, 'navigation').hash;
             renderContactList();
             _loadConversation(hash);
         }
@@ -2655,7 +2840,7 @@ function renderContactList() {
                 if (!ok) return;
                 RS.invokeOrToast('remove_contact', { hash: hash }, 'Could not remove contact');
                 if (lxmfActiveContact === hash) {
-                    lxmfActiveContact = null;
+                    _activateConversation(null, 'contact_removed');
                     lxmfConversation = [];
                     renderConversation();
                 }
@@ -2797,7 +2982,6 @@ document.addEventListener('DOMContentLoaded', function() {
             rsPromptContact({ title: 'Add Contact' }).then(function(result) {
                 if (!result) return;
                 RS.invokeOrToast('add_contact', { args: { hash: result.hash, display_name: result.display_name } }, 'Could not add contact');
-                showToast('Adding contact...', 'toast-orange', 2000);
             });
         });
     }
@@ -3002,7 +3186,7 @@ function showContactDetailSheet(hash) {
             RS.invokeOrToast('block_contact', { args: { hash: hash, escalate_to_blackhole: result.checked } }, 'Could not block contact')
                 .then(function(resp) {
                     if (resp && resp.blackhole_pending && typeof showToast === 'function') {
-                        showToast('Blocked. Network blackhole will activate on their next announce.', 'toast-orange', 5000);
+                        showToast('Blocked. Network filtering starts after their next announce.', 'toast-warning', 5000);
                     }
                 })
                 .catch(function() {});
@@ -3028,7 +3212,6 @@ document.addEventListener('DOMContentLoaded', function() {
         rsPromptContact({ title: 'Add Contact' }).then(function(result) {
             if (!result) return;
             RS.invokeOrToast('add_contact', { args: { hash: result.hash, display_name: result.display_name } }, 'Could not add contact');
-            showToast('Adding contact...', 'toast-orange', 2000);
         });
     }
 
@@ -3043,11 +3226,203 @@ document.addEventListener('DOMContentLoaded', function() {
 
 window.renderConversation = renderConversation;
 
+function _messageDisplayContent(msg, hasRenderedAudio) {
+    var displayContent = (msg && msg.content) || '';
+    if (msg && (msg.image || (msg.attachments && msg.attachments.length > 0)) && displayContent) {
+        displayContent = displayContent.replace(/\n?\[File:[^\]]*\]\s*$/, '');
+    }
+    if (hasRenderedAudio && displayContent.trim() === 'Voice message') displayContent = '';
+    return displayContent;
+}
+
+function _mobileMessageActionsUseLongPress() {
+    return (typeof isTauriMobile === 'function' && isTauriMobile()) ||
+        (typeof isMobile === 'function' && isMobile());
+}
+
+function _mergeConversationRenderOptions(previous, next) {
+    previous = previous || {};
+    next = next || {};
+    return {
+        forceScrollBottom: !!(previous.forceScrollBottom || next.forceScrollBottom),
+        stickToBottom: !!(previous.stickToBottom || next.stickToBottom),
+    };
+}
+
+function _activeActionOwnsCurrentMessage() {
+    if (!_activeContextMenu || !_activeContextMenu.msgId) return false;
+    if (_activeContextMenu.ownerHash !== _canonicalConversationHash(lxmfActiveContact)) return false;
+    return lxmfConversation.some(function(message) {
+        return message.id === _activeContextMenu.msgId;
+    });
+}
+
+function _deferConversationRender(options) {
+    var ownerHash = _canonicalConversationHash(lxmfActiveContact);
+    if (!_deferredConversationRenderOptions || _deferredConversationRenderOwnerHash !== ownerHash) {
+        if (_deferredConversationRenderOptions &&
+                _deferredConversationRenderOwnerHash !== ownerHash) {
+            _cancelScheduledDeferredConversationRender(_deferredConversationRenderGeneration);
+        }
+        _deferredConversationRenderOptions = null;
+        _deferredConversationRenderOwnerHash = ownerHash;
+        _deferredConversationRenderGeneration++;
+    }
+    _deferredConversationRenderOptions = _mergeConversationRenderOptions(
+        _deferredConversationRenderOptions,
+        options
+    );
+}
+
+function _pendingRenderReleaseOwnsCurrentConversation() {
+    return !!(_deferredConversationRenderRelease &&
+        _deferredConversationRenderOptions &&
+        _deferredConversationRenderRelease.ownerHash === _canonicalConversationHash(lxmfActiveContact) &&
+        _deferredConversationRenderRelease.generation === _deferredConversationRenderGeneration);
+}
+
+function _deferActiveMessageInteractionRender(options) {
+    if (!_activeActionOwnsCurrentMessage() &&
+            !_pendingRenderReleaseOwnsCurrentConversation()) return false;
+    _deferConversationRender(options);
+    return true;
+}
+
+function _clearDeferredConversationRender(expectedGeneration) {
+    if (typeof expectedGeneration === 'number' &&
+            expectedGeneration !== _deferredConversationRenderGeneration) return false;
+    _deferredConversationRenderOptions = null;
+    _deferredConversationRenderOwnerHash = null;
+    return true;
+}
+
+function _takeDeferredConversationRenderOptions(options) {
+    var ownerHash = _canonicalConversationHash(lxmfActiveContact);
+    var deferredOptions = _deferredConversationRenderOwnerHash === ownerHash
+        ? _deferredConversationRenderOptions
+        : null;
+    if (_deferredConversationRenderOptions) {
+        _cancelScheduledDeferredConversationRender(_deferredConversationRenderGeneration);
+    }
+    var merged = _mergeConversationRenderOptions(deferredOptions, options);
+    _clearDeferredConversationRender();
+    return merged;
+}
+
+function _cancelScheduledDeferredConversationRender(expectedGeneration) {
+    if (!_deferredConversationRenderRelease) return false;
+    if (typeof expectedGeneration === 'number' &&
+            expectedGeneration !== _deferredConversationRenderRelease.generation) return false;
+    _deferredConversationRenderRelease.cleanup();
+    _deferredConversationRenderRelease = null;
+    return true;
+}
+
+function _scheduleDeferredConversationRenderAfterPointer() {
+    if (_deferredConversationRenderRelease) return false;
+    // Establish the release lease even before the first network/progress render.
+    // A neutral intent is cheap and ensures that first update cannot detach the
+    // pointer's eventual click target.
+    if (!_deferredConversationRenderOptions) _deferConversationRender({});
+    var ownerHash = _canonicalConversationHash(lxmfActiveContact);
+    var generation = _deferredConversationRenderGeneration;
+    var record = null;
+    function removeReleaseListeners() {
+        document.removeEventListener('pointerup', release, true);
+        document.removeEventListener('pointercancel', cancelRelease, true);
+        document.removeEventListener('mouseup', release, true);
+        document.removeEventListener('touchend', release, true);
+        document.removeEventListener('touchcancel', cancelRelease, true);
+    }
+    function removeClickListener() {
+        document.removeEventListener('click', clickAfterRelease, true);
+    }
+    function runFlush() {
+        if (!record) return;
+        record.cleanup();
+        if (_deferredConversationRenderRelease === record) {
+            _deferredConversationRenderRelease = null;
+        }
+        if (ownerHash !== _canonicalConversationHash(lxmfActiveContact)) {
+            _clearDeferredConversationRender(generation);
+            return;
+        }
+        _flushDeferredConversationRender(generation);
+    }
+    function scheduleFlush() {
+        if (!record || record.flushScheduled) return;
+        record.flushScheduled = true;
+        removeReleaseListeners();
+        removeClickListener();
+        if (record.fallbackTimer !== null) clearTimeout(record.fallbackTimer);
+        record.fallbackTimer = null;
+        record.timer = setTimeout(runFlush, 0);
+    }
+    function release() {
+        if (!record || record.released) return;
+        record.released = true;
+        removeReleaseListeners();
+        document.addEventListener('click', clickAfterRelease, true);
+        record.fallbackTimer = setTimeout(runFlush, 450);
+    }
+    function cancelRelease() {
+        if (!record || record.released) return;
+        record.released = true;
+        scheduleFlush();
+    }
+    function clickAfterRelease() {
+        scheduleFlush();
+    }
+    record = {
+        ownerHash: ownerHash,
+        generation: generation,
+        released: false,
+        flushScheduled: false,
+        timer: null,
+        fallbackTimer: null,
+        cleanup: function() {
+            removeReleaseListeners();
+            removeClickListener();
+            if (record.timer !== null) clearTimeout(record.timer);
+            if (record.fallbackTimer !== null) clearTimeout(record.fallbackTimer);
+        },
+    };
+    _deferredConversationRenderRelease = record;
+    document.addEventListener('pointerup', release, true);
+    document.addEventListener('pointercancel', cancelRelease, true);
+    document.addEventListener('mouseup', release, true);
+    document.addEventListener('touchend', release, true);
+    document.addEventListener('touchcancel', cancelRelease, true);
+    return true;
+}
+
+function _flushDeferredConversationRender(expectedGeneration) {
+    if (!_deferredConversationRenderOptions) return false;
+    if (typeof expectedGeneration === 'number' &&
+            expectedGeneration !== _deferredConversationRenderGeneration) return false;
+    if (_deferredConversationRenderOwnerHash !== _canonicalConversationHash(lxmfActiveContact)) {
+        _clearDeferredConversationRender(expectedGeneration);
+        return false;
+    }
+    _cancelScheduledDeferredConversationRender(expectedGeneration);
+    var options = _deferredConversationRenderOptions;
+    _clearDeferredConversationRender(expectedGeneration);
+    renderConversation(options);
+    return true;
+}
+
 function renderConversation(options) {
     options = options || {};
     var container = document.getElementById('lxmf-messages');
     if (!container) return;
-    _dismissContextMenu();
+    if (_deferActiveMessageInteractionRender(options)) return;
+    var activeOwnerHash = _activeContextMenu && _activeContextMenu.ownerHash;
+    if (activeOwnerHash && activeOwnerHash !== _canonicalConversationHash(lxmfActiveContact)) {
+        _cancelScheduledDeferredConversationRender();
+        _clearDeferredConversationRender();
+    }
+    options = _takeDeferredConversationRenderOptions(options);
+    _dismissContextMenu({ restoreFocus: false, flushDeferredRender: false });
     _detachMessageLongPressHandlers();
     _wireLxmfMessageScroll(container);
     var scrollState = _captureLxmfMessageScrollState(container);
@@ -3143,12 +3518,14 @@ function renderConversation(options) {
             '</div>';
         }
 
+        var audioHtml = '';
+        if (msg.audio && window.RS && RS.voiceMemos) {
+            audioHtml = RS.voiceMemos.renderAudio(msg.audio, msg);
+        }
+
         var attachHtml = '';
         if (msg.attachments && msg.attachments.length > 0) {
             attachHtml = msg.attachments.map(function(att) {
-                if (window.RS && RS.voiceMemos && RS.voiceMemos.isAttachment(att)) {
-                    return RS.voiceMemos.renderAttachment(att, msg);
-                }
                 var sizeStr = att.size ? prettySize(att.size) : '';
                 var nameHtml = att.unavailable
                     ? '<span class="file-name">Attachment unavailable</span>'
@@ -3213,23 +3590,30 @@ function renderConversation(options) {
             Object.keys(grouped).forEach(function(emoji) {
                 var count = grouped[emoji].length;
                 var isMine = grouped[emoji].indexOf(ourHash) !== -1;
-                reactionHtml += '<span class="reaction-pill' + (isMine ? ' mine' : '') + '" ' +
-                    'data-emoji="' + escapeHtml(emoji) + '" data-msg-id="' + escapeHtml(msg.id) + '">' +
-                    escapeHtml(emoji) + (count > 1 ? ' ' + count : '') + '</span>';
+                var reactionLabel = (isMine ? 'Remove' : 'Add') + ' ' + emoji +
+                    ' reaction' + (count > 1 ? ', ' + count + ' reactions' : '');
+                reactionHtml += '<button type="button" class="reaction-pill' + (isMine ? ' mine' : '') + '" ' +
+                    'data-emoji="' + escapeHtml(emoji) + '" data-msg-id="' + escapeHtml(msg.id) + '" ' +
+                    'aria-pressed="' + (isMine ? 'true' : 'false') + '" aria-label="' + escapeHtml(reactionLabel) + '">' +
+                    '<span aria-hidden="true">' + escapeHtml(emoji) + (count > 1 ? ' ' + count : '') + '</span></button>';
             });
             reactionHtml += '</div>';
         }
 
         // Strip the `[File: ...]` fallback suffix when we have structured payload.
-        var displayContent = msg.content || '';
-        if ((msg.image || (msg.attachments && msg.attachments.length > 0)) && displayContent) {
-            displayContent = displayContent.replace(/\n?\[File:[^\]]*\]\s*$/, '');
-        }
+        var displayContent = _messageDisplayContent(msg, !!audioHtml);
 
         var hasReactions = reactionHtml ? ' has-reactions' : '';
         var hasImage = !!imageHtml;
         var hasAttachment = !!attachHtml;
+        var mobileMessageActions = _mobileMessageActionsUseLongPress();
+        var messageActionsClass = 'msg-actions-trigger' +
+            (mobileMessageActions ? ' msg-actions-trigger-mobile-hidden' : '');
         var metaHtml = _messageProgressMetaHtml(msg) +
+            '<button type="button" class="' + messageActionsClass + '" data-msg-id="' + escapeHtml(msg.id || '') + '" ' +
+                'aria-label="More actions for this message" aria-haspopup="dialog" aria-expanded="false">' +
+                _messageActionIcon('more') +
+            '</button>' +
             (canCancelSend ? _messageInlineCancelHtml(msg) : '<span class="msg-time">' + time + '</span>') +
             stateIcon;
         var bubbleClass = bubbleClassBase +
@@ -3240,6 +3624,7 @@ function renderConversation(options) {
                 replyHtml +
                 imageHtml +
                 (displayContent ? '<div class="lxmf-msg-content">' + linkifyMessageText(displayContent) + '</div>' : '') +
+                audioHtml +
                 attachHtml +
                 '<div class="lxmf-msg-meta">' + metaHtml + '</div>' +
             '</div>' +
@@ -3275,13 +3660,14 @@ function renderConversation(options) {
     container.querySelectorAll('a.rs-file-download[data-stored-name]').forEach(function(link) {
         link.addEventListener('click', function(e) {
             e.preventDefault();
+            if (_consumePendingMessageHoldActivation(e, this)) return;
             var name = this.getAttribute('data-stored-name');
             if (!name) return;
             RS.saveFile(name).then(function(saved) {
-                if (saved !== false && typeof showToast === 'function') showToast('Saved', 'toast-green', 2200);
+                if (saved !== false && typeof showToast === 'function') showToast('Saved', 'toast-success', 2200);
             }).catch(function(err) {
                 if (typeof showToast === 'function') {
-                    showToast('Download failed: ' + (err.message || err.code || 'error'), 'toast-red', 4000);
+                    showToast('Could not download: ' + (err.message || err.code || 'unknown error'), 'toast-error', 4000);
                 } else {
                     window.RS.diag('error', '[lxmf] file download failed:', name, err);
                 }
@@ -3297,11 +3683,7 @@ function renderConversation(options) {
 
     container.querySelectorAll('.lxmf-clickable-img').forEach(function(img) {
         img.addEventListener('click', function(e) {
-            if (Date.now() < _suppressImageOpenUntil) {
-                e.preventDefault();
-                e.stopPropagation();
-                return;
-            }
+            if (_consumePendingMessageHoldActivation(e, this)) return;
             e.stopPropagation();
             if (typeof openImageViewer === 'function') openImageViewer(this);
         });
@@ -3311,10 +3693,12 @@ function renderConversation(options) {
         link.addEventListener('click', function(e) {
             e.preventDefault();
             e.stopPropagation();
+            if (_consumePendingMessageHoldActivation(e, this)) return;
+            if (!_messageLinkActivationAllowed(this)) return;
             var url = this.getAttribute('data-url');
             if (url && window.RS && typeof RS.openExternalUrl === 'function') {
                 RS.openExternalUrl(url).catch(function(err) {
-                    showToast('Could not open link: ' + ((err && err.message) || 'error'), 'toast-red', 3500);
+                    showToast('Could not open link: ' + ((err && err.message) || 'error'), 'toast-error', 3500);
                 });
             }
         });
@@ -3337,12 +3721,30 @@ function renderConversation(options) {
             var emoji = this.getAttribute('data-emoji');
             var msgId = this.getAttribute('data-msg-id');
             var msgData = lxmfConversation.find(function(m) { return m.id === msgId; }) || { id: msgId };
-            _sendReactionForMessage(msgData, emoji, { dismiss: false });
+            _sendReactionForMessage(msgData, emoji, {
+                dismiss: false,
+                restoreReactionFocus: true,
+                focusExpected: _messageActivationExpectsFocus(e),
+            });
         }.bind(pill));
     });
 
+    container.querySelectorAll('.msg-actions-trigger').forEach(function(trigger) {
+        _bindMessageFocusPreservingActivation(trigger, function(event) {
+            var msgId = trigger.getAttribute('data-msg-id');
+            var bubble = trigger.closest('.lxmf-msg');
+            var msgData = lxmfConversation.find(function(m) { return m.id === msgId; });
+            if (!bubble || !msgData) return;
+            var rect = trigger.getBoundingClientRect();
+            _showMsgContextMenu(msgData, rect.left + (rect.width / 2), rect.bottom, bubble, trigger, {
+                focusDialog: _messageActivationExpectsFocus(event),
+            });
+        });
+    });
+
     container.querySelectorAll('.msg-reply-quote').forEach(function(quote) {
-        quote.addEventListener('click', function() {
+        quote.addEventListener('click', function(e) {
+            if (_consumePendingMessageHoldActivation(e, this)) return;
             var targetId = this.getAttribute('data-reply-id');
             if (!targetId) return;
             var targetEl = container.querySelector('[data-msg-id="' + targetId + '"]');
@@ -3358,34 +3760,81 @@ function renderConversation(options) {
     });
 
     container.querySelectorAll('.lxmf-msg').forEach(function(bubble) {
+        bubble.addEventListener('mousedown', function(e) {
+            if (e.button !== 2) return;
+            _rememberMessagePointerContextSelection(e, this);
+        });
+        bubble.addEventListener('keydown', function(e) {
+            if (!(e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10'))) return;
+            e.preventDefault();
+            var msgId = this.getAttribute('data-msg-id');
+            var msgData = lxmfConversation.find(function(m) { return m.id === msgId; });
+            if (!msgData) return;
+            var trigger = this.querySelector('.msg-actions-trigger');
+            var rect = (trigger || this).getBoundingClientRect();
+            _showMsgContextMenu(msgData, rect.left + (rect.width / 2), rect.bottom, this, trigger, {
+                focusDialog: true,
+            });
+        });
         if (window.RS && RS.gestures && typeof RS.gestures.attachLongPress === 'function') {
             var detachLongPress = RS.gestures.attachLongPress(bubble, {
                 duration: 500,
                 moveCancelPx: 12,
+                excludeZone: function(touch) {
+                    return _messageElevatedTextStartsNativeSelection(touch, bubble) ||
+                        _messageTouchStartsDirectControl(touch, bubble);
+                },
                 hapticStages: [{ at: 0.55, level: 'light' }],
-                // Keep the gesture start passive. The transcript's delegated
-                // touch handler already preserves composer focus, while
-                // cancelling touchstart here prevents Android WebView from
-                // handing the same gesture to native vertical scrolling.
+                // The first hold owns message actions. While that same bubble
+                // remains elevated, a second hold on its text is left entirely
+                // to the platform's native selection gesture.
                 onFire: function(touch) {
+                    if (_messageElevatedTextStartsNativeSelection(touch, bubble) ||
+                            _messageSelectionIntersectsBubble(bubble)) return;
                     var msgId = bubble.getAttribute('data-msg-id');
                     if (!msgId) return;
                     var msgData = lxmfConversation.find(function(m) { return m.id === msgId; });
                     if (!msgData) return;
-                    _suppressNextContextMenuUntil = Date.now() + 1200;
-                    _suppressImageOpenUntil = Date.now() + 900;
+                    _armPendingMessageHoldActivation(bubble, msgId, touch);
                     _showMsgContextMenu(msgData, touch.clientX, touch.clientY, bubble);
                 }
             });
             if (typeof detachLongPress === 'function') _messageLongPressDetachFns.push(detachLongPress);
         }
+        bubble.addEventListener('touchend', function() {
+            _releasePendingMessageHoldActivation(this);
+        });
+        bubble.addEventListener('touchcancel', function() {
+            if (_pendingMessageHoldActivation && _pendingMessageHoldActivation.bubble === this) {
+                _clearPendingMessageHoldActivation(_pendingMessageHoldActivation.sequence);
+            }
+        });
         bubble.addEventListener('contextmenu', function(e) {
+            var target = e.target;
+            // Pointer users retain the browser's link menu. Touch links use the
+            // same message action sheet as the rest of the bubble; otherwise a
+            // link-only message would have no practical reaction/reply target.
+            var selectionExistedBeforePointer = _consumeMessagePointerContextSelection(this);
+            var disposition = _messageContextMenuDisposition(
+                target,
+                this,
+                undefined,
+                selectionExistedBeforePointer
+            );
+            if (disposition === 'native') return;
             e.preventDefault();
-            if (Date.now() < _suppressNextContextMenuUntil) return;
+            if (disposition === 'suppress') return;
+            if (selectionExistedBeforePointer === false) _clearNativeMessageSelection();
             var msgId = this.getAttribute('data-msg-id');
             if (!msgId) return;
             var msgData = lxmfConversation.find(function(m) { return m.id === msgId; });
-            if (msgData) _showMsgContextMenu(msgData, e.clientX, e.clientY, this);
+            if (msgData) {
+                var focusDialog = document.documentElement.dataset.inputModality !== 'touch';
+                var trigger = focusDialog ? this.querySelector('.msg-actions-trigger') : null;
+                _showMsgContextMenu(msgData, e.clientX, e.clientY, this, trigger, {
+                    focusDialog: focusDialog,
+                });
+            }
         });
     });
 
@@ -3494,11 +3943,13 @@ function _restoreLxmfComposerKeyboard(shouldRestore) {
     }, 0);
 }
 
-function _finishLxmfComposerSend(input, shouldRestoreFocus) {
+function _finishLxmfComposerSend(input, shouldRestoreFocus, targetHash) {
+    targetHash = _canonicalConversationHash(targetHash || lxmfActiveContact);
+    if (targetHash !== _canonicalConversationHash(lxmfActiveContact)) return;
     input.value = '';
     input.style.height = '';
     input.scrollTop = 0;
-    delete _lxmfDrafts[lxmfActiveContact];
+    delete _lxmfDrafts[targetHash];
     if (shouldRestoreFocus) {
         _focusLxmfComposerInput(input);
     } else if (document.activeElement === input) {
@@ -3509,23 +3960,43 @@ function _finishLxmfComposerSend(input, shouldRestoreFocus) {
     if (window.RS && RS.voiceMemos) RS.voiceMemos.syncComposer();
 }
 
-function _markOptimisticMessageFailed(clientMsgId, error) {
-    for (var i = 0; i < lxmfConversation.length; i++) {
-        if (lxmfConversation[i] && lxmfConversation[i].id === clientMsgId) {
-            lxmfConversation[i].state = 'failed';
-            lxmfConversation[i].failure_reason = (error && (error.code || error.message)) || 'attachment_failed';
+function _markOptimisticMessageFailed(clientMsgId, error, targetHash) {
+    targetHash = _canonicalConversationHash(targetHash || lxmfActiveContact);
+    var target = _conversationMessagesFor(targetHash);
+    for (var i = 0; i < target.messages.length; i++) {
+        if (target.messages[i] && target.messages[i].id === clientMsgId) {
+            target.messages[i].state = 'failed';
+            target.messages[i].failure_reason = (error && (error.code || error.message)) || 'attachment_failed';
             break;
         }
     }
-    _cacheActiveConversation();
-    renderConversation();
+    _commitConversationMessages(targetHash, target);
+    if (target.active) renderConversation();
     if (typeof showToast === 'function') {
-        showToast((error && error.message) || 'Attachment could not be sent', 'toast-red', 4500);
+        showToast((error && error.message) || 'Attachment could not be sent', 'toast-error', 4500);
     }
+}
+
+function _staleConversationOperationError(message) {
+    var error = new Error(message || 'This operation no longer belongs to the active conversation.');
+    error.code = 'stale_conversation_owner';
+    error.stale_owner = true;
+    return error;
+}
+
+function _cancelStagedAttachmentToken(stageToken) {
+    if (!stageToken) return Promise.resolve(false);
+    return RS.invoke('cancel_attachment_stage', { token: stageToken }).then(function() {
+        return true;
+    }).catch(function() {
+        return false;
+    });
 }
 
 function sendLxmfMessage(deliveryMethod) {
     if (!lxmfActiveContact) return;
+    var sendOwner = _conversationOwnerSnapshot();
+    var targetHash = sendOwner.hash;
     var input = document.getElementById('lxmf-input');
     if (!input) return;
     var shouldRestoreComposerFocus = _consumeLxmfSendFocusState(input);
@@ -3533,21 +4004,35 @@ function sendLxmfMessage(deliveryMethod) {
     var chosenDelivery = _deliveryPrefOrAuto(deliveryMethod);
     var maxMessageBytes = lxmfLimits.max_message_bytes || 134217727;
     if (text && _utf8ByteLength(text) > maxMessageBytes) {
-        showToast('Message exceeds protocol limit (' + prettySize(_utf8ByteLength(text)) + ' > ' + prettySize(maxMessageBytes) + ').', 'toast-red', 5000);
+        showToast('Message is too large for this network (' + prettySize(_utf8ByteLength(text)) + ' > ' + prettySize(maxMessageBytes) + ')', 'toast-warning', 5000);
         return;
     }
 
     if (lxmfPendingFile) {
         var pendingAttachment = lxmfPendingFile;
+        if (_canonicalConversationHash(pendingAttachment.destination) !== targetHash) {
+            clearPendingFile();
+            showToast('Attach the file again for this conversation', 'toast-warning', 3000);
+            return;
+        }
+        if (pendingAttachment.preparing) {
+            showToast('Choose an image size before sending', 'toast-warning', 2600);
+            return;
+        }
         var attachMsgId = generateMsgId();
-        var isImage = pendingAttachment.mime && pendingAttachment.mime.startsWith('image/');
+        var isImage = pendingAttachment.inline_image === true;
         var optimisticImageUrl = isImage ? pendingAttachment.preview_url : null;
         pendingAttachment.stage_promise.then(function(stageToken) {
             if (!stageToken) throw pendingAttachment.stage_error || new Error('Attachment staging failed');
+            if (!_conversationOwnerIsCurrent(sendOwner)) {
+                return _cancelStagedAttachmentToken(stageToken).then(function() {
+                    throw _staleConversationOperationError('Attachment was not sent after changing conversations.');
+                });
+            }
             pendingAttachment.staging_token = null;
             return RS.invoke('send_lxmf_with_staged_attachment', {
                 args: {
-                    dest_hash: lxmfActiveContact,
+                    dest_hash: targetHash,
                     content: text,
                     delivery_method: chosenDelivery,
                     client_msg_id: attachMsgId,
@@ -3555,9 +4040,11 @@ function sendLxmfMessage(deliveryMethod) {
                 }
             });
         }).then(function(resp) {
-            _handleLxmfSendAccepted(resp, attachMsgId);
+            _handleLxmfSendAccepted(resp, attachMsgId, targetHash, sendOwner);
         }).catch(function(error) {
-            _markOptimisticMessageFailed(attachMsgId, error);
+            if (_conversationOwnerIdentityIsCurrent(sendOwner)) {
+                _markOptimisticMessageFailed(attachMsgId, error, targetHash);
+            }
         }).finally(function() {
             if (optimisticImageUrl) {
                 setTimeout(function() {
@@ -3566,7 +4053,7 @@ function sendLxmfMessage(deliveryMethod) {
             }
         });
 
-        lxmfConversation.push({
+        var attachmentWasActive = _appendConversationMessage(targetHash, {
             id: attachMsgId,
             direction: 'outbound',
             content: text,
@@ -3581,17 +4068,16 @@ function sendLxmfMessage(deliveryMethod) {
                 object_url: pendingAttachment.preview_url,
             } : null,
         });
-        _cacheActiveConversation();
 
         // Capture before clearPendingFile() wipes pending state.
         var attachPreview = text || (isImage ? 'Photo' : pendingAttachment.name);
         pendingAttachment.preview_url = null;
         pendingAttachment.detached_for_send = true;
         clearPendingFile();
-        renderConversation({ forceScrollBottom: true });
-        _updateConversationPreview(lxmfActiveContact, attachPreview, Date.now() / 1000);
+        if (attachmentWasActive) renderConversation({ forceScrollBottom: true });
+        _updateConversationPreview(targetHash, attachPreview, Date.now() / 1000);
         loadConversations();
-        _finishLxmfComposerSend(input, shouldRestoreComposerFocus);
+        _finishLxmfComposerSend(input, shouldRestoreComposerFocus, targetHash);
         return;
     }
 
@@ -3602,7 +4088,7 @@ function sendLxmfMessage(deliveryMethod) {
     if (_replyTarget) {
         RS.invoke('send_lxmf_reply', {
             args: {
-                dest_hash: lxmfActiveContact,
+                dest_hash: targetHash,
                 content: text,
                 delivery_method: chosenDelivery,
                 reply_to_id: _replyTarget.id,
@@ -3610,9 +4096,9 @@ function sendLxmfMessage(deliveryMethod) {
                 client_msg_id: msgId,
             }
         }).then(function(resp) {
-            _handleLxmfSendAccepted(resp, msgId);
+            _handleLxmfSendAccepted(resp, msgId, targetHash, sendOwner);
         }).catch(function() {});
-        lxmfConversation.push({
+        var replyWasActive = _appendConversationMessage(targetHash, {
             id: msgId,
             direction: 'outbound',
             content: text,
@@ -3622,27 +4108,26 @@ function sendLxmfMessage(deliveryMethod) {
             reply_to_id: _replyTarget.id,
             reply_to_preview: _replyTarget.content,
         });
-        _cacheActiveConversation();
         clearReplyTarget();
-        renderConversation({ forceScrollBottom: true });
-        _updateConversationPreview(lxmfActiveContact, text, Date.now() / 1000);
+        if (replyWasActive) renderConversation({ forceScrollBottom: true });
+        _updateConversationPreview(targetHash, text, Date.now() / 1000);
         loadConversations();
-        _finishLxmfComposerSend(input, shouldRestoreComposerFocus);
+        _finishLxmfComposerSend(input, shouldRestoreComposerFocus, targetHash);
         return;
     }
 
     RS.invoke('send_lxmf_message', {
         args: {
-            dest_hash: lxmfActiveContact,
+            dest_hash: targetHash,
             content: text,
             delivery_method: chosenDelivery,
             client_msg_id: msgId,
         }
     }).then(function(resp) {
-        _handleLxmfSendAccepted(resp, msgId);
+        _handleLxmfSendAccepted(resp, msgId, targetHash, sendOwner);
     }).catch(function() {});
 
-    lxmfConversation.push({
+    var messageWasActive = _appendConversationMessage(targetHash, {
         id: msgId,
         direction: 'outbound',
         content: text,
@@ -3650,66 +4135,79 @@ function sendLxmfMessage(deliveryMethod) {
         state: 'sending',
         delivery_method: _optimisticDeliveryMethod(chosenDelivery),
     });
-    _cacheActiveConversation();
-    renderConversation({ forceScrollBottom: true });
-    _updateConversationPreview(lxmfActiveContact, text, Date.now() / 1000);
+    if (messageWasActive) renderConversation({ forceScrollBottom: true });
+    _updateConversationPreview(targetHash, text, Date.now() / 1000);
     loadConversations();
-    _finishLxmfComposerSend(input, shouldRestoreComposerFocus);
+    _finishLxmfComposerSend(input, shouldRestoreComposerFocus, targetHash);
 }
 
-function sendLxmfVoiceMemo(voiceDraft, targetHash) {
-    if (!lxmfActiveContact || targetHash !== lxmfActiveContact || !voiceDraft || !voiceDraft.data_base64) return false;
-    var input = document.getElementById('lxmf-input');
-    if (!input) return false;
-    var msgId = generateMsgId();
-    var filename = voiceDraft.filename || 'Voice message.lxvm';
-    var chosenDelivery = _deliveryPrefOrAuto('auto');
-    var raw = atob(voiceDraft.data_base64);
-    var voiceBytes = new Uint8Array(raw.length);
-    for (var byteIndex = 0; byteIndex < raw.length; byteIndex++) {
-        voiceBytes[byteIndex] = raw.charCodeAt(byteIndex);
-    }
-    var voiceBlob = new Blob([voiceBytes], { type: 'audio/x-lxst-voice-memo' });
-    _stageAttachmentBlob(voiceBlob, filename, 'audio/x-lxst-voice-memo', false).then(function(stageToken) {
-        return RS.invoke('send_lxmf_with_staged_attachment', {
-            args: {
-                dest_hash: targetHash,
-                content: '',
-                delivery_method: chosenDelivery,
-                client_msg_id: msgId,
-                staging_token: stageToken,
-            }
+function sendLxmfVoiceMemo(voiceDraft, targetHash, options) {
+    options = options || {};
+    targetHash = _canonicalConversationHash(targetHash);
+    var sendOwner = options.owner || _conversationOwnerSnapshot();
+    var stageToken = String(voiceDraft && voiceDraft.staging_token || '');
+    if (!targetHash || targetHash !== _canonicalConversationHash(sendOwner.hash) ||
+        !_conversationOwnerIsCurrent(sendOwner) || !voiceDraft || !stageToken) {
+        if (!stageToken) {
+            return Promise.reject(new Error('Voice message staging is unavailable.'));
+        }
+        return _cancelStagedAttachmentToken(stageToken).then(function() {
+            throw _staleConversationOperationError('Voice message was not sent after changing conversations.');
         });
-    }).then(function(resp) {
-        _handleLxmfSendAccepted(resp, msgId);
+    }
+    var input = document.getElementById('lxmf-input');
+    if (!input) {
+        return _cancelStagedAttachmentToken(stageToken).then(function() {
+            throw new Error('Message composer is unavailable.');
+        });
+    }
+    var msgId = generateMsgId();
+    var chosenDelivery = _deliveryPrefOrAuto('auto');
+    if (!_conversationOwnerIsCurrent(sendOwner) ||
+        (typeof options.isCurrent === 'function' && !options.isCurrent())) {
+        return _cancelStagedAttachmentToken(stageToken).then(function() {
+            throw _staleConversationOperationError('Voice message was not sent after changing conversations.');
+        });
+    }
+    if (typeof options.onAdmissionStart === 'function') options.onAdmissionStart();
+    return RS.invoke('send_lxmf_voice_message', {
+        args: {
+            dest_hash: targetHash,
+            delivery_method: chosenDelivery,
+            client_msg_id: msgId,
+            staging_token: stageToken,
+        }
     }).catch(function(error) {
-        _markOptimisticMessageFailed(msgId, error);
-    });
-
-    if (window.RS && RS.voiceMemos) RS.voiceMemos.registerDraft(msgId, voiceDraft);
-    lxmfConversation.push({
-        id: msgId,
-        direction: 'outbound',
-        content: '',
-        timestamp: Date.now() / 1000,
-        state: 'sending',
-        delivery_method: _optimisticDeliveryMethod(chosenDelivery),
-        attachments: [{
-            filename: filename,
-            size: voiceDraft.size || 0,
-            voice_memo_key: msgId,
-            voice_memo: {
-                duration_ms: voiceDraft.duration_ms,
-                waveform: voiceDraft.waveform || [],
+        return _cancelStagedAttachmentToken(stageToken).then(function() { throw error; });
+    }).then(function(resp) {
+        if (!_conversationOwnerIdentityIsCurrent(sendOwner)) return resp;
+        var acceptedId = (resp && resp.msg_id) || msgId;
+        if (window.RS && RS.voiceMemos) RS.voiceMemos.registerDraft(acceptedId, voiceDraft);
+        var isActive = _appendConversationMessage(targetHash, {
+            id: acceptedId,
+            direction: 'outbound',
+            content: 'Voice message',
+            timestamp: Date.now() / 1000,
+            state: resp && resp.cancelled ? 'cancelled' : 'sending',
+            delivery_method: _optimisticDeliveryMethod(chosenDelivery),
+            audio: {
+                mode: 0x10,
+                supported: true,
+                stored_name: '',
+                size: voiceDraft.size || 0,
+                voice_memo_key: acceptedId,
+                voice_memo: {
+                    duration_ms: voiceDraft.duration_ms,
+                    waveform: voiceDraft.waveform || [],
+                },
             },
-        }],
+        });
+        if (isActive) renderConversation({ forceScrollBottom: true });
+        _updateConversationPreview(targetHash, 'Voice message', Date.now() / 1000);
+        loadConversations();
+        _finishLxmfComposerSend(input, false, targetHash);
+        return resp;
     });
-    _cacheActiveConversation();
-    renderConversation({ forceScrollBottom: true });
-    _updateConversationPreview(targetHash, 'Voice message', Date.now() / 1000);
-    loadConversations();
-    _finishLxmfComposerSend(input, false);
-    return true;
 }
 
 window.sendLxmfVoiceMemo = sendLxmfVoiceMemo;
@@ -3729,7 +4227,7 @@ function _ensureAttachmentMediaPermission(opts) {
             var message = opts.audio
                 ? 'Camera or microphone permission denied'
                 : 'Camera permission denied';
-            showToast(message, 'toast-orange', 3500);
+            showToast(message, 'toast-warning', 3500);
         }
         return granted;
     });
@@ -3760,25 +4258,6 @@ function _pendingAttachmentName(file) {
     return file && file.name ? file.name : 'Photo';
 }
 
-function _imageShareMime(mime) {
-    var lower = String(mime || '').toLowerCase();
-    if (lower === 'image/jpeg' || lower === 'image/jpg') return 'image/jpeg';
-    if (lower === 'image/webp') return 'image/webp';
-    return 'image/png';
-}
-
-function _imageShareExtension(mime) {
-    if (mime === 'image/jpeg') return 'jpg';
-    if (mime === 'image/webp') return 'webp';
-    return 'png';
-}
-
-function _metadataStrippedImageName(file, mime) {
-    var source = _pendingAttachmentName(file);
-    var stem = source.replace(/\.[A-Za-z0-9]{1,8}$/, '').trim() || 'image';
-    return stem + '.' + _imageShareExtension(mime);
-}
-
 function _readBlobBase64(blob) {
     return new Promise(function(resolve, reject) {
         var reader = new FileReader();
@@ -3794,14 +4273,15 @@ function _readBlobBase64(blob) {
     });
 }
 
-function _stageAttachmentBlob(blob, name, mime, isImage) {
+function _stageAttachmentBlob(blob, name, mime, isImage, destinationHash) {
     var stageToken = null;
+    destinationHash = _canonicalConversationHash(destinationHash || lxmfActiveContact);
     return RS.invoke('begin_attachment_stage', {
         args: {
             file_name: name,
             mime: mime || 'application/octet-stream',
             declared_size: blob.size,
-            dest_hash: lxmfActiveContact || null,
+            dest_hash: destinationHash || null,
             is_image: !!isImage,
         }
     }).then(function(start) {
@@ -3836,195 +4316,190 @@ function _stageAttachmentBlob(blob, name, mime, isImage) {
     });
 }
 
-function _attachmentImageDimensions(file) {
-    return file.slice(0, Math.min(file.size, 256 * 1024)).arrayBuffer().then(function(buffer) {
-        var b = new Uint8Array(buffer);
-        var view = new DataView(buffer);
-        function be32(offset) { return view.getUint32(offset, false); }
-        function le16(offset) { return view.getUint16(offset, true); }
-        function le32(offset) { return view.getUint32(offset, true); }
-        if (b.length >= 24 && b[0] === 0x89 && String.fromCharCode.apply(null, b.slice(1, 4)) === 'PNG') {
-            return { width: be32(16), height: be32(20) };
-        }
-        if (b.length >= 10 && String.fromCharCode.apply(null, b.slice(0, 6)).match(/^GIF8[79]a$/)) {
-            return { width: le16(6), height: le16(8) };
-        }
-        if (b.length >= 26 && b[0] === 0x42 && b[1] === 0x4d) {
-            return { width: Math.abs(view.getInt32(18, true)), height: Math.abs(view.getInt32(22, true)) };
-        }
-        if (b.length >= 30 && String.fromCharCode.apply(null, b.slice(0, 4)) === 'RIFF' &&
-            String.fromCharCode.apply(null, b.slice(8, 12)) === 'WEBP') {
-            var kind = String.fromCharCode.apply(null, b.slice(12, 16));
-            if (kind === 'VP8X') return {
-                width: 1 + b[24] + (b[25] << 8) + (b[26] << 16),
-                height: 1 + b[27] + (b[28] << 8) + (b[29] << 16)
-            };
-            if (kind === 'VP8L' && b[20] === 0x2f) return {
-                width: 1 + b[21] + ((b[22] & 0x3f) << 8),
-                height: 1 + (b[22] >> 6) + (b[23] << 2) + ((b[24] & 0x0f) << 10)
-            };
-            if (kind === 'VP8 ' && b[23] === 0x9d && b[24] === 0x01 && b[25] === 0x2a) return {
-                width: le16(26) & 0x3fff,
-                height: le16(28) & 0x3fff
-            };
-        }
-        if (b.length >= 4 && b[0] === 0xff && b[1] === 0xd8) {
-            var offset = 2;
-            while (offset + 8 <= b.length) {
-                if (b[offset] !== 0xff) { offset++; continue; }
-                while (offset < b.length && b[offset] === 0xff) offset++;
-                var marker = b[offset++];
-                if (marker === 0xd8 || marker === 0xd9 || (marker >= 0xd0 && marker <= 0xd7)) continue;
-                if (offset + 2 > b.length) break;
-                var length = view.getUint16(offset, false);
-                if (length < 2 || offset + length > b.length) break;
-                if ([0xc0,0xc1,0xc2,0xc3,0xc5,0xc6,0xc7,0xc9,0xca,0xcb,0xcd,0xce,0xcf].indexOf(marker) !== -1) {
-                    return { height: view.getUint16(offset + 3, false), width: view.getUint16(offset + 5, false) };
-                }
-                offset += length;
-            }
-        }
-        var error = new Error('Unsupported or malformed image');
-        error.code = 'attachment_image_unsafe';
-        throw error;
-    });
+function _looksLikeImageAttachment(file) {
+    if (/^image\//i.test((file && file.type) || '')) return true;
+    return /\.(?:avif|bmp|gif|heic|heif|jpe?g|png|webp)$/i.test((file && file.name) || '');
 }
 
-function _decodeImageForCanvas(file, target) {
-    if (typeof createImageBitmap === 'function') {
-        var options = { imageOrientation: 'from-image' };
-        if (target && (target.width || target.height)) {
-            options.resizeWidth = target.width;
-            options.resizeHeight = target.height;
-            options.resizeQuality = 'high';
-        }
-        return createImageBitmap(file, options).then(function(bitmap) {
-            return {
-                source: bitmap,
-                width: bitmap.width,
-                height: bitmap.height,
-                close: function() {
-                    if (typeof bitmap.close === 'function') bitmap.close();
-                }
-            };
-        }).catch(function(error) {
-            if (target) throw error;
-            return _decodeImageElementForCanvas(file);
-        });
-    }
-    return _decodeImageElementForCanvas(file);
+function _attachmentCancelledError() {
+    var error = new Error('Attachment selection cancelled');
+    error.cancelled = true;
+    return error;
 }
 
-function _decodeImageElementForCanvas(file) {
-    return new Promise(function(resolve, reject) {
-        var url = URL.createObjectURL(file);
-        var img = new Image();
-        img.onload = function() {
-            URL.revokeObjectURL(url);
-            resolve({
-                source: img,
-                width: img.naturalWidth || img.width,
-                height: img.naturalHeight || img.height,
-                close: function() {}
-            });
-        };
-        img.onerror = function() {
-            URL.revokeObjectURL(url);
-            reject(new Error('Could not decode image'));
-        };
-        img.src = url;
-    });
+function _isCurrentPendingAttachment(pendingFile, token) {
+    return token === _pendingAttachmentToken &&
+        lxmfPendingFile === pendingFile &&
+        pendingFile.destination === lxmfActiveContact &&
+        !pendingFile.cancelled;
 }
 
-function _canvasToBlob(canvas, mime) {
-    return new Promise(function(resolve, reject) {
-        try {
-            canvas.toBlob(function(blob) {
-                if (!blob) {
-                    reject(new Error('Could not encode sanitized image'));
-                    return;
-                }
-                resolve(blob);
-            }, mime, 0.92);
-        } catch (err) {
-            reject(err);
-        }
-    });
+function _imagePreviewUrl(base64, mime) {
+    if (!base64) return null;
+    var raw = atob(base64);
+    var bytes = new Uint8Array(raw.length);
+    for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    return URL.createObjectURL(new Blob([bytes], { type: mime || 'image/jpeg' }));
 }
 
-function _stripImageMetadataForShare(file) {
-    var targetMime = _imageShareMime(file && file.type);
-    return _attachmentImageDimensions(file).then(function(dimensions) {
-        if (!dimensions.width || !dimensions.height) throw new Error('Image has no readable pixels');
-        var scale = Math.min(1, 8192 / dimensions.width, 8192 / dimensions.height,
-            Math.sqrt(16000000 / (dimensions.width * dimensions.height)));
-        var target = scale < 1 ? {
-            width: Math.max(1, Math.floor(dimensions.width * scale)),
-            height: Math.max(1, Math.floor(dimensions.height * scale))
-        } : null;
-        if (target && typeof createImageBitmap !== 'function') {
-            var unsupported = new Error('This image is too large to safely prepare on this device');
-            unsupported.code = 'attachment_image_memory_limit';
-            throw unsupported;
-        }
-        return _decodeImageForCanvas(file, target);
-    }).then(function(decoded) {
-        if (!decoded.width || !decoded.height) {
-            if (decoded.close) decoded.close();
-            throw new Error('Image has no readable pixels');
-        }
-        var canvas = document.createElement('canvas');
-        canvas.width = decoded.width;
-        canvas.height = decoded.height;
-        var ctx = canvas.getContext('2d', { alpha: targetMime !== 'image/jpeg' });
-        if (!ctx) {
-            if (decoded.close) decoded.close();
-            throw new Error('Could not prepare image sanitizer');
-        }
-        if (targetMime === 'image/jpeg') {
-            ctx.fillStyle = '#fff';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-        }
-        ctx.drawImage(decoded.source, 0, 0, canvas.width, canvas.height);
-        if (decoded.close) decoded.close();
-        return _canvasToBlob(canvas, targetMime);
-    }).then(function(blob) {
+function _imageProfileHint(profile) {
+    if (profile === 'small') return 'Fastest to send';
+    if (profile === 'medium') return 'Balanced quality and size';
+    if (profile === 'large') return 'Higher quality';
+    return 'Keep the most detail';
+}
+
+function _imageProfileLabel(profile) {
+    if (profile === 'small') return 'Small';
+    if (profile === 'medium') return 'Medium';
+    if (profile === 'large') return 'Large';
+    return 'Actual size';
+}
+
+function _chooseImageSize(file, inspection) {
+    var dimensions = inspection.width && inspection.height
+        ? inspection.width + ' × ' + inspection.height
+        : 'Photo';
+    var choices = (inspection.options || []).map(function(option) {
+        var profile = option.profile;
+        var estimate = Number(option.estimated_bytes) || Number(inspection.source_bytes) || file.size;
         return {
-            name: _metadataStrippedImageName(file, targetMime),
-            blob: blob,
-            size: blob.size,
-            mime: targetMime,
-            metadata_stripped: true
+            label: option.label || _imageProfileLabel(profile),
+            hint: _imageProfileHint(profile),
+            meta: '~' + prettySize(estimate),
+            value: profile,
+            recommended: !!option.recommended,
+            disabled: option.available === false,
         };
     });
-}
-
-function _readGenericAttachment(file) {
-    return Promise.resolve({
-        name: _pendingAttachmentName(file),
-        blob: file,
-        size: file.size,
-        mime: file.type || 'application/octet-stream',
+    return rsChoice({
+        title: 'Photo size',
+        ariaLabel: 'Choose image attachment size',
+        sheetClass: 'image-size-sheet',
+        summary: {
+            primary: _pendingAttachmentName(file),
+            secondary: dimensions + ' · ' + prettySize(Number(inspection.source_bytes) || file.size),
+            note: 'Smaller images send faster. Location and camera details are removed.',
+        },
+        choices: choices,
+        cancelText: 'Cancel',
     });
 }
 
-function _prepareSelectedAttachment(file) {
-    var inlineImage = /^image\//i.test(file.type || '');
-    if (!inlineImage) {
-        return _readGenericAttachment(file).then(function(attachment) {
-            return { attachment: attachment, inline_image: false, fell_back_to_file: false };
-        });
-    }
-    return _stripImageMetadataForShare(file).then(function(attachment) {
-        return { attachment: attachment, inline_image: true, fell_back_to_file: false };
-    }).catch(function(error) {
-        if (!error || (error.code !== 'attachment_image_unsafe' &&
-            error.code !== 'attachment_image_memory_limit')) {
-            throw error;
+function _chooseImageFileFallback(file, disposition) {
+    var reason = disposition === 'animated'
+        ? 'Animated images keep their motion when sent as files.'
+        : (disposition === 'too_large'
+            ? 'This image is too large to resize safely.'
+            : 'This image format cannot be resized here.');
+    return rsChoice({
+        title: 'Send image as a file?',
+        ariaLabel: 'Send image as an unchanged file',
+        sheetClass: 'image-size-sheet',
+        summary: {
+            primary: _pendingAttachmentName(file),
+            secondary: prettySize(file.size),
+            note: reason + ' It will be sent unchanged, including its original metadata.',
+        },
+        choices: [{
+            label: 'Send as file',
+            hint: 'Keep the original file',
+            meta: prettySize(file.size),
+            value: 'file',
+        }],
+        cancelText: 'Cancel',
+    });
+}
+
+function _finishPendingImageAsFile(pendingFile, stageToken) {
+    return RS.invoke('mark_image_attachment_stage_as_file', {
+        args: { token: stageToken }
+    }).then(function() {
+        pendingFile.inline_image = false;
+        pendingFile.preparing = false;
+        pendingFile.status_text = '';
+        renderPendingFile();
+        return stageToken;
+    });
+}
+
+function _stageSelectedImage(file, pendingFile, selectionToken) {
+    var stageToken = null;
+    return _stageAttachmentBlob(
+        file,
+        _pendingAttachmentName(file),
+        file.type || 'application/octet-stream',
+        true
+    ).then(function(token) {
+        stageToken = token;
+        pendingFile.staging_token = token;
+        if (!_isCurrentPendingAttachment(pendingFile, selectionToken)) {
+            RS.invoke('cancel_attachment_stage', { token: token }).catch(function() {});
+            throw _attachmentCancelledError();
         }
-        return _readGenericAttachment(file).then(function(attachment) {
-            return { attachment: attachment, inline_image: false, fell_back_to_file: true };
+        pendingFile.status_text = 'Checking photo…';
+        renderPendingFile();
+        return RS.invoke('inspect_image_attachment_stage', { args: { token: token } });
+    }).then(function(inspection) {
+        if (!_isCurrentPendingAttachment(pendingFile, selectionToken)) throw _attachmentCancelledError();
+        if (inspection.disposition !== 'still') {
+            pendingFile.status_text = 'Choose how to attach';
+            renderPendingFile();
+            return _chooseImageFileFallback(file, inspection.disposition).then(function(choice) {
+                if (choice !== 'file') throw _attachmentCancelledError();
+                return { as_file: true };
+            });
+        }
+        if (!inspection.should_prompt) return { profile: 'actual' };
+        pendingFile.status_text = 'Choose an image size';
+        renderPendingFile();
+        return _chooseImageSize(file, inspection).then(function(profile) {
+            if (!profile) throw _attachmentCancelledError();
+            return { profile: profile };
         });
+    }).then(function(choice) {
+        if (!_isCurrentPendingAttachment(pendingFile, selectionToken)) throw _attachmentCancelledError();
+        if (choice.as_file) return _finishPendingImageAsFile(pendingFile, stageToken);
+        pendingFile.status_text = 'Preparing ' + _imageProfileLabel(choice.profile).toLowerCase() + '…';
+        renderPendingFile();
+        return RS.invoke('prepare_image_attachment_stage', {
+            args: { token: stageToken, profile: choice.profile }
+        }).then(function(prepared) {
+            if (!_isCurrentPendingAttachment(pendingFile, selectionToken)) {
+                RS.invoke('cancel_attachment_stage', { token: stageToken }).catch(function() {});
+                throw _attachmentCancelledError();
+            }
+            pendingFile.name = prepared.file_name;
+            pendingFile.mime = prepared.mime;
+            pendingFile.size = Number(prepared.size) || 0;
+            pendingFile.inline_image = true;
+            pendingFile.profile_label = _imageProfileLabel(prepared.profile);
+            pendingFile.preview_url = _imagePreviewUrl(prepared.preview_base64, prepared.preview_mime);
+            pendingFile.preparing = false;
+            pendingFile.status_text = '';
+            renderPendingFile();
+            return stageToken;
+        });
+    }).catch(function(error) {
+        if (error && error.cancelled) {
+            if (stageToken) {
+                RS.invoke('cancel_attachment_stage', { token: stageToken }).catch(function() {});
+            }
+            if (selectionToken === _pendingAttachmentToken && lxmfPendingFile === pendingFile) {
+                clearPendingFile();
+            }
+            return null;
+        }
+        pendingFile.stage_error = error;
+        pendingFile.preparing = false;
+        if (stageToken) {
+            RS.invoke('cancel_attachment_stage', { token: stageToken }).catch(function() {});
+        }
+        if (selectionToken === _pendingAttachmentToken && lxmfPendingFile === pendingFile) {
+            showToast((error && error.message) || 'Could not prepare photo', 'toast-error', 4500);
+            clearPendingFile();
+        }
+        return null;
     });
 }
 
@@ -4034,41 +4509,38 @@ function handleFileSelected(inputEl) {
 
     var maxSize = lxmfLimits.max_attachment_bytes || 128000000;
     if (file.size > maxSize) {
-        showToast('File exceeds protocol limit (' + prettySize(file.size) + ' > ' + prettySize(maxSize) + '). Choose a smaller file.', 'toast-red', 5000);
+        showToast('File is too large for this network (' + prettySize(file.size) + ' > ' + prettySize(maxSize) + '). Choose a smaller file.', 'toast-warning', 5000);
         inputEl.value = '';
         clearPendingFile();
         return;
     }
-    if (file.size > (lxmfLimits.efficient_resource_bytes || 1048575)) {
-        showToast('Large attachment - transfer may take a while on slow links.', 'toast-blue', 3500);
+    var imageCandidate = _looksLikeImageAttachment(file);
+    if (!imageCandidate && file.size > (lxmfLimits.efficient_resource_bytes || 1048575)) {
+        showToast('Large attachment — transfer may take a while on slow links', 'toast-info', 3500);
     }
 
     var token = ++_pendingAttachmentToken;
-    var isImage = /^image\//i.test(file.type || '');
-    var prepare = _prepareSelectedAttachment(file);
-    if (isImage) showToast('Removing image metadata...', 'toast-blue', 1800);
+    var pendingFile = {
+        name: _pendingAttachmentName(file),
+        size: file.size,
+        mime: file.type || 'application/octet-stream',
+        inline_image: false,
+        preparing: imageCandidate,
+        status_text: imageCandidate ? 'Staging photo…' : '',
+        preview_url: null,
+        destination: lxmfActiveContact,
+    };
+    lxmfPendingFile = pendingFile;
+    renderPendingFile();
 
-    prepare.then(function(prepared) {
-        if (token !== _pendingAttachmentToken) return;
-        var pendingFile = prepared.attachment;
-        isImage = prepared.inline_image;
-        if (prepared.fell_back_to_file) {
-            showToast('Image attached as a file.', 'toast-blue', 2500);
-        }
-        if (pendingFile.size > maxSize) {
-            showToast('Sanitized image exceeds protocol limit (' + prettySize(pendingFile.size) + ' > ' + prettySize(maxSize) + '). Choose a smaller image.', 'toast-red', 5000);
-            clearPendingFile();
-            return;
-        }
-        if (pendingFile.size > (lxmfLimits.efficient_resource_bytes || 1048575) && file.size <= (lxmfLimits.efficient_resource_bytes || 1048575)) {
-            showToast('Large attachment - transfer may take a while on slow links.', 'toast-blue', 3500);
-        }
-        pendingFile.preview_url = isImage ? URL.createObjectURL(pendingFile.blob) : null;
+    if (imageCandidate) {
+        pendingFile.stage_promise = _stageSelectedImage(file, pendingFile, token);
+    } else {
         pendingFile.stage_promise = _stageAttachmentBlob(
-            pendingFile.blob,
+            file,
             pendingFile.name,
             pendingFile.mime,
-            isImage
+            false
         ).then(function(stageToken) {
             if (pendingFile.cancelled) {
                 RS.invoke('cancel_attachment_stage', { token: stageToken }).catch(function() {});
@@ -4079,21 +4551,11 @@ function handleFileSelected(inputEl) {
         }).catch(function(error) {
             pendingFile.stage_error = error;
             if (!pendingFile.cancelled && lxmfPendingFile === pendingFile) {
-                showToast((error && error.message) || 'Could not stage attachment', 'toast-red', 4500);
+                showToast((error && error.message) || 'Could not stage attachment', 'toast-error', 4500);
             }
             return null;
         });
-        lxmfPendingFile = pendingFile;
-        renderPendingFile();
-    }).catch(function(err) {
-        if (token !== _pendingAttachmentToken) return;
-        clearPendingFile();
-        if (isImage) {
-            showToast('Could not remove image metadata; image not attached', 'toast-red', 4500);
-        } else {
-            showToast('Could not read attachment: ' + ((err && err.message) || 'error'), 'toast-red', 4500);
-        }
-    });
+    }
     inputEl.value = '';
 }
 
@@ -4109,18 +4571,25 @@ function renderPendingFile() {
     }
 
     container.style.display = 'flex';
-    var isImage = lxmfPendingFile.mime.startsWith('image/');
+    var isImage = lxmfPendingFile.inline_image === true;
     container.classList.toggle('pending-file-has-image', isImage);
     var previewHtml = isImage
         ? '<span class="pending-file-thumbnail"><img src="' + escapeHtml(lxmfPendingFile.preview_url || '') + '" alt=""></span>'
-        : '<span class="pending-file-thumbnail pending-file-thumbnail-file"><span class="file-icon">\ud83d\udcce</span></span>';
+        : '<span class="pending-file-thumbnail pending-file-thumbnail-file">' +
+            (lxmfPendingFile.preparing
+                ? '<span class="loading-spinner" aria-hidden="true"></span>'
+                : '<span class="file-icon">\ud83d\udcce</span>') +
+          '</span>';
+    var sizeLine = lxmfPendingFile.status_text
+        ? escapeHtml(lxmfPendingFile.status_text)
+        : ((lxmfPendingFile.profile_label ? escapeHtml(lxmfPendingFile.profile_label) + ' · ' : '') + prettySize(lxmfPendingFile.size));
     container.innerHTML =
         previewHtml +
         '<span class="pending-file-copy">' +
             '<span class="file-name">' + escapeHtml(lxmfPendingFile.name) + '</span>' +
-            '<span class="file-size">' + prettySize(lxmfPendingFile.size) + '</span>' +
+            '<span class="file-size">' + sizeLine + '</span>' +
         '</span>' +
-        '<button class="pending-file-clear">&times;</button>';
+        '<button class="pending-file-clear" aria-label="Remove attachment">&times;</button>';
     container.querySelector('.pending-file-clear').addEventListener('click', clearPendingFile);
     if (window.RS && RS.voiceMemos) RS.voiceMemos.syncComposer();
 }
@@ -4149,9 +4618,9 @@ function clearPendingFile() {
 
 function setReplyTarget(msgData) {
     var replyContent = (msgData.content || '').substring(0, 100);
-    if (!replyContent && Array.isArray(msgData.attachments) && msgData.attachments.some(function(attachment) {
-        return window.RS && RS.voiceMemos && RS.voiceMemos.isAttachment(attachment);
-    })) replyContent = 'Voice message';
+    if (msgData.audio) {
+        replyContent = Number(msgData.audio.mode) === 0x10 ? 'Voice message' : 'Unsupported audio';
+    }
     _replyTarget = {
         id: msgData.id,
         content: replyContent,
@@ -4196,8 +4665,101 @@ function _messageSourceName(msg) {
 }
 
 var _activeContextMenu = null;
-var _suppressNextContextMenuUntil = 0;
-var _suppressImageOpenUntil = 0;
+var _pendingMessageHoldActivation = null;
+var _messageHoldActivationSequence = 0;
+var _messagePointerContextSelection = null;
+
+function _messageHoldActivationSurface(target, bubble) {
+    if (!target || !target.closest || !bubble || !bubble.contains(target)) return null;
+    return target.closest('.lxmf-clickable-img, .rs-message-link, .rs-file-download, .msg-reply-quote');
+}
+
+function _clearPendingMessageHoldActivation(expectedSequence) {
+    if (!_pendingMessageHoldActivation) return false;
+    if (expectedSequence && _pendingMessageHoldActivation.sequence !== expectedSequence) return false;
+    if (_pendingMessageHoldActivation.expiryTimer) {
+        clearTimeout(_pendingMessageHoldActivation.expiryTimer);
+    }
+    _pendingMessageHoldActivation = null;
+    return true;
+}
+
+function _armPendingMessageHoldActivation(bubble, msgId, touch) {
+    _clearPendingMessageHoldActivation();
+    var touchTarget = touch && touch.target;
+    if (!bubble || !msgId || !touchTarget || !bubble.contains(touchTarget)) return false;
+    _pendingMessageHoldActivation = {
+        sequence: ++_messageHoldActivationSequence,
+        bubble: bubble,
+        msgId: msgId,
+        touchTarget: touchTarget,
+        surface: _messageHoldActivationSurface(touchTarget, bubble),
+        released: false,
+        contextConsumed: false,
+        activationConsumed: false,
+        expiresAt: null,
+        expiryTimer: null,
+    };
+    return true;
+}
+
+function _releasePendingMessageHoldActivation(bubble, now) {
+    var pending = _pendingMessageHoldActivation;
+    if (!pending || pending.bubble !== bubble || pending.released) return false;
+    var timestamp = typeof now === 'number' ? now : Date.now();
+    pending.released = true;
+    pending.expiresAt = timestamp + 750;
+    var sequence = pending.sequence;
+    pending.expiryTimer = setTimeout(function() {
+        _clearPendingMessageHoldActivation(sequence);
+    }, 750);
+    return true;
+}
+
+function _pendingMessageHoldContextMatches(target, bubble) {
+    var pending = _pendingMessageHoldActivation;
+    if (!pending || pending.bubble !== bubble || !target) return false;
+    if (target === pending.touchTarget) return true;
+    if (target.contains && target.contains(pending.touchTarget)) return true;
+    return !!(pending.touchTarget.contains && pending.touchTarget.contains(target));
+}
+
+function _consumePendingMessageHoldContext(target, bubble, now) {
+    var pending = _pendingMessageHoldActivation;
+    var timestamp = typeof now === 'number' ? now : Date.now();
+    if (!pending || (pending.expiresAt !== null && timestamp > pending.expiresAt)) {
+        if (pending) _clearPendingMessageHoldActivation(pending.sequence);
+        return false;
+    }
+    if (!_pendingMessageHoldContextMatches(target, bubble)) return false;
+    pending.contextConsumed = true;
+    return true;
+}
+
+function _consumePendingMessageHoldActivation(event, surface, now) {
+    var pending = _pendingMessageHoldActivation;
+    var timestamp = typeof now === 'number' ? now : Date.now();
+    var bubble = surface && surface.closest ? surface.closest('.lxmf-msg') : null;
+    if (!pending || !pending.released || pending.activationConsumed || !surface ||
+            pending.surface !== surface || bubble !== pending.bubble) {
+        return false;
+    }
+    if (pending.expiresAt !== null && timestamp > pending.expiresAt) {
+        _clearPendingMessageHoldActivation(pending.sequence);
+        return false;
+    }
+    pending.activationConsumed = true;
+    if (event && event.cancelable) event.preventDefault();
+    if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+    return true;
+}
+
+function _findRenderedMessageBubble(container, msgId) {
+    if (!container || !msgId) return null;
+    return Array.from(container.querySelectorAll('.lxmf-msg[data-msg-id]')).find(function(candidate) {
+        return candidate.getAttribute('data-msg-id') === msgId;
+    }) || null;
+}
 
 function _messageActionShouldPreserveComposer() {
     return !!((_activeContextMenu && _activeContextMenu.preserveComposerKeyboard) || _shouldPreserveLxmfComposerKeyboard());
@@ -4239,8 +4801,30 @@ function _bindMessageFocusPreservingActivation(el, handler) {
     });
 }
 
-function _dismissContextMenu() {
+function _prefersKeyboardMessageFocus() {
+    return !!(window.RS && RS.ui && typeof RS.ui.prefersKeyboardFocus === 'function' &&
+        RS.ui.prefersKeyboardFocus());
+}
+
+function _messageActivationExpectsFocus(event) {
+    if (_prefersKeyboardMessageFocus()) return true;
+    if (!event) return false;
+    if (event.type === 'click' && event.detail === 0) return true;
+    return document.documentElement.dataset.inputModality === 'pointer';
+}
+
+function _focusMessageControl(control) {
+    if (!control || typeof control.focus !== 'function') return;
+    try { control.focus({ preventScroll: true }); }
+    catch (_) { control.focus(); }
+}
+
+function _dismissContextMenu(opts) {
+    opts = opts || {};
     if (!_activeContextMenu) return false;
+    var trigger = _activeContextMenu.trigger;
+    var msgId = _activeContextMenu.msgId;
+    var restoreFocusExpected = _activeContextMenu.restoreFocusExpected;
     if (_activeContextMenu.menu && _activeContextMenu.menu.parentNode) {
         _activeContextMenu.menu.parentNode.removeChild(_activeContextMenu.menu);
     }
@@ -4250,8 +4834,40 @@ function _dismissContextMenu() {
     if (_activeContextMenu.container) {
         _activeContextMenu.container.classList.remove('msg-action-mode');
     }
+    if (trigger) trigger.setAttribute('aria-expanded', 'false');
     _activeContextMenu = null;
+    var flushedRender = opts.flushDeferredRender !== false && _flushDeferredConversationRender();
+    if (opts.restoreFocus !== false && restoreFocusExpected) {
+        var focusTarget = trigger;
+        if (flushedRender && trigger && msgId) {
+            var container = document.getElementById('lxmf-messages');
+            var bubble = _findRenderedMessageBubble(container, msgId);
+            focusTarget = bubble && bubble.querySelector('.msg-actions-trigger');
+        }
+        _focusMessageControl(focusTarget);
+    }
     return true;
+}
+
+function _messageActionOwnsText(bubble, target) {
+    if (!_activeContextMenu || !bubble || _activeContextMenu.bubble !== bubble) return false;
+    if (_activeContextMenu.ownerHash !== _canonicalConversationHash(lxmfActiveContact)) return false;
+    var content = target && target.closest ? target.closest('.lxmf-msg-content') : null;
+    return !!(content && bubble.contains(content));
+}
+
+function _messageElevatedTextStartsNativeSelection(touch, bubble) {
+    if (!_messageActionOwnsText(bubble, touch && touch.target)) return false;
+    // The first hold's synthetic context/click guard must never consume the
+    // new gesture that intentionally begins native selection.
+    _clearPendingMessageHoldActivation();
+    return true;
+}
+
+function _clearNativeMessageSelection() {
+    if (!window.getSelection) return;
+    var selection = window.getSelection();
+    if (selection && typeof selection.removeAllRanges === 'function') selection.removeAllRanges();
 }
 
 function _messageActionIcon(name) {
@@ -4264,7 +4880,75 @@ function _messageActionIcon(name) {
     if (name === 'save') {
         return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
     }
+    if (name === 'more') {
+        return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
+    }
     return '';
+}
+
+function _messageSelectionIntersectsBubble(bubble) {
+    if (!bubble || !window.getSelection) return false;
+    var selection = window.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount < 1) return false;
+    var range = selection.getRangeAt(0);
+    if (range && typeof range.intersectsNode === 'function') {
+        try { return range.intersectsNode(bubble); }
+        catch (_) {}
+    }
+    var ancestor = range && range.commonAncestorContainer;
+    return !!ancestor && bubble.contains(ancestor);
+}
+
+function _messageTouchStartsDirectControl(touch, bubble) {
+    var target = touch && touch.target;
+    if (!target || !target.closest || !bubble || !bubble.contains(target)) return false;
+    return !!target.closest(
+        '.msg-actions-trigger, .lxmf-send-cancel, .msg-send-cancel-inline, .msg-retry-btn, ' +
+        '.voice-memo-player-play, .voice-memo-player-waveform, .voice-memo-player-download'
+    );
+}
+
+function _messageLinkUsesNativeContext(target) {
+    var isMessageLink = target && target.closest && target.closest('.rs-message-link');
+    return !!isMessageLink && document.documentElement.dataset.inputModality !== 'touch';
+}
+
+function _messageLinkActivationAllowed(link) {
+    var bubble = link && link.closest ? link.closest('.lxmf-msg') : null;
+    return !_messageActionOwnsText(bubble, link) && !_messageSelectionIntersectsBubble(bubble);
+}
+
+function _rememberMessagePointerContextSelection(event, bubble) {
+    if (!event || event.button !== 2 || !bubble) return false;
+    _messagePointerContextSelection = {
+        bubble: bubble,
+        hadSelection: _messageSelectionIntersectsBubble(bubble),
+    };
+    return true;
+}
+
+function _consumeMessagePointerContextSelection(bubble) {
+    var record = _messagePointerContextSelection;
+    _messagePointerContextSelection = null;
+    if (!record || record.bubble !== bubble) return null;
+    return record.hadSelection;
+}
+
+function _messageContextMenuDisposition(target, bubble, now, selectionExistedBeforePointer) {
+    if (_messageLinkUsesNativeContext(target)) return 'native';
+    // A contextmenu synthesized from the first action-opening hold belongs to
+    // that exact gesture. Suppress it before considering the newly elevated
+    // bubble; a real second hold has already cleared this pending record.
+    if (_consumePendingMessageHoldContext(target, bubble, now)) return 'suppress';
+    var selectableText = target && target.closest && target.closest('.lxmf-msg-content');
+    var preserveSelection = selectionExistedBeforePointer === null ||
+        typeof selectionExistedBeforePointer === 'undefined'
+        ? _messageSelectionIntersectsBubble(bubble)
+        : selectionExistedBeforePointer;
+    if ((selectableText && _messageActionOwnsText(bubble, target)) || preserveSelection) {
+        return 'native';
+    }
+    return 'actions';
 }
 
 function _ownReactionSender() {
@@ -4308,13 +4992,43 @@ function _optimisticApplyReaction(msgId, emoji, action) {
     renderConversation();
 }
 
+function _restoreRenderedMessageActionFocus(msgId, emoji, focusExpected) {
+    if (!(focusExpected || _prefersKeyboardMessageFocus()) || !msgId) return;
+    var container = document.getElementById('lxmf-messages');
+    if (!container) return;
+    var bubble = Array.from(container.querySelectorAll('.lxmf-msg[data-msg-id]')).find(function(candidate) {
+        return candidate.getAttribute('data-msg-id') === msgId;
+    });
+    var target = null;
+    if (emoji) {
+        target = Array.from(container.querySelectorAll('.reaction-pill[data-msg-id]')).find(function(candidate) {
+            return candidate.getAttribute('data-msg-id') === msgId &&
+                candidate.getAttribute('data-emoji') === emoji;
+        }) || null;
+    }
+    if (!target && bubble) target = bubble.querySelector('.msg-actions-trigger');
+    _focusMessageControl(target);
+}
+
 function _sendReactionForMessage(msgData, emoji, opts) {
     opts = opts || {};
     if (!msgData || !msgData.id || !emoji) return;
     var shouldRestoreComposer = _messageActionShouldPreserveComposer();
+    var focusExpected = !!(opts.focusExpected ||
+        (_activeContextMenu && _activeContextMenu.restoreFocusExpected));
     var action = _hasOwnReaction(msgData.id, emoji) ? 'remove' : 'add';
-    if (opts.dismiss !== false) _dismissContextMenu();
+    if (opts.dismiss !== false) {
+        // The optimistic reaction render consumes any coalesced transcript
+        // update, so keep this as one rebuild after the action has activated.
+        _dismissContextMenu({ flushDeferredRender: false });
+    }
     _optimisticApplyReaction(msgData.id, emoji, action);
+    _flushDeferredConversationRender();
+    _restoreRenderedMessageActionFocus(
+        msgData.id,
+        opts.restoreReactionFocus ? emoji : null,
+        focusExpected
+    );
     _restoreLxmfComposerKeyboard(shouldRestoreComposer);
     if (typeof haptic === 'function') haptic('selection');
     RS.invoke('send_reaction', {
@@ -4328,7 +5042,12 @@ function _sendReactionForMessage(msgData, emoji, opts) {
     }).catch(function() {
         // Roll the optimistic apply back so the pill reflects reality.
         _optimisticApplyReaction(msgData.id, emoji, action === 'add' ? 'remove' : 'add');
-        if (typeof showToast === 'function') showToast('Reaction failed', 'toast-red', 2500);
+        _restoreRenderedMessageActionFocus(
+            msgData.id,
+            opts.restoreReactionFocus ? emoji : null,
+            focusExpected
+        );
+        if (typeof showToast === 'function') showToast('Could not add the reaction', 'toast-error', 2500);
     });
 }
 
@@ -4374,7 +5093,7 @@ function _saveDownloadedMediaFile(file, opts) {
     opts = opts || {};
     return RS.saveDownloadedFile(file, opts).then(function() {
         if (typeof showToast === 'function') {
-            showToast(/^image\//i.test(file.mime || '') && opts.preferPhotos ? 'Saved to photos!' : 'Saved', 'toast-green', 2500);
+            showToast(/^image\//i.test(file.mime || '') && opts.preferPhotos ? 'Saved to Photos' : 'Saved', 'toast-success', 2500);
         }
         return true;
     });
@@ -4382,9 +5101,10 @@ function _saveDownloadedMediaFile(file, opts) {
 
 function _messageMediaContextAction(msgData) {
     if (msgData && msgData.image) {
+        var image = msgData.image;
         var canCopyImage = _canCopyDownloadedImages();
         return {
-            label: canCopyImage ? 'Copy' : 'Save',
+            label: canCopyImage ? 'Copy Image' : 'Save Image',
             icon: canCopyImage ? 'copy' : 'save',
             run: function() {
                 if (!canCopyImage && image.stored_name && typeof isTauriMobile === 'function' && isTauriMobile()) {
@@ -4405,7 +5125,7 @@ function _messageMediaContextAction(msgData) {
     var attachment = _messageFirstAttachment(msgData);
     if (attachment) {
         return {
-            label: 'Save',
+            label: 'Save File',
             icon: 'save',
             run: function() {
                 if (attachment.stored_name &&
@@ -4443,8 +5163,19 @@ function _positionMsgContextMenu(menu, x, y, bubble) {
     menu.style.top = top + 'px';
 }
 
-function _showMsgContextMenu(msgData, x, y, bubble) {
-    _dismissContextMenu();
+function _prepareMessageActionTarget(msgData, bubble, trigger, x, y) {
+    return { bubble: bubble, trigger: trigger, x: x, y: y };
+}
+
+function _showMsgContextMenu(msgData, x, y, bubble, trigger, opts) {
+    opts = opts || {};
+    var preparedTarget = _prepareMessageActionTarget(msgData, bubble, trigger, x, y);
+    if (!preparedTarget) return;
+    bubble = preparedTarget.bubble;
+    trigger = preparedTarget.trigger;
+    x = preparedTarget.x;
+    y = preparedTarget.y;
+    _dismissContextMenu({ restoreFocus: false, flushDeferredRender: false });
 
     var preserveComposerKeyboard = _shouldPreserveLxmfComposerKeyboard();
     if (typeof haptic === 'function') haptic('selection');
@@ -4459,7 +5190,9 @@ function _showMsgContextMenu(msgData, x, y, bubble) {
 
     var menu = document.createElement('div');
     menu.className = 'msg-context-menu msg-action-menu';
-    menu.setAttribute('role', 'menu');
+    menu.setAttribute('role', 'dialog');
+    menu.setAttribute('aria-modal', 'false');
+    menu.setAttribute('aria-label', 'Message actions');
     menu.addEventListener('mousedown', _preventMessageActionFocusSteal);
     menu.addEventListener('touchstart', _preventMessageActionFocusSteal, { passive: false });
 
@@ -4471,9 +5204,14 @@ function _showMsgContextMenu(msgData, x, y, bubble) {
         btn.type = 'button';
         btn.className = 'quick-react-emoji';
         btn.textContent = em;
-        btn.setAttribute('aria-label', 'React ' + em);
-        _bindMessageFocusPreservingActivation(btn, function() {
-            _sendReactionForMessage(msgData, em);
+        btn.setAttribute('data-message-action', 'reaction:' + em);
+        var hasOwnReaction = _hasOwnReaction(msgData.id, em);
+        btn.setAttribute('aria-pressed', hasOwnReaction ? 'true' : 'false');
+        btn.setAttribute('aria-label', (hasOwnReaction ? 'Remove ' : 'Add ') + em + ' reaction');
+        _bindMessageFocusPreservingActivation(btn, function(e) {
+            _sendReactionForMessage(msgData, em, {
+                focusExpected: _messageActivationExpectsFocus(e),
+            });
         });
         reactBar.appendChild(btn);
     });
@@ -4484,6 +5222,7 @@ function _showMsgContextMenu(msgData, x, y, bubble) {
     plusBtn.textContent = '+';
     plusBtn.title = 'More emoji';
     plusBtn.setAttribute('aria-label', 'More emoji');
+    plusBtn.setAttribute('data-message-action', 'reaction-more');
     _bindMessageFocusPreservingActivation(plusBtn, function() {
         var shouldRestoreComposer = _messageActionShouldPreserveComposer();
         // Capture before dismiss removes plusBtn from the DOM.
@@ -4523,6 +5262,7 @@ function _showMsgContextMenu(msgData, x, y, bubble) {
     var replyBtn = document.createElement('button');
     replyBtn.className = 'msg-ctx-btn msg-ctx-reply';
     replyBtn.type = 'button';
+    replyBtn.setAttribute('data-message-action', 'reply');
     replyBtn.innerHTML = _messageActionIcon('reply') + '<span>Reply</span>';
     _bindMessageFocusPreservingActivation(replyBtn, function() {
         _dismissContextMenu();
@@ -4531,50 +5271,117 @@ function _showMsgContextMenu(msgData, x, y, bubble) {
     });
     actions.appendChild(replyBtn);
 
-    var copyBtn = document.createElement('button');
-    copyBtn.className = 'msg-ctx-btn msg-ctx-copy';
-    copyBtn.type = 'button';
-    var mediaAction = _messageMediaContextAction(msgData);
-    copyBtn.innerHTML = _messageActionIcon(mediaAction ? mediaAction.icon : 'copy') +
-        '<span>' + (mediaAction ? mediaAction.label : 'Copy') + '</span>';
-    _bindMessageFocusPreservingActivation(copyBtn, function() {
-        var shouldRestoreComposer = _messageActionShouldPreserveComposer();
-        _dismissContextMenu();
-        var action = mediaAction ? mediaAction.run() : _copyToClipboard(msgData.content || '');
-        action.then(function(ok) {
-            if (typeof showToast === 'function') {
-                if (!mediaAction) showToast(ok ? 'Message copied' : 'Could not copy', ok ? 'toast-green' : 'toast-orange', 1600);
-            }
-            if (typeof haptic === 'function') haptic(ok ? 'success' : 'warning');
-            _restoreLxmfComposerKeyboard(shouldRestoreComposer);
-        }).catch(function(err) {
-            if (typeof showToast === 'function') {
-                showToast((mediaAction && mediaAction.label === 'Save' ? 'Save failed: ' : 'Copy failed: ') + ((err && err.message) || 'error'), 'toast-red', 3500);
-            }
-            if (typeof haptic === 'function') haptic('warning');
-            _restoreLxmfComposerKeyboard(shouldRestoreComposer);
+    var content = bubble && bubble.querySelector ? bubble.querySelector('.lxmf-msg-content') : null;
+    var messageText = _messageDisplayContent(msgData, !!(msgData && msgData.audio));
+    var hasText = !!(content && String(messageText || '').trim());
+    if (hasText) {
+        var copyBtn = document.createElement('button');
+        copyBtn.className = 'msg-ctx-btn msg-ctx-copy';
+        copyBtn.type = 'button';
+        copyBtn.setAttribute('data-message-action', 'copy-message');
+        copyBtn.innerHTML = _messageActionIcon('copy') + '<span>Copy Message</span>';
+        _bindMessageFocusPreservingActivation(copyBtn, function() {
+            var shouldRestoreComposer = _messageActionShouldPreserveComposer();
+            _dismissContextMenu();
+            _copyToClipboard(messageText).then(function(ok) {
+                if (typeof showToast === 'function') {
+                    showToast(ok ? 'Message copied' : 'Could not copy', ok ? 'toast-success' : 'toast-error', 1600);
+                }
+                if (typeof haptic === 'function') haptic(ok ? 'success' : 'warning');
+                _restoreLxmfComposerKeyboard(shouldRestoreComposer);
+            }).catch(function(err) {
+                if (typeof showToast === 'function') {
+                    showToast('Could not copy: ' + ((err && err.message) || 'unknown error'), 'toast-error', 3500);
+                }
+                if (typeof haptic === 'function') haptic('warning');
+                _restoreLxmfComposerKeyboard(shouldRestoreComposer);
+            });
         });
-    });
-    actions.appendChild(copyBtn);
+        actions.appendChild(copyBtn);
+    }
+
+    var mediaAction = _messageMediaContextAction(msgData);
+    if (mediaAction) {
+        var mediaBtn = document.createElement('button');
+        mediaBtn.className = 'msg-ctx-btn msg-ctx-media';
+        mediaBtn.type = 'button';
+        mediaBtn.setAttribute('data-message-action', 'media');
+        mediaBtn.innerHTML = _messageActionIcon(mediaAction.icon) + '<span>' + mediaAction.label + '</span>';
+        _bindMessageFocusPreservingActivation(mediaBtn, function() {
+            var shouldRestoreComposer = _messageActionShouldPreserveComposer();
+            _dismissContextMenu();
+            mediaAction.run().then(function(ok) {
+                if (typeof haptic === 'function') haptic(ok ? 'success' : 'warning');
+                _restoreLxmfComposerKeyboard(shouldRestoreComposer);
+            }).catch(function(err) {
+                if (typeof showToast === 'function') {
+                    showToast((mediaAction.label.indexOf('Save') === 0 ? 'Could not save: ' : 'Could not copy: ') +
+                        ((err && err.message) || 'unknown error'), 'toast-error', 3500);
+                }
+                if (typeof haptic === 'function') haptic('warning');
+                _restoreLxmfComposerKeyboard(shouldRestoreComposer);
+            });
+        });
+        actions.appendChild(mediaBtn);
+    }
 
     menu.appendChild(actions);
 
     document.body.appendChild(menu);
-    _activeContextMenu = { menu: menu, row: row, container: container, preserveComposerKeyboard: preserveComposerKeyboard };
+    if (trigger) trigger.setAttribute('aria-expanded', 'true');
+    _activeContextMenu = {
+        menu: menu,
+        bubble: bubble,
+        row: row,
+        container: container,
+        trigger: trigger,
+        msgId: msgData.id,
+        ownerHash: _canonicalConversationHash(lxmfActiveContact),
+        restoreFocusExpected: !!opts.focusDialog,
+        preserveComposerKeyboard: preserveComposerKeyboard,
+    };
     _positionMsgContextMenu(menu, x, y, bubble);
+    if (opts.focusDialog) {
+        _focusMessageControl(menu.querySelector('button'));
+    }
 }
 
 function _handleMessageActionPointer(e) {
-    if (!_activeContextMenu) return;
-    var menu = _activeContextMenu.menu;
-    if (menu && menu.contains(e.target)) return;
-    _dismissContextMenu();
+    if (_activeContextMenu) {
+        var menu = _activeContextMenu.menu;
+        if (menu && menu.contains(e.target)) return;
+        // The elevated bubble is the mobile native-selection surface. Keep
+        // both it and the transcript DOM alive while a second hold begins.
+        if (_messageActionOwnsText(_activeContextMenu.bubble, e.target)) return;
+        if (_dismissContextMenu({ restoreFocus: false, flushDeferredRender: false })) {
+            _scheduleDeferredConversationRenderAfterPointer();
+        }
+    }
+}
+
+function _handleNativeMessageCopy() {
+    if (!_mobileMessageActionsUseLongPress() || !_activeContextMenu) return false;
+    var active = _activeContextMenu;
+    if (!_messageSelectionIntersectsBubble(active.bubble)) return false;
+    // Let the platform finish serializing the selected text before the
+    // transcript DOM or selection is changed. Exact object identity prevents
+    // this task from dismissing another message opened in the meantime.
+    setTimeout(function() {
+        if (_activeContextMenu !== active) return;
+        _clearNativeMessageSelection();
+        _dismissContextMenu({ restoreFocus: false });
+    }, 0);
+    return true;
 }
 
 document.addEventListener('pointerdown', _handleMessageActionPointer, true);
 document.addEventListener('mousedown', _handleMessageActionPointer, true);
+document.addEventListener('copy', _handleNativeMessageCopy, true);
 document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape') _dismissContextMenu();
+    if (e.key !== 'Escape') return;
+    if (_dismissContextMenu()) {
+        e.preventDefault();
+    }
 }, true);
 
 window.RS = window.RS || {};
@@ -4700,7 +5507,7 @@ RS.listen('contacts_update', function(data) {
 });
 
 RS.listen('contact_blocked', function(data) {
-    if (typeof showToast === 'function') showToast('User blocked', 'toast-green', 2000);
+    if (typeof showToast === 'function') showToast('User blocked', 'toast-success', 2000);
     // Optimistic removal; idempotent peer_removed event will follow.
     if (data && data.hash && typeof PeersCache !== 'undefined' && PeersCache) {
         PeersCache.applyRemoved(data.hash);
@@ -4709,49 +5516,68 @@ RS.listen('contact_blocked', function(data) {
 });
 
 RS.listen('contact_unblocked', function(data) {
-    if (typeof showToast === 'function') showToast('User unblocked', 'toast-green', 2000);
+    if (typeof showToast === 'function') showToast('User unblocked', 'toast-success', 2000);
     if (typeof refreshPeersList === 'function') refreshPeersList();
 });
 
 RS.listen('conversation_update', function(data) {
-    var messages = _mergeConversationMessages(data.hash, data.messages || []);
-    cacheSet(data.hash, messages);
-    if (data.hash === lxmfActiveContact) {
+    if (!data) return;
+    var hash = _canonicalConversationHash(data.hash);
+    var messages = _mergeConversationMessages(hash, data.messages || []);
+    cacheSet(hash, messages);
+    if (hash === _canonicalConversationHash(lxmfActiveContact)) {
         lxmfConversation = messages;
         renderConversation({ stickToBottom: true });
     }
 });
 
 RS.listen('lxmf_message', function(msg) {
-    if (msg.source === lxmfActiveContact || msg.destination === lxmfActiveContact) {
+    if (!msg) return;
+    msg.source = _canonicalConversationHash(msg.source);
+    msg.destination = _canonicalConversationHash(msg.destination);
+    var activeHash = _canonicalConversationHash(lxmfActiveContact);
+    var appForeground = _lxmfAttentionForeground();
+    var conversationVisible = _isConversationActivelyVisible(msg.source);
+    if (msg.source === activeHash || msg.destination === activeHash) {
         // Dedupe reconnect replays.
         var isDupe = msg.id && lxmfConversation.some(function(m) { return m.id === msg.id; });
         if (isDupe) return;
         lxmfConversation.push(msg);
-        cacheSet(lxmfActiveContact, lxmfConversation.slice());
+        cacheSet(activeHash, lxmfConversation.slice());
         renderConversation({ stickToBottom: true });
-        if (msg.source === lxmfActiveContact) {
+        if (conversationVisible) {
             RS.invoke('mark_read', { hash: msg.source }).catch(function() {});
         }
     }
-    if (msg.source !== lxmfActiveContact) {
+    if (appForeground && !conversationVisible) {
         var fromLabel = _messageSourceName(msg);
+        var hasAudio = !!msg.audio;
         var hasAttachment = (msg.attachments && msg.attachments.length > 0) || msg.image;
-        var toastMsg = hasAttachment
-            ? 'New message with attachment from ' + escapeHtml(fromLabel)
-            : 'New message from ' + escapeHtml(fromLabel);
+        var toastMsg = hasAudio
+            ? 'New voice message from ' + fromLabel
+            : (hasAttachment
+                ? 'New message with attachment from ' + fromLabel
+                : 'New message from ' + fromLabel);
         var sourceHash = msg.source;
-        showToast(toastMsg, 'toast-blue', 4000, function() { openConversationWith(sourceHash); });
-        if (!window.__TAURI_INTERNALS__ && document.hidden && typeof rsNotify !== 'undefined') {
-            var notifFrom = _messageSourceName(msg);
-            var notifBody = (msg.content || '').substring(0, 120) || 'New message';
-            rsNotify.send({
-                title: 'Message from ' + notifFrom,
-                body: notifBody,
-                tag: 'lxmf-' + msg.source,
-                onClick: function() { openConversationWith(msg.source); }
-            });
-        }
+        showToast(toastMsg, 'toast-action', 4000, function() { openConversationWith(sourceHash); });
+    }
+    // Tauri notifications are emitted by the runtime. This fallback is only
+    // for a background browser, where the last selected chat is not visible.
+    if (!window.__TAURI_INTERNALS__ && !appForeground && typeof rsNotify !== 'undefined') {
+        var notifFrom = _messageSourceName(msg);
+        var notifBody = (msg.content || '').substring(0, 120) || 'New message';
+        rsNotify.send({
+            title: 'Message from ' + notifFrom,
+            body: notifBody,
+            tag: 'lxmf-' + msg.source,
+            onClick: function() { openConversationWith(msg.source); }
+        });
+    }
+});
+
+document.addEventListener('rs-lifecycle-foreground-handled', function() {
+    if (_isConversationActivelyVisible(lxmfActiveContact)) {
+        RS.invoke('mark_read', { hash: _canonicalConversationHash(lxmfActiveContact) }).catch(function() {});
     }
 });
 
@@ -4774,7 +5600,7 @@ RS.listen('lxmf_step', function(data) {
         var resolvedState = (data.step === 'error') ? 'failed' : data.step;
         // `propagated` is terminal alongside `delivered`/`failed`/`cancelled`/
         // `rejected` — see db::update_message_state for the matching guard.
-        var terminalStates = ['delivered', 'propagated', 'failed', 'cancelled', 'rejected'];
+        var terminalStates = ['delivered', 'propagated', 'failed', 'cancelled', 'rejected', 'timeout'];
         var matched = false;
         var eventMsgId = data.msg_id || data.client_msg_id;
         lxmfConversation.forEach(function(msg) {
@@ -4827,13 +5653,13 @@ RS.listen('lxmf_step', function(data) {
     }
 
     if (data.step === 'timeout') {
-        showToast('Message timed out: destination may be unreachable', 'toast-red', 5000);
+        showToast('Message timed out. The recipient may be unreachable.', 'toast-error', 5000);
     }
     if (data.step === 'error') {
-        showToast(data.message || 'Send error', 'toast-red', 5000);
+        showToast(data.message || 'Send error', 'toast-error', 5000);
     }
     if (data.step === 'rejected') {
-        showToast(data.message || 'Message rejected by destination', 'toast-red', 5000);
+        showToast(data.message || 'The recipient rejected the message', 'toast-error', 5000);
     }
 });
 
@@ -4859,7 +5685,7 @@ RS.listen('lxmf_delivery_progress', function(data) {
         'reusing_direct_link',
         'reusing_backchannel'
     ];
-    var terminalStates = ['delivered', 'propagated', 'failed', 'cancelled', 'rejected'];
+    var terminalStates = ['delivered', 'propagated', 'failed', 'cancelled', 'rejected', 'timeout'];
     var changed = false;
     lxmfConversation.forEach(function(msg) {
         if (data.msg_id && msg.id === data.msg_id) {
@@ -4892,16 +5718,15 @@ document.addEventListener('visibilitychange', function() {
 });
 
 RS.listen('contact_added', function(data) {
-    showToast('Contact added: ' + data.display_name, 'toast-green', 3000);
-    lxmfActiveContact = data.hash;
+    var addedName = data && data.display_name;
+    showToast(addedName ? 'Contact added: ' + addedName : 'Contact added', 'toast-success', 3000);
     renderContactList();
     if (typeof renderStandaloneContactList === 'function') renderStandaloneContactList();
-    RS.invoke('get_conversation', { hash: data.hash }).catch(function() {});
     if (typeof refreshPeersList === 'function') refreshPeersList();
 });
 
 RS.listen('contact_error', function(data) {
-    showToast(data.error || 'Contact operation failed', 'toast-red', 4000);
+    showToast(data.error || 'Could not update contact', 'toast-error', 4000);
 });
 
 function _aboutClassifyIface(iface) {
@@ -5061,7 +5886,7 @@ function showContactAbout(hash) {
             if (viaLink.getAttribute('data-known') === '1') {
                 showContactAbout(v);
             } else {
-                showToast('Relay not in peer list', 'toast-orange', 1500);
+                showToast('Relay is not in your peer list', 'toast-warning', 1500);
             }
         });
     }
@@ -5078,6 +5903,7 @@ function showContactAbout(hash) {
 }
 
 function openConversationWith(hash) {
+    hash = _canonicalConversationHash(hash);
     if (_ghostConversationHash && _ghostConversationHash !== hash) {
         _removeGhostRow();
     }
@@ -5087,7 +5913,7 @@ function openConversationWith(hash) {
         else { delete _lxmfDrafts[lxmfActiveContact]; }
     }
     if (typeof switchView === 'function') switchView('message');
-    lxmfActiveContact = hash;
+    hash = _activateConversation(hash, 'navigation').hash;
     if (input) { input.value = _lxmfDrafts[hash] || ''; input.style.height = ''; }
     _loadConversation(hash);
     _ensureGhostRow(hash);
@@ -5234,7 +6060,7 @@ function closeFabContactPicker() {
         if (!lxmfActiveContact) { showPreConditionToast('Select a conversation first'); return; }
         var files = e.dataTransfer.files;
         if (!files || files.length === 0) return;
-        if (files.length > 1) showToast('Only one file can be attached at a time', 'toast-orange', 3000);
+        if (files.length > 1) showToast('Only one file can be attached at a time', 'toast-warning', 3000);
         handleFileSelected({ files: [files[0]], value: '' });
     });
 })();
@@ -5314,7 +6140,7 @@ function openChatHeaderDropdown(triggerEl) {
                 if (!lxmfActiveContact) return;
                 RS.copyText(lxmfActiveContact).then(function(ok) {
                     if (ok) showCopyConfirmationToast('Hash');
-                    else showToast('Could not copy', 'toast-orange', 1500);
+                    else showToast('Could not copy', 'toast-error', 1500);
                 });
             }
         },
@@ -5390,7 +6216,11 @@ document.addEventListener('DOMContentLoaded', function() {
         if (status && typeof status.microphone_muted === 'boolean') {
             lxstVoiceState.microphoneMuted = status.microphone_muted;
         }
-        renderVoiceUi();
+        if (status && status.snapshot) {
+            _voiceHandleUpdate(status.snapshot);
+        } else {
+            renderVoiceUi();
+        }
     }).catch(function() {
         lxstVoiceState.available = false;
         renderVoiceUi();
@@ -5688,6 +6518,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // Desktop: Enter sends, Shift+Enter inserts newline.
     var textarea = document.getElementById('lxmf-input');
     if (textarea) {
+        RS.composer.bindTypingPolicy(textarea);
         textarea.removeAttribute('maxlength');
         textarea.addEventListener('keydown', function(e) {
             if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !isMobile()) {
@@ -5840,27 +6671,28 @@ function showConversationDeleteDialog(hash, name) {
 
 RS.listen('conversation_hidden', function(data) {
     if (!data.ok) return;
-    cacheDel(data.hash);
-    if (lxmfActiveContact === data.hash) {
-        lxmfActiveContact = null;
+    var hash = _canonicalConversationHash(data.hash);
+    cacheDel(hash);
+    if (_canonicalConversationHash(lxmfActiveContact) === hash) {
+        _activateConversation(null, 'conversation_hidden');
         lxmfConversation = [];
         renderConversation();
     }
-    if (_ghostConversationHash === data.hash) _removeGhostRow();
+    if (_canonicalConversationHash(_ghostConversationHash) === hash) _removeGhostRow();
     loadConversations();
 });
 
 RS.listen('conversation_deleted', function(data) {
     if (!data.ok) return;
-    cacheDel(data.hash);
-    if (lxmfActiveContact === data.hash) {
-        lxmfActiveContact = null;
+    var hash = _canonicalConversationHash(data.hash);
+    cacheDel(hash);
+    if (_canonicalConversationHash(lxmfActiveContact) === hash) {
+        _activateConversation(null, 'conversation_deleted');
         lxmfConversation = [];
         renderConversation();
     }
-    if (_ghostConversationHash === data.hash) _removeGhostRow();
+    if (_canonicalConversationHash(_ghostConversationHash) === hash) _removeGhostRow();
     loadConversations();
-    showToast('Conversation deleted', 'toast-green', 3000);
 });
 
 // 30s re-check so identity/path changes surface without a page reload.
@@ -6011,7 +6843,7 @@ function _ensureImageViewer() {
         _fileFromImageElement(source).then(_copyDownloadedImage).then(function() {
             showCopyConfirmationToast('Image');
         }).catch(function(err) {
-            showToast((err && err.message) || 'Could not copy image', 'toast-orange', 3000);
+            showToast((err && err.message) || 'Could not copy image', 'toast-error', 3000);
         });
     });
     viewer.querySelector('#image-viewer-save').addEventListener('click', function(e) {
@@ -6021,16 +6853,16 @@ function _ensureImageViewer() {
             (source.closest('.lxmf-image-button') && source.closest('.lxmf-image-button').getAttribute('data-stored-name')));
         if (stored) {
             RS.saveFile(stored, { preferPhotos: true }).then(function(saved) {
-                if (saved !== false) showToast('Saved', 'toast-green', 2500);
+                if (saved !== false) showToast('Saved', 'toast-success', 2500);
             }).catch(function(err) {
-                showToast('Save failed: ' + ((err && err.message) || 'error'), 'toast-red', 4000);
+                showToast('Could not save: ' + ((err && err.message) || 'unknown error'), 'toast-error', 4000);
             });
             return;
         }
         _fileFromImageElement(source).then(function(file) {
             return _saveDownloadedMediaFile(file, { preferPhotos: true });
         }).catch(function(err) {
-            showToast('Save failed: ' + ((err && err.message) || 'error'), 'toast-red', 4000);
+            showToast('Could not save: ' + ((err && err.message) || 'unknown error'), 'toast-error', 4000);
         });
     });
     document.addEventListener('keydown', function(e) {

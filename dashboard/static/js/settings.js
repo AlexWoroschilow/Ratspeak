@@ -102,7 +102,7 @@ function setChannelHostingEnabled(enabled) {
         );
     }).catch(function(error) {
         if (typeof showToast === 'function') {
-            showToast((error && error.message) || 'Could not update channel hosting', 'toast-red', 3200);
+            showToast((error && error.message) || 'Could not update channel hosting', 'toast-error', 3200);
         }
         return Promise.all([
             RS.invoke('api_app_settings').then(applyAppSettingsPayload).catch(function() {}),
@@ -186,7 +186,7 @@ function setActivityIdentityProtectionEnabled(enabled) {
         .catch(function(error) {
             adoptActivityIdentityProtectionFromBackend(previous);
             if (typeof showToast === 'function') {
-                showToast((error && error.message) || 'Could not update Activity privacy', 'toast-red', 4000);
+                showToast((error && error.message) || 'Could not update Activity privacy', 'toast-error', 4000);
             }
         })
         .then(function() {
@@ -257,7 +257,7 @@ function setHideKnownSpamPeersEnabled(enabled) {
         .catch(function(error) {
             adoptHideKnownSpamPeersFromBackend(previous);
             if (typeof showToast === 'function') {
-                showToast((error && error.message) || 'Could not update peer visibility', 'toast-red', 4000);
+                showToast((error && error.message) || 'Could not update peer visibility', 'toast-error', 4000);
             }
         })
         .then(function() {
@@ -503,7 +503,7 @@ function _settingsShowUpdateResult(title, message) {
     if (typeof rsAlert === 'function') {
         return rsAlert({ title: title, message: message, closeText: 'Close' });
     }
-    showToast(title + ' ' + message, title === 'Update available!' ? 'toast-orange' : 'toast-blue', 6000);
+    showToast(title + ' ' + message, title === 'Update available!' ? 'toast-warning' : 'toast-info', 6000);
     return Promise.resolve();
 }
 
@@ -890,6 +890,9 @@ window.refreshBlePeerStatus = function() {
                 window._blePeers[p.address] = {
                     address: p.address,
                     identity_hash: p.identity_hash || prior.identity_hash || '',
+                    provisional_identity_hash: '',
+                    readiness: 'routable',
+                    routable: true,
                     protocol: prior.protocol || 'Ratspeak',
                     rssi: prior.rssi,
                     connected: true,
@@ -918,7 +921,7 @@ function openActiveIdentityContactCard() {
     } else if (window.RSContactCard && typeof window.RSContactCard.openIdentityShareScreen === 'function') {
         window.RSContactCard.openIdentityShareScreen(identityHash);
     } else if (typeof showToast === 'function') {
-        showToast('Contact card is not ready yet', 'toast-orange', 2500);
+        showToast('Contact card is not ready yet', 'toast-warning', 2500);
     }
 }
 
@@ -1267,16 +1270,13 @@ function openIdentityStatusEditor() {
             var savedStatus = profileStatusFromPayload(result);
             setActiveProfileStatus(savedStatus === null ? nextStatus : savedStatus);
             built.dismiss(nextStatus);
-            if (typeof showToast === 'function') {
-                showToast(isClearing ? 'Status cleared' : 'Status saved', 'toast-green', 2500);
-            }
             if (typeof loadIdentities === 'function') loadIdentities();
         }).catch(function(err) {
             setSubmitting(false, false);
             if (typeof showToast === 'function') {
                 showToast(
-                    (err && err.message) ? err.message : (isClearing ? 'Failed to clear status' : 'Failed to save status'),
-                    'toast-red',
+                    (err && err.message) ? err.message : (isClearing ? 'Could not clear status' : 'Could not save status'),
+                    'toast-error',
                     3000
                 );
             }
@@ -1551,7 +1551,7 @@ if (_settingsAnnounceBadge) {
             _settingsAnnounceBadge.textContent = _announceLabel(interval);
             _settingsAnnounceBadge.setAttribute('data-value', interval);
             RS.invoke('set_auto_announce', { interval: interval }).catch(function(err) {
-                showToast((err && err.message) || 'Failed to update announce interval', 'toast-red', 8000);
+                showToast((err && err.message) || 'Could not update the announce interval', 'toast-error', 8000);
             });
         });
     }
@@ -1578,6 +1578,10 @@ function applyAppSettingsPayload(data) {
     var usageToggle = document.getElementById('announce-ratspeak-usage-toggle');
     if (usageToggle && data.announce_ratspeak_usage !== undefined) {
         usageToggle.checked = !!data.announce_ratspeak_usage;
+    }
+    var androidRnodeAutoResumeToggle = document.getElementById('android-rnode-auto-resume-toggle');
+    if (androidRnodeAutoResumeToggle && data.android_ble_rnode_auto_resume !== undefined) {
+        androidRnodeAutoResumeToggle.checked = !!data.android_ble_rnode_auto_resume;
     }
     if (data.activity_identity_protection !== undefined) {
         adoptActivityIdentityProtectionFromBackend(data.activity_identity_protection);
@@ -1656,7 +1660,7 @@ function _initHwLockSetting() {
             badge.setAttribute('data-value', secs);
             badge.classList.toggle('settings-state-value', !secs || secs <= 0);
             RS.invoke('set_hardware_lock_timeout', { seconds: secs }).catch(function(err) {
-                showToast((err && err.message) || 'Failed to update auto-lock', 'toast-red', 8000);
+                showToast((err && err.message) || 'Could not update auto-lock', 'toast-error', 8000);
             });
         });
     }
@@ -1673,7 +1677,12 @@ document.addEventListener('DOMContentLoaded', function() {
 
 (function() {
     var usageToggle = document.getElementById('announce-ratspeak-usage-toggle');
+    var androidRnodeAutoResumeRow = document.getElementById('settings-row-android-rnode-auto-resume');
+    var androidRnodeAutoResumeToggle = document.getElementById('android-rnode-auto-resume-toggle');
     var lxmfLimitToggle = document.getElementById('lxmf-limit-1mb-toggle');
+    if (androidRnodeAutoResumeRow) {
+        androidRnodeAutoResumeRow.style.display = isAndroid() ? '' : 'none';
+    }
     initActivityIdentityProtectionToggle();
     initHideKnownSpamPeersToggle();
     RS.invoke('api_app_settings').then(applyAppSettingsPayload).catch(function() {});
@@ -1684,7 +1693,18 @@ document.addEventListener('DOMContentLoaded', function() {
                 .then(applyAppSettingsPayload)
                 .catch(function(error) {
                     lxmfLimitToggle.checked = !enabled;
-                    showToast((error && error.message) || 'Failed to update message limit', 'toast-red', 8000);
+                    showToast((error && error.message) || 'Could not update the message limit', 'toast-error', 8000);
+                });
+        });
+    }
+    if (androidRnodeAutoResumeToggle) {
+        androidRnodeAutoResumeToggle.addEventListener('change', function() {
+            var enabled = !!androidRnodeAutoResumeToggle.checked;
+            RS.invoke('set_android_ble_rnode_auto_resume', { enabled: enabled })
+                .then(applyAppSettingsPayload)
+                .catch(function(error) {
+                    androidRnodeAutoResumeToggle.checked = !enabled;
+                    showToast((error && error.message) || 'Could not update RNode reconnect behavior', 'toast-error', 8000);
                 });
         });
     }
@@ -1697,7 +1717,7 @@ document.addEventListener('DOMContentLoaded', function() {
             })
             .catch(function(err) {
                 usageToggle.checked = !enabled;
-                showToast((err && err.message) || 'Failed to update privacy setting', 'toast-red', 8000);
+                showToast((err && err.message) || 'Could not update the privacy setting', 'toast-error', 8000);
             });
     });
 })();
@@ -1705,7 +1725,7 @@ document.addEventListener('DOMContentLoaded', function() {
 RS.listen('app_settings_updated', applyAppSettingsPayload);
 
 function _settingsNotificationActionForState(state) {
-    if (state === 'granted') return { hidden: true, disabled: false, label: 'Allowed' };
+    if (state === 'granted') return { hidden: false, disabled: false, label: 'Review' };
     if (state === 'prompt') return { hidden: false, disabled: false, label: 'Allow' };
     if (state === 'denied') return { hidden: false, disabled: false, label: 'Open Settings' };
     return { hidden: false, disabled: true, label: 'Unavailable' };
@@ -1798,7 +1818,7 @@ function _settingsNotificationPresentation(enabled, state) {
             try { window.RatspeakAndroid.openNotificationSettings(); } catch (_) {}
         } else {
             RS.invoke('open_mobile_app_settings').catch(function() {
-                showToast('Unable to open notification settings', 'toast-red', 4000);
+                showToast('Could not open notification settings', 'toast-error', 4000);
             });
         }
     });
@@ -1807,10 +1827,10 @@ function _settingsNotificationPresentation(enabled, state) {
         if (!_android || typeof window.RatspeakAndroid.requestBatteryOptimizationExemption !== 'function') return;
         try {
             if (!window.RatspeakAndroid.requestBatteryOptimizationExemption()) {
-                showToast('Unable to open battery settings', 'toast-red', 4000);
+                showToast('Could not open battery settings', 'toast-error', 4000);
             }
         } catch (_) {
-            showToast('Unable to open battery settings', 'toast-red', 4000);
+            showToast('Could not open battery settings', 'toast-error', 4000);
         }
     });
 
@@ -1854,7 +1874,7 @@ if (settingsBackupBtn) settingsBackupBtn.addEventListener('click', function() {
 var settingsViewPhraseBtn = document.getElementById('settings-view-recovery-phrase-btn');
 if (settingsViewPhraseBtn) settingsViewPhraseBtn.addEventListener('click', function() {
     if (typeof viewActiveRecoveryPhrase === 'function') viewActiveRecoveryPhrase();
-    else if (typeof showToast === 'function') showToast('Recovery phrase is not ready yet', 'toast-orange', 2500);
+    else if (typeof showToast === 'function') showToast('Recovery phrase is not ready yet', 'toast-warning', 2500);
 });
 
 var settingsStatusActionBtn = document.getElementById('settings-status-action-btn');
@@ -1877,9 +1897,9 @@ function clearWithConfirm(commandName, confirmMsg, successMsg, failMsg) {
     rsConfirm({ message: confirmMsg, danger: true, confirmText: 'Clear' }).then(function(ok) {
         if (!ok) return;
         RS.invoke(commandName).then(function() {
-            showToast(successMsg, '', 3000);
+            showToast(successMsg, 'toast-success', 3000);
         }).catch(function() {
-            showToast(errorMsg, 'toast-red', 3000);
+            showToast(errorMsg, 'toast-error', 3000);
         });
     });
 }
@@ -1889,8 +1909,8 @@ if (clearPathsBtn) {
     clearPathsBtn.addEventListener('click', function() {
         clearWithConfirm('api_clear_paths',
             'Clear all cached paths? Paths will be re-discovered over time.',
-            'Path table cleared.',
-            'Failed to clear paths.');
+            'Path table cleared',
+            'Could not clear paths');
     });
 }
 
@@ -1899,8 +1919,8 @@ if (clearAnnouncesBtn) {
     clearAnnouncesBtn.addEventListener('click', function() {
         clearWithConfirm('api_clear_announces',
             'Clear announce history?',
-            'Announce history cleared.',
-            'Failed to clear announce history.');
+            'Announce history cleared',
+            'Could not clear announce history');
     });
 }
 
@@ -1909,8 +1929,8 @@ if (clearMessagesBtn) {
     clearMessagesBtn.addEventListener('click', function() {
         clearWithConfirm('api_clear_messages',
             'Delete ALL messages? This cannot be undone.',
-            'All messages deleted.',
-            'Failed to delete messages.');
+            'All messages deleted',
+            'Could not delete messages');
     });
 }
 
@@ -1919,8 +1939,8 @@ if (clearContactsBtn) {
     clearContactsBtn.addEventListener('click', function() {
         clearWithConfirm('api_clear_contacts',
             'Delete ALL contacts? This cannot be undone.',
-            'All contacts deleted.',
-            'Failed to delete contacts.');
+            'All contacts deleted',
+            'Could not delete contacts');
     });
 }
 
@@ -1929,8 +1949,8 @@ if (resetDatabaseBtn) {
     resetDatabaseBtn.addEventListener('click', function() {
         clearWithConfirm('api_reset_database',
             'Clear ALL messages and contacts? This cannot be undone.',
-            'All messages and contacts cleared.',
-            'Failed to clear data.');
+            'All messages and contacts cleared',
+            'Could not clear messages and contacts');
     });
 }
 
@@ -1956,6 +1976,7 @@ if (factoryResetBtn) {
 var _lastAnnounceTime = 0;
 var ANNOUNCE_COOLDOWN = 5000;
 var _announceCooldownTimer = null;
+var _announcePending = false;
 
 function setAnnounceLabel(btn, text) {
     if (!btn) return;
@@ -1966,21 +1987,39 @@ function setAnnounceLabel(btn, text) {
 
 // Returns true if IPC fired, false if rate-limited or no online interface.
 function tryTriggerAnnounce() {
+    if (_announcePending) {
+        showToast('Announce already queued', 'toast-info', 2500);
+        return false;
+    }
     if (Date.now() - _lastAnnounceTime < ANNOUNCE_COOLDOWN) {
         showRateLimitedToast();
         return false;
     }
     if (_anyInterfaceOnline === false) {
-        showToast('Connect to a network first!', 'toast-orange', 3000);
+        showToast('Connect to a network first', 'toast-warning', 3000);
         return false;
     }
-    RS.invoke('trigger_announce').catch(function(err) {
-        showToast((err && err.message) || 'Failed to send announce', 'toast-red', 8000);
+    // Set the shared guard before IPC. Every manual entry point calls this
+    // function, so two UI surfaces cannot cross the native boundary together.
+    _announcePending = true;
+    RS.invoke('trigger_announce').then(function(data) {
+        handleManualAnnounceResult(data || { success: false, error: 'invalid_response' });
+    }).catch(function(err) {
+        handleManualAnnounceResult({
+            success: false,
+            error: 'ipc_error',
+            message: (err && err.message) || 'Could not send the announce'
+        });
     });
     return true;
 }
 
-RS.listen('announce_triggered', function(data) {
+// The originating IPC response is the single completion owner. A WebView can
+// miss a broadcast while suspending; tying this guard to a second event left
+// the visible button reset while `_announcePending` remained stuck forever.
+function handleManualAnnounceResult(data) {
+    data = data || { success: false, error: 'invalid_response' };
+    _announcePending = false;
     var networkBtn = document.getElementById('network-announce-btn');
     if (networkBtn && networkBtn.dataset) delete networkBtn.dataset.announcePending;
     // Pop the long-press origin (nav.js _holdLoop); ignore if stale (>5s).
@@ -1990,14 +2029,21 @@ RS.listen('announce_triggered', function(data) {
 
     if (data.success) {
         _lastAnnounceTime = Date.now();
-        if (typeof haptic === 'function') haptic('success');
-        showToast('Announcement sent!', 'toast-green', 4000);
-        // Burst is gated on backend success so it aligns with the real outcome.
-        if (origin && typeof showAnnounceAnimation === 'function') {
+        window.dispatchEvent(new CustomEvent('ratspeak-manual-announce-result', { detail: data }));
+        var alreadyQueued = data.disposition === 'already_queued' || data.disposition === 'deferred';
+        if (typeof haptic === 'function') haptic(alreadyQueued ? 'light' : 'success');
+        showToast(
+            alreadyQueued ? 'Announce already queued' : 'Announce queued',
+            alreadyQueued ? 'toast-info' : 'toast-success',
+            4000
+        );
+        // The request is admitted by the presence coordinator. Component
+        // queueing and interface-specific transmission continue asynchronously.
+        if (!alreadyQueued && origin && typeof showAnnounceAnimation === 'function') {
             showAnnounceAnimation(origin.el, origin.cx, origin.cy);
         }
         if (networkBtn) {
-            setAnnounceLabel(networkBtn, 'Announced!');
+            setAnnounceLabel(networkBtn, alreadyQueued ? 'Already queued' : 'Queued');
             networkBtn.classList.add('is-success');
             setTimeout(function() {
                 setAnnounceLabel(networkBtn, 'Announce');
@@ -2014,7 +2060,7 @@ RS.listen('announce_triggered', function(data) {
         }
     } else if (data.error === 'no_interfaces') {
         if (typeof haptic === 'function') haptic('warning');
-        showToast('Connect to a network first!', 'toast-orange', 3000);
+        showToast('Connect to a network first', 'toast-warning', 3000);
         // Frontend cache disagreed with backend; play dampened animation for closure.
         if (origin && typeof showAnnounceFailAnimation === 'function') {
             showAnnounceFailAnimation(origin.el, origin.cx, origin.cy);
@@ -2023,12 +2069,9 @@ RS.listen('announce_triggered', function(data) {
             setAnnounceLabel(networkBtn, 'Announce');
             networkBtn.disabled = false;
         }
-    } else if (data.error === 'not_sent') {
-        if (typeof haptic === 'function') haptic('warning');
-        var announceMsg = window._autoEnabled
-            ? 'Announce queued, but no interface transmitted it yet. Local Network may still be finding peers.'
-            : 'Announce queued, but no connected interface transmitted it. Check that your TCP peer is connected or enable Local Network.';
-        showToast(announceMsg, 'toast-orange', 5000);
+    } else if (data.error === 'not_ready') {
+        if (typeof haptic === 'function') haptic('error');
+        showToast('Ratspeak is still starting. Try Announce again.', 'toast-warning', 4000);
         if (origin && typeof showAnnounceFailAnimation === 'function') {
             showAnnounceFailAnimation(origin.el, origin.cx, origin.cy);
         }
@@ -2038,7 +2081,10 @@ RS.listen('announce_triggered', function(data) {
         }
     } else {
         if (typeof haptic === 'function') haptic('error');
-        showToast('Announce failed — router not ready', 'toast-red', 4000);
+        var failureMessage = data.error === 'busy'
+            ? 'Ratspeak is busy. Try Announce again in a moment.'
+            : (data.message || 'Could not send the announce');
+        showToast(failureMessage, data.error === 'busy' ? 'toast-warning' : 'toast-error', 5000);
         if (origin && typeof showAnnounceFailAnimation === 'function') {
             showAnnounceFailAnimation(origin.el, origin.cx, origin.cy);
         }
@@ -2047,7 +2093,7 @@ RS.listen('announce_triggered', function(data) {
             networkBtn.disabled = false;
         }
     }
-});
+}
 
 function confirmDangerAction(action, onClose) {
     function _close() { if (typeof onClose === 'function') try { onClose(); } catch (_) {} }
@@ -2055,31 +2101,31 @@ function confirmDangerAction(action, onClose) {
         'clear-paths': {
             msg: 'Clear all cached paths? Paths will be re-discovered over time.',
             command: 'api_clear_paths',
-            success: 'Path table cleared.',
-            fail: 'Failed to clear paths.'
+            success: 'Path table cleared',
+            fail: 'Could not clear paths'
         },
         'clear-announces': {
             msg: 'Clear announce history?',
             command: 'api_clear_announces',
-            success: 'Announce history cleared.',
-            fail: 'Failed to clear announce history.'
+            success: 'Announce history cleared',
+            fail: 'Could not clear announce history'
         },
         'clear-messages': {
             msg: 'Delete ALL messages? This cannot be undone.',
             command: 'api_clear_messages',
-            success: 'All messages deleted.',
-            fail: 'Failed to delete messages.'
+            success: 'All messages deleted',
+            fail: 'Could not delete messages'
         },
         'clear-contacts': {
             msg: 'Delete ALL contacts? This cannot be undone.',
             command: 'api_clear_contacts',
-            success: 'All contacts deleted.',
-            fail: 'Failed to delete contacts.'
+            success: 'All contacts deleted',
+            fail: 'Could not delete contacts'
         },
         'clear-all-data': {
             msg: 'Clear ALL messages and contacts? This cannot be undone.',
             command: 'api_reset_database',
-            success: 'All messages and contacts cleared.'
+            success: 'All messages and contacts cleared'
         },
         'factory-reset': null
     };
@@ -2098,7 +2144,7 @@ function confirmDangerAction(action, onClose) {
             if (ok === undefined) return;
             if (!ok) { _close(); return; }
             if (typeof haptic === 'function') haptic('warning');
-            showToast('Resetting\u2026', 'toast-orange', 5000);
+            showToast('Resetting Ratspeak…', 'toast-progress', 5000);
             RS.invoke('api_factory_reset')
                 .then(function() {
                     if (typeof clearFirstRunAnnounceHintDone === 'function') clearFirstRunAnnounceHintDone();
@@ -2114,7 +2160,7 @@ function confirmDangerAction(action, onClose) {
                 })
                 .catch(function() {
                     if (typeof haptic === 'function') haptic('error');
-                    showToast('Reset failed', 'toast-red', 5000);
+                    showToast('Could not reset Ratspeak', 'toast-error', 5000);
                     _close();
                 });
         });
@@ -2128,10 +2174,10 @@ function confirmDangerAction(action, onClose) {
         if (!ok) return;
         RS.invoke(cfg.command).then(function() {
             if (typeof haptic === 'function') haptic('success');
-            showToast(cfg.success, '', 3000);
+            showToast(cfg.success, 'toast-success', 3000);
         }).catch(function() {
             if (typeof haptic === 'function') haptic('error');
-            showToast(cfg.fail || 'Operation failed', 'toast-red', 3000);
+            showToast(cfg.fail || 'Could not complete the operation', 'toast-error', 3000);
         });
     });
 }
@@ -2231,7 +2277,7 @@ function saveAppearance(family, preference) {
     }).catch(function(error) {
         RS.appearance.commit(previous.family, previous.preference);
         if (typeof showToast === 'function') {
-            showToast((error && error.message) || 'Could not save appearance', 'toast-red', 4000);
+            showToast((error && error.message) || 'Could not save appearance', 'toast-error', 4000);
         }
     }).then(function() {
         _appearanceSaving = false;
@@ -2307,7 +2353,7 @@ function initTextScaleControl() {
         }).catch(function(error) {
             RS.textScale.commit(previous);
             if (typeof showToast === 'function') {
-                showToast((error && error.message) || 'Could not save text size', 'toast-red', 4000);
+                showToast((error && error.message) || 'Could not save text size', 'toast-error', 4000);
             }
         }).then(function() {
             _textScaleSaving = false;

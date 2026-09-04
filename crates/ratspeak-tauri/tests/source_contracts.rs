@@ -107,9 +107,15 @@ fn channels_keep_hubs_live_only_and_wire_bounded_local_history_across_the_produc
         read_source(root.join("dashboard/static/js/channels.js")).expect("channels js");
     let channels_css =
         read_source(root.join("dashboard/static/css/09-channels.css")).expect("channels css");
+    let ui_shared =
+        read_source(root.join("dashboard/static/js/ui_shared.js")).expect("shared ui js");
     let responsive_css =
         read_source(root.join("dashboard/static/css/13-responsive.css")).expect("responsive css");
     let nav_js = read_source(root.join("dashboard/static/js/nav.js")).expect("nav js");
+    let android_activity = read_source(
+        root.join("src-tauri/gen/android/app/src/main/java/org/ratspeak/android/MainActivity.kt"),
+    )
+    .expect("Android activity");
     let build_css = read_source(root.join("dashboard/build-css.sh")).expect("css build script");
     let runtime = read_source(root.join("crates/ratspeak-runtime/src/channels.rs"))
         .expect("channels runtime");
@@ -161,7 +167,7 @@ fn channels_keep_hubs_live_only_and_wire_bounded_local_history_across_the_produc
     assert!(!index.contains("id=\"channel-session-banner\""));
     assert_eq!(
         channels_js
-            .matches("hub relays and can read channel messages")
+            .matches("A hub can read and relay channel messages")
             .count(),
         1,
         "hub-readability disclosure belongs in the one-time consent, not repeated channel chrome"
@@ -258,12 +264,11 @@ fn channels_keep_hubs_live_only_and_wire_bounded_local_history_across_the_produc
     assert!(channels_js.contains("Load earlier"));
     assert!(!channels_js.contains("localStorage.setItem"));
     assert!(channels_js.contains("function _channelsRenderMemberDetail"));
-    assert!(channels_js.contains("function _channelsApplyComposerTypingPolicy"));
-    assert!(channels_js.contains("function _channelsHandleComposerBeforeInput"));
-    assert!(channels_js.contains("event.inputType !== 'insertReplacementText'"));
-    assert!(
-        channels_js.contains("_channelsApplyComposerTypingPolicy(input, useMobileTypingDefaults)")
-    );
+    assert!(ui_shared.contains("RS.composer.applyTypingPolicy = function(input)"));
+    assert!(ui_shared.contains("RS.composer.bindTypingPolicy = function(input)"));
+    assert!(ui_shared.contains("event.inputType !== 'insertReplacementText'"));
+    assert!(channels_js.contains("RS.composer.bindTypingPolicy(input);"));
+    assert!(!channels_js.contains("function _channelsApplyComposerTypingPolicy"));
     assert!(channels_js.contains("PeersCache.enriched()"));
     assert!(channels_js.contains("services.indexOf('lxmf.delivery')"));
     assert!(channels_js.contains("disableAutoCorrect(roomInput)"));
@@ -339,6 +344,34 @@ fn channels_keep_hubs_live_only_and_wire_bounded_local_history_across_the_produc
     assert!(keyboard_detection.contains("'view-chat-detail'"));
     assert!(keyboard_detection.contains("'view-channel-detail'"));
     assert!(keyboard_detection.contains("keyboardOpen && inConversationDetail"));
+    assert!(keyboard_detection.contains("'--visual-viewport-height'"));
+    assert!(keyboard_detection.contains("'--visual-viewport-top'"));
+    assert!(keyboard_detection.contains("'--keyboard-inset'"));
+    assert!(keyboard_detection.contains("vv.pageTop"));
+    assert!(keyboard_detection.contains("bodyRect.top"));
+    assert!(
+        keyboard_detection.contains("el.id === 'lxmf-input' || el.id === 'channel-message-input'")
+    );
+    assert!(!keyboard_detection.contains("scheduleViewportSettle"));
+    assert!(keyboard_detection.contains("active.closest('.bottom-sheet.open')"));
+    assert!(keyboard_detection.contains("'data-keyboard-platform'"));
+    assert!(!nav_js.contains("function _androidImeViewportMetrics"));
+    assert!(!nav_js.contains("window.ratspeakApplyNativeImeGeometry"));
+    assert!(nav_js.contains("if (isIOS()) window.addEventListener('resize', onResize)"));
+    assert!(nav_js.contains("// Preserve the Android pipeline used through v1.0.29:"));
+    assert!(nav_js.contains("style.setProperty('--app-height', currentHeight + 'px')"));
+    assert!(nav_js.contains("if (isIOS()) onResize();"));
+    assert!(android_activity.contains("view.setPadding(bars.left, 0, bars.right, ime.bottom)"));
+    assert!(!android_activity.contains("appOwnsVisibleIme"));
+    assert!(!android_activity.contains("inputMethod.isActive(webView)"));
+    assert!(!android_activity.contains("WindowInsetsCompat.Builder(insets)"));
+    assert!(responsive_css.contains(
+        "html[data-keyboard-platform=\"ios\"].keyboard-open body.view-chat-detail .app-layout"
+    ));
+    assert!(responsive_css.contains(
+        "html[data-keyboard-platform=\"ios\"].keyboard-open body.view-channel-detail .app-layout"
+    ));
+    assert!(responsive_css.contains("top: var(--visual-viewport-top, 0px);"));
     assert!(tauri_events.contains("function _decodeChannelNotificationRoute"));
     assert!(tauri_events.contains("window.channelsOpenNotificationRoute"));
 
@@ -544,6 +577,7 @@ fn native_channel_share_lifecycle_uses_rust_inbox_and_requires_preview() {
         &read_source(root.join("src-tauri/tauri.ios.conf.json")).expect("iOS Tauri config"),
     )
     .expect("valid iOS Tauri config");
+    assert_eq!(ios_config["bundle"]["iOS"]["developmentTeam"], "X92A7KF9SP");
     assert!(base_config["plugins"]["deep-link"].is_null());
     assert!(android_config["plugins"]["deep-link"].is_null());
     assert!(ios_config["plugins"]["deep-link"].is_null());
@@ -576,7 +610,8 @@ fn native_channel_share_lifecycle_uses_rust_inbox_and_requires_preview() {
     assert!(android_manifest.contains("android.intent.category.BROWSABLE"));
     assert!(ios_info.contains("<key>CFBundleURLTypes</key>"));
     assert!(ios_info.contains("<string>ratspeak</string>"));
-    assert!(ios_entitlements.contains("Multicast Networking entitlement"));
+    assert!(ios_entitlements.contains("com.apple.developer.networking.multicast"));
+    assert!(ios_entitlements.contains("<true/>"));
     assert!(!ios_entitlements.contains("com.apple.developer.associated-domains"));
     assert!(cargo.contains(r#"tauri-plugin-deep-link = "2.4.9""#));
     assert!(
@@ -1162,6 +1197,135 @@ fn privacy_announce_usage_setting_is_wired() {
 }
 
 #[test]
+fn android_ble_rnode_auto_resume_is_persisted_adapter_aware_and_single_owned() {
+    let root = repo_root();
+    let index = read_source(root.join("dashboard/index.html")).expect("dashboard index");
+    let settings = read_source(root.join("dashboard/static/js/settings.js")).expect("settings js");
+    let health = read_source(root.join("dashboard/static/js/health.js")).expect("health js");
+    let interfaces = read_source(root.join("crates/ratspeak-tauri/src/commands/interfaces.rs"))
+        .expect("interface commands");
+    let state =
+        read_source(root.join("crates/ratspeak-runtime/src/state.rs")).expect("runtime state");
+    let platform = read_source(root.join("crates/ratspeak-runtime/src/mobile_platform.rs"))
+        .expect("mobile platform");
+    let native = read_source(root.join("src-tauri/src/mobile_native.rs")).expect("native bridge");
+    let kotlin_root = root.join("src-tauri/gen/android/app/src/main/java/org/ratspeak/android");
+    let supervisor = read_source(kotlin_root.join("RatspeakBleRnodeSupervisor.kt"))
+        .expect("BLE RNode supervisor");
+    let gatt =
+        read_source(kotlin_root.join("RatspeakBleGatt.kt")).expect("BLE RNode physical generation");
+    let native_bridge =
+        read_source(kotlin_root.join("RatspeakNativeBridge.kt")).expect("Android native bridge");
+
+    let general_panel = index
+        .split("id=\"panel-settings-general\"")
+        .nth(1)
+        .and_then(|tail| tail.split("id=\"panel-settings-channels\"").next())
+        .expect("General settings panel");
+    let privacy_panel = index
+        .split("id=\"panel-settings-privacy\"")
+        .nth(1)
+        .and_then(|tail| tail.split("id=\"panel-settings-network\"").next())
+        .expect("Privacy settings panel");
+    assert!(
+        privacy_panel
+            .contains("id=\"settings-row-android-rnode-auto-resume\" style=\"display:none;\"")
+    );
+    assert!(!general_panel.contains("settings-row-android-rnode-auto-resume"));
+    assert!(privacy_panel.contains("Auto-reconnect radios"));
+    assert!(privacy_panel.contains("Reconnect Bluetooth RNodes automatically."));
+    assert!(
+        settings.contains("androidRnodeAutoResumeRow.style.display = isAndroid() ? '' : 'none'")
+    );
+    assert!(settings.contains("set_android_ble_rnode_auto_resume"));
+    assert!(health.contains("auto_resume_disabled: 'Reconnect paused'"));
+
+    assert!(interfaces.contains("pub async fn set_android_ble_rnode_auto_resume"));
+    assert!(interfaces.contains("db::try_set_setting(&p, \"android_ble_rnode_auto_resume\""));
+    assert!(interfaces.contains("bridge.set_android_ble_rnode_auto_resume(enabled)"));
+    assert!(state.contains(".unwrap_or(true);"));
+    assert!(state.contains("android_ble_rnode_auto_resume: AtomicBool"));
+    assert!(platform.contains("fn set_android_ble_rnode_auto_resume(&self, _enabled: bool)"));
+    assert!(native.contains("fn set_android_ble_rnode_auto_resume(&self, enabled: bool)"));
+    assert!(native_bridge.contains("fun setBleRnodeAutoResume(enabled: Boolean)"));
+
+    assert!(supervisor.contains("private val autoResume = AtomicBoolean(true)"));
+    assert!(supervisor.contains("private fun waitForBluetooth(entry: Entry)"));
+    assert!(supervisor.contains("bluetoothEnabled(entry.context) == false"));
+    assert!(supervisor.contains("finishTerminal(entry, FAILURE_AUTO_RESUME_DISABLED)"));
+    assert!(supervisor.contains("physical.disconnect(graceful = false)"));
+    assert!(!supervisor.contains("BluetoothAdapter.ACTION_STATE_CHANGED"));
+    assert!(!supervisor.contains("Thread.sleep(slice)"));
+    assert!(gatt.contains("BluetoothAdapter.ACTION_STATE_CHANGED"));
+    assert!(gatt.contains("onAdapterUnavailable(state)"));
+    assert!(gatt.contains("running.set(false)"));
+    assert!(gatt.contains("closeBridgeClient()"));
+}
+
+#[test]
+fn android_ble_product_state_waits_for_exact_protocol_readiness() {
+    let root = repo_root();
+    let kotlin_root = root.join("src-tauri/gen/android/app/src/main/java/org/ratspeak/android");
+    let supervisor = read_source(kotlin_root.join("RatspeakBleRnodeSupervisor.kt"))
+        .expect("BLE RNode supervisor");
+    let native_bridge =
+        read_source(kotlin_root.join("RatspeakNativeBridge.kt")).expect("Android native bridge");
+    let native = read_source(root.join("src-tauri/src/mobile_native.rs")).expect("native JNI");
+    let ble =
+        read_source(root.join("crates/ratspeak-tauri/src/commands/ble.rs")).expect("BLE commands");
+    let activity = read_source(root.join("crates/ratspeak-runtime/src/rnode_activity.rs"))
+        .expect("RNode activity monitor");
+    let state =
+        read_source(root.join("crates/ratspeak-runtime/src/state.rs")).expect("runtime state");
+    let health = read_source(root.join("dashboard/static/js/health.js")).expect("health js");
+    let events =
+        read_source(root.join("dashboard/static/js/tauri_events.js")).expect("frontend events");
+
+    assert!(native_bridge.contains("const val BLE_WAITING_FOR_RADIO = 1"));
+    assert!(native_bridge.contains("const val BLE_INITIALIZING = 3"));
+    assert!(!native_bridge.contains("BLE_RECONNECTING"));
+    assert!(!native_bridge.contains("BLE_CONNECTED"));
+    assert!(supervisor.contains("publishInitializing(entry)"));
+    assert!(supervisor.contains("RatspeakNativeBridge.BLE_WAITING_FOR_RADIO"));
+    assert!(!supervisor.contains("RatspeakNativeBridge.BLE_CONNECTED"));
+    assert!(native.contains("1 => \"waiting_for_radio\""));
+    assert!(native.contains("_ => \"initializing\""));
+    assert!(!native.contains("_ => \"connected\""));
+    let saved_startup = ble
+        .split("if saved_startup {")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("// Keep cancellation/replacement responsive")
+                .next()
+        })
+        .expect("saved Android BLE startup branch");
+    assert!(!saved_startup.contains("publish_mobile_hardware_state"));
+
+    assert!(activity.contains("should_publish_android_ble_connected"));
+    assert!(activity.contains("publish_ready_android_ble_hardware_state_for_rnode_observation"));
+    assert!(state.contains("publish_ready_android_ble_hardware_state_for_rnode_observation"));
+    assert!(
+        state
+            .matches("rns.handle.rnode_runtime(interface_id).is_err()")
+            .count()
+            >= 2
+    );
+    assert!(state.contains("readiness.get(&interface_id).copied() != Some(true)"));
+    assert!(state.contains("transition_android_ble_cache_to_connected"));
+    assert!(state.contains("Some(\"initializing\") =>"));
+    assert!(
+        activity.contains("android_ble_ready_publication_requires_the_active_registry_generation")
+    );
+    assert!(health.contains("waiting_for_radio: 'Waiting for radio'"));
+    assert!(health.contains("initializing: 'Initializing'"));
+    assert!(health.contains("label: 'Connecting…'"));
+    assert!(health.contains("label: 'Retry Connection'"));
+    assert!(health.contains("label: 'Radio conflict'"));
+    assert!(events.contains("waiting_for_radio: 'Waiting for radio...'"));
+    assert!(events.contains("initializing: 'Initializing RNode...'"));
+}
+
+#[test]
 fn incoming_lxmf_limit_setting_is_normal_default_on_and_backend_authoritative() {
     let root = repo_root();
     let index = read_source(root.join("dashboard/index.html")).expect("dashboard index");
@@ -1223,7 +1387,7 @@ fn text_scale_presets_are_durable_and_backend_validated() {
     assert!(interfaces.contains("\"text_scale_percent\""));
     assert!(interfaces.contains("(percent.clamp(100, 140) + 5) / 10 * 10"));
     assert!(tauri_lib.contains("set_text_scale"));
-    assert!(index.contains("/static/style.css?v=ui-20260804"));
+    assert!(index.contains("/static/style.css?v=ui-20260826-1"));
     assert!(views_css.contains(".settings-theme-family-row > .settings-row-info"));
     assert!(views_css.contains("html[data-text-scale-tier=\"large\"] .settings-theme-family-row"));
     assert!(views_css.contains("justify-content: flex-start;\n    flex-wrap: nowrap;"));
@@ -1279,7 +1443,7 @@ fn appearance_families_are_durable_validated_and_native_aware() {
 }
 
 #[test]
-fn mobile_shells_advertise_only_portrait_orientations() {
+fn mobile_shells_advertise_platform_appropriate_orientations() {
     let root = repo_root();
     let manifest = read_source(root.join("src-tauri/gen/android/app/src/main/AndroidManifest.xml"))
         .expect("android manifest");
@@ -1291,15 +1455,17 @@ fn mobile_shells_advertise_only_portrait_orientations() {
     assert!(manifest.contains("android:screenOrientation=\"portrait\""));
     assert!(manifest.contains("tools:ignore=\"DiscouragedApi,LockedOrientationActivity\""));
     assert!(ios_info.contains("UIInterfaceOrientationPortrait"));
-    assert!(!ios_info.contains("UIInterfaceOrientationLandscape"));
+    assert!(ios_info.contains("UIInterfaceOrientationLandscapeLeft"));
+    assert!(ios_info.contains("UIInterfaceOrientationLandscapeRight"));
     assert!(ios_project.contains("UISupportedInterfaceOrientations:"));
     assert!(ios_project.contains("UISupportedInterfaceOrientations~ipad:"));
-    assert!(!ios_project.contains("UIInterfaceOrientationLandscape"));
+    assert!(ios_project.contains("UIInterfaceOrientationLandscapeLeft"));
+    assert!(ios_project.contains("UIInterfaceOrientationLandscapeRight"));
     assert!(ios_project.contains("TARGETED_DEVICE_FAMILY: \"1,2\""));
 }
 
 #[test]
-fn ble_rnode_runtime_spawns_enable_flow_control() {
+fn ble_rnode_runtime_spawns_use_upstream_flow_control_default() {
     let root = repo_root();
     let ble_rs =
         read_source(root.join("crates/ratspeak-tauri/src/commands/ble.rs")).expect("ble commands");
@@ -1314,8 +1480,8 @@ fn ble_rnode_runtime_spawns_enable_flow_control() {
     );
     for block in native_blocks {
         assert!(
-            block.contains("flow_control: true"),
-            "Android native BLE RNode runtime args must opt into RNode CMD_READY flow control:\n{block}"
+            block.contains("flow_control: false"),
+            "Android native BLE RNode runtime args must preserve upstream flow-control defaults:\n{block}"
         );
     }
 
@@ -1327,14 +1493,14 @@ fn ble_rnode_runtime_spawns_enable_flow_control() {
     );
     for block in interface_blocks {
         assert!(
-            block.contains("flow_control: true"),
-            "BLE RNode runtime args must opt into RNode CMD_READY flow control:\n{block}"
+            block.contains("flow_control: false"),
+            "BLE RNode runtime args must preserve upstream flow-control defaults:\n{block}"
         );
     }
 }
 
 #[test]
-fn all_rnode_creation_paths_require_strict_capability_admission() {
+fn all_rnode_creation_paths_use_transport_specific_startup_policy() {
     let root = repo_root();
     let runtime_rs =
         read_source(root.join("crates/ratspeak-runtime/src/rns.rs")).expect("RNS runtime");
@@ -1342,9 +1508,11 @@ fn all_rnode_creation_paths_require_strict_capability_admission() {
         .expect("interfaces commands");
     let ble_rs =
         read_source(root.join("crates/ratspeak-tauri/src/commands/ble.rs")).expect("BLE commands");
+    let default_option = "RNodeStartupOptions::default()";
+    let ble_option = "ble_rnode_startup_options()";
     let strict_option = "RNodeStartupOptions::require_capability_admission()";
 
-    let assert_strict_calls = |source: &str, call_path: &str, expected: usize| {
+    let assert_option_calls = |source: &str, call_path: &str, expected: usize, option: &str| {
         let calls = rust_call_blocks(source, call_path);
         assert_eq!(
             calls.len(),
@@ -1353,46 +1521,61 @@ fn all_rnode_creation_paths_require_strict_capability_admission() {
         );
         for call in calls {
             assert!(
-                call.contains(strict_option),
-                "{call_path} must require capability admission:\n{call}"
+                call.contains(option),
+                "{call_path} must use {option}:\n{call}"
             );
         }
     };
 
-    assert_strict_calls(
+    assert_option_calls(
         &runtime_rs,
         "reticulum::init_with_options_and_rnode_startup_options",
         1,
+        ble_option,
     );
     let configured_startup = rust_call_blocks(
         &runtime_rs,
         "reticulum::init_with_options_and_rnode_startup_options",
     );
     assert!(configured_startup[0].contains("InitOptions::default()"));
-    assert_strict_calls(
+    assert!(
+        runtime_rs.contains("RNodeStartupOptions::default().with_persisted_bluetooth_enabled()")
+    );
+    assert_option_calls(
         &interfaces_rs,
         "rns_runtime::reticulum::spawn_ble_rnode_runtime_observed_with_options",
         2,
+        ble_option,
     );
-    assert_strict_calls(
+    assert_option_calls(
         &interfaces_rs,
         "rns_runtime::reticulum::spawn_android_usb_rnode_runtime_with_config_and_options",
         2,
+        default_option,
     );
-    assert_strict_calls(
+    assert_option_calls(
         &interfaces_rs,
         "rns_runtime::reticulum::spawn_rnode_runtime_observed_with_options",
         2,
+        default_option,
     );
-    assert_strict_calls(
+    assert_option_calls(
         &ble_rs,
         "rns_runtime::reticulum::spawn_ble_rnode_runtime_native_with_config_and_options",
         1,
+        ble_option,
     );
 
-    assert_eq!(runtime_rs.matches(strict_option).count(), 1);
-    assert_eq!(interfaces_rs.matches(strict_option).count(), 6);
-    assert_eq!(ble_rs.matches(strict_option).count(), 1);
+    assert_eq!(runtime_rs.matches(default_option).count(), 1);
+    assert_eq!(interfaces_rs.matches(default_option).count(), 4);
+    assert_eq!(ble_rs.matches(default_option).count(), 0);
+    for source in [&runtime_rs, &interfaces_rs, &ble_rs] {
+        assert_eq!(
+            source.matches(strict_option).count(),
+            0,
+            "normal Ratspeak startup must not require EEPROM capability admission"
+        );
+    }
 
     for legacy_call in ["reticulum::init", "reticulum::init_with_options"] {
         assert!(
@@ -1433,6 +1616,8 @@ fn dynamic_rnode_activity_monitors_are_exact_covered_and_ownership_gated() {
         .expect("RNode Activity monitor");
     let runtime_state =
         read_source(root.join("crates/ratspeak-runtime/src/state.rs")).expect("runtime state");
+    let runtime_lib =
+        read_source(root.join("crates/ratspeak-runtime/src/lib.rs")).expect("runtime poll loop");
 
     let pending_declaration = runtime_monitor
         .find("pub struct PendingRNodeActivityMonitor")
@@ -1443,6 +1628,9 @@ fn dynamic_rnode_activity_monitors_are_exact_covered_and_ownership_gated() {
         .expect("pending monitor attributes");
     assert!(!pending_attributes.contains("#[derive"));
     assert!(runtime_monitor.contains("origin: RNodeActivityOrigin"));
+    assert!(runtime_monitor.contains("state.set_rnode_product_readiness"));
+    assert!(runtime_state.contains("rnode_product_readiness:"));
+    assert!(runtime_state.contains("pub fn effective_interface_online("));
     let runtime_activation = rust_function_block(&runtime_monitor, "activate");
     assert!(runtime_activation.contains("self.origin"));
     assert!(
@@ -1461,10 +1649,63 @@ fn dynamic_rnode_activity_monitors_are_exact_covered_and_ownership_gated() {
         .find(".await_ready(RNODE_READINESS_TIMEOUT)")
         .expect("exact observer readiness wait");
     assert!(cover < readiness_wait, "coverage must precede readiness");
-    assert!(shared_wait.contains("covered.then(||"));
-    assert!(shared_wait.contains(
-        "PendingRNodeActivityMonitor::new(spawned.observer.clone(), ready_snapshot, origin)"
-    ));
+    assert!(shared_wait.contains("if !covered"));
+    assert!(shared_wait.contains("RnodeReadyStatsPublicationFailure::SessionReplaced"));
+    assert!(
+        shared_wait
+            .contains("state.set_rnode_product_readiness(spawned.interface_id, origin, true)")
+    );
+    assert!(shared_wait.contains("PendingRNodeActivityMonitor::new"));
+    let ready_set = shared_wait
+        .find("state.set_rnode_product_readiness(spawned.interface_id, origin, true)")
+        .expect("exact product-ready publication");
+    let semantic_revision = shared_wait
+        .find("state.bump_announce_interface_revision()")
+        .expect("Ready semantic revision");
+    let stats_barrier = shared_wait
+        .find("publish_exact_ready_stats(state, spawned, origin).await")
+        .expect("best-effort authoritative Ready stats barrier");
+    let monitor_seed = shared_wait
+        .find("PendingRNodeActivityMonitor::new")
+        .expect("pre-publication monitor seed");
+    assert!(
+        readiness_wait < ready_set
+            && ready_set < semantic_revision
+            && semantic_revision < monitor_seed
+            && monitor_seed < stats_barrier,
+        "Ready must retain its exact monitor before the best-effort stats barrier"
+    );
+    assert!(shared_wait.contains("Err(failure) => return Err(failure)"));
+
+    let stats_wait = rust_function_block(&readiness, "publish_exact_ready_stats");
+    assert!(stats_wait.contains("TransportQuery::GetInterfaceStats"));
+    assert!(stats_wait.contains("handle.query_control("));
+    assert!(stats_wait.contains("state.publish_ready_rnode_interface_stats("));
+    assert!(readiness.contains("RnodeReadyStatsPublicationFailure::Timeout"));
+    assert!(readiness.contains("RnodeReadyStatsPublicationFailure::ObservationLost"));
+    assert!(readiness.contains("RnodeReadyStatsPublicationFailure::SessionReplaced"));
+
+    let stats_projection =
+        rust_function_block(&runtime_state, "interface_stats_payload_with_readiness");
+    assert!(stats_projection.contains("entry.online && product_ready"));
+    assert!(stats_projection.contains("\"rxb\": entry.rx_bytes"));
+    assert!(stats_projection.contains("\"txb\": entry.tx_bytes"));
+    assert_eq!(
+        runtime_lib
+            .matches("state.interface_stats_payload(&s)")
+            .count(),
+        2,
+        "eager and periodic stats must share the AppState projection"
+    );
+    assert!(!runtime_lib.contains("\"rxb\": e.rx_bytes"));
+    let stats_publish = rust_function_block(&runtime_state, "publish_ready_rnode_interface_stats");
+    assert!(stats_publish.contains("entry.id == interface_id && entry.online"));
+    assert!(stats_publish.contains("Self::interface_stats_payload_with_readiness"));
+    assert!(stats_publish.contains("self.emit_to_all(\"stats_update\", snapshot)"));
+
+    let monitor_loop = rust_function_block(&runtime_monitor, "run_ready_rnode_activity_monitor");
+    assert!(monitor_loop.contains("RNodeActivitySignal::Online"));
+    assert!(monitor_loop.contains("state.bump_announce_interface_revision()"));
 
     let owned_wait = rust_function_block(&interfaces, "await_owned_rnode_ready");
     assert!(owned_wait.contains("origin: RNodeActivityOrigin"));
@@ -1528,7 +1769,7 @@ fn dynamic_rnode_activity_monitors_are_exact_covered_and_ownership_gated() {
         (
             resume,
             ".activate(Arc::clone(&st))",
-            "finish_rnode_lifecycle_operation(lease)",
+            "finish_interface_lifecycle_operation(lease)",
         ),
         (
             add,
@@ -1597,16 +1838,30 @@ fn android_ble_rnode_bridge_retries_writes_and_fallback_detaches() {
             "src-tauri/gen/android/app/src/main/java/org/ratspeak/android/RatspeakBleGatt.kt",
         ))
         .expect("android BLE GATT bridge");
+    let policy = read_source(root.join(
+        "src-tauri/gen/android/app/src/main/java/org/ratspeak/android/RatspeakMobilePolicy.kt",
+    ))
+    .expect("android BLE mobile policy");
 
     assert!(gatt.contains("private val RNODE_DETACH_FRAME = byteArrayOf("));
     assert!(gatt.contains("0xC0.toByte(), 0x06, 0x00, 0xC0.toByte()"));
     assert!(gatt.contains("0xC0.toByte(), 0x0A, 0xFF.toByte(), 0xC0.toByte()"));
-    assert!(gatt.contains("private const val BLE_WRITE_REJECT_TIMEOUT_MS"));
+    assert!(policy.contains("const val RNODE_GATT_ENQUEUE_TIMEOUT_MS = 1_200L"));
+    assert!(policy.contains("const val RNODE_GATT_CALLBACK_TIMEOUT_MS = 5_000L"));
+    assert!(policy.contains("const val RNODE_GATT_WRITE_PACING_MS = 12L"));
+    assert!(gatt.contains("RatspeakMobilePolicy.RNODE_GATT_ENQUEUE_TIMEOUT_MS"));
+    assert!(gatt.contains("RatspeakMobilePolicy.RNODE_GATT_CALLBACK_TIMEOUT_MS"));
     assert!(gatt.contains("private fun enqueueBleWriteLocked("));
     assert!(gatt.contains("attempts++"));
     assert!(gatt.contains("Thread.sleep(BLE_WRITE_REJECT_RETRY_MS)"));
-    assert!(gatt.contains("Thread.sleep(BLE_WRITE_PACING_MS)"));
-    assert!(gatt.contains("observeRustDetachBytes(readBuf, off, end)"));
+    assert!(gatt.contains("Thread.sleep(RatspeakMobilePolicy.RNODE_GATT_WRITE_PACING_MS)"));
+    assert!(gatt.contains("RatspeakMobilePolicy.RnodeWriteMode.WITH_RESPONSE"));
+    assert!(gatt.contains("NativeBridgeOutboundKissCoalescer("));
+    assert!(gatt.contains("NativeBridgeTcpWriter("));
+    assert!(gatt.contains("NativeBridgeControlQuiescence("));
+    assert!(gatt.contains("writer?.enqueueInbound(record.wire)"));
+    assert!(gatt.contains("writer?.enqueueControl(record.wire)"));
+    assert!(gatt.contains("observeRustDetachBytes(chunk.wire, 0, chunk.wire.size)"));
     assert!(gatt.contains("sendRnodeDetachFallbackIfNeeded(\"explicit disconnect\")"));
     assert!(gatt.contains("if (rustDetachObserved.get()) return"));
     assert!(gatt.contains("fun forwardClientGenerations(listener: ServerSocket)"));
@@ -2051,6 +2306,40 @@ fn linux_package_metadata_is_explicit_for_app_stores() {
             .and_then(|value| value.as_str()),
         Some(metainfo_path)
     );
+    for soname in [
+        "libayatana-appindicator3.so.1",
+        "libayatana-ido3-0.4.so.0",
+        "libayatana-indicator3.so.7",
+        "libdbusmenu-glib.so.4",
+        "libdbusmenu-gtk3.so.4",
+    ] {
+        let destination = format!("/usr/lib/{soname}");
+        let source = format!("resources/linux/appimage-runtime/{soname}");
+        assert_eq!(
+            appimage_files
+                .get(&destination)
+                .and_then(|value| value.as_str()),
+            Some(source.as_str()),
+            "AppImage must explicitly bundle {soname}"
+        );
+    }
+
+    let stage_runtime = read_source(root.join("scripts/release/stage-appimage-runtime.sh"))
+        .expect("AppImage runtime staging gate");
+    let verify_runtime = read_source(root.join("scripts/release/verify-appimage-runtime.sh"))
+        .expect("AppImage runtime verification gate");
+    for soname in [
+        "libayatana-appindicator3.so.1",
+        "libayatana-ido3-0.4.so.0",
+        "libayatana-indicator3.so.7",
+        "libdbusmenu-glib.so.4",
+        "libdbusmenu-gtk3.so.4",
+    ] {
+        assert!(stage_runtime.contains(soname));
+        assert!(verify_runtime.contains(soname));
+    }
+    assert!(verify_runtime.contains("--appimage-extract"));
+    assert!(verify_runtime.contains("LD_LIBRARY_PATH=\"$runtime_dir\" ldd"));
 
     let desktop =
         read_source(root.join("src-tauri/resources/linux/Ratspeak.desktop")).expect("desktop");
@@ -2099,6 +2388,32 @@ fn android_service_is_not_sticky_without_runtime_ownership() {
 
     assert!(service.contains("return START_NOT_STICKY"));
     assert!(!service.contains("return START_STICKY"));
+}
+
+#[test]
+fn android_ime_pipeline_matches_the_proven_v1_0_29_contract() {
+    let root = repo_root();
+    let manifest = read_source(root.join("src-tauri/gen/android/app/src/main/AndroidManifest.xml"))
+        .expect("Android manifest");
+    let activity = read_source(
+        root.join("src-tauri/gen/android/app/src/main/java/org/ratspeak/android/MainActivity.kt"),
+    )
+    .expect("Android MainActivity");
+    let nav = read_source(root.join("dashboard/static/js/nav.js")).expect("navigation source");
+
+    assert!(manifest.contains(r#"android:windowSoftInputMode="adjustResize""#));
+    assert!(activity.contains("WindowInsetsCompat.Type.ime()"));
+    assert!(activity.contains("view.setPadding(bars.left, 0, bars.right, ime.bottom)"));
+    assert!(!activity.contains("appOwnsVisibleIme"));
+    assert!(!activity.contains("inputMethod.isActive(webView)"));
+    assert!(!activity.contains("WindowInsetsCompat.Builder(insets)"));
+    assert!(!activity.contains(".setInsets(WindowInsetsCompat.Type.ime(), Insets.NONE)"));
+    assert!(!activity.contains("WindowInsetsAnimationCompat.Callback"));
+    assert!(!activity.contains("window.ratspeakApplyNativeImeGeometry"));
+    assert!(!nav.contains("function _androidImeViewportMetrics"));
+    assert!(!nav.contains("window.ratspeakApplyNativeImeGeometry"));
+    assert!(nav.contains("// Preserve the Android pipeline used through v1.0.29:"));
+    assert!(nav.contains("style.setProperty('--app-height', currentHeight + 'px')"));
 }
 
 #[test]
@@ -2206,6 +2521,51 @@ fn notifications_use_canonical_names_and_ignore_watched_game_unread() {
         !runtime_rs.contains("downloaded from relay"),
         "background Offline Inbox downloads must rely on per-message notifications"
     );
+}
+
+#[test]
+fn notification_attention_uses_visibility_not_transport_settlement_or_selected_state() {
+    let root = repo_root();
+    let state =
+        read_source(root.join("crates/ratspeak-runtime/src/state.rs")).expect("runtime state");
+    let runtime =
+        read_source(root.join("crates/ratspeak-runtime/src/lib.rs")).expect("runtime lib");
+    let voice =
+        read_source(root.join("crates/ratspeak-runtime/src/voice.rs")).expect("voice runtime");
+    let channels = read_source(root.join("crates/ratspeak-runtime/src/channels.rs"))
+        .expect("channels runtime");
+    let system = read_source(root.join("crates/ratspeak-tauri/src/commands/system.rs"))
+        .expect("system commands");
+    let mobile = read_source(root.join("src-tauri/src/mobile_native.rs")).expect("mobile shell");
+    let shell = read_source(root.join("src-tauri/src/lib.rs")).expect("tauri shell");
+    let state_js = read_source(root.join("dashboard/static/js/state.js")).expect("state js");
+    let lxmf_js = read_source(root.join("dashboard/static/js/lxmf.js")).expect("lxmf js");
+    let games_js = read_source(root.join("dashboard/static/js/games_tab.js")).expect("games js");
+
+    assert!(state.contains("notification_foreground: AtomicBool"));
+    assert!(state.contains("pub fn should_surface_native_notification(&self) -> bool"));
+    assert!(state.contains("if self.should_surface_native_notification()"));
+    assert!(
+        runtime
+            .matches("!state.should_surface_native_notification()")
+            .count()
+            >= 2
+    );
+    assert!(voice.contains("!state.should_surface_native_notification()"));
+    assert!(channels.contains("!state.should_surface_native_notification()"));
+    assert!(system.contains("state.set_notification_foreground(fg);"));
+    assert!(mobile.contains("state.set_notification_foreground(foreground);"));
+    assert!(shell.contains("state.set_notification_foreground(foreground);"));
+
+    assert!(state_js.contains("window.RS.isAttentionForeground = function()"));
+    assert!(
+        lxmf_js.contains("var conversationVisible = _isConversationActivelyVisible(msg.source)")
+    );
+    assert!(lxmf_js.contains("if (appForeground && !conversationVisible)"));
+    assert!(lxmf_js.contains("!window.__TAURI_INTERNALS__ && !appForeground"));
+    assert!(games_js.contains("!RS.isAttentionForeground()"));
+    assert!(games_js.contains("if (appForeground)"));
+    assert!(games_js.contains("!window.__TAURI_INTERNALS__ && !appForeground"));
 }
 
 #[test]
@@ -2350,11 +2710,16 @@ fn games_transport_uses_native_lxmf_fields_and_a_durable_outbox() {
     let state =
         read_source(root.join("crates/ratspeak-runtime/src/state.rs")).expect("state source");
 
+    assert!(lxmf.contains("use lxmf_core::message_api::{"));
+    assert!(!lxmf.contains("use lxmf_core::message::LxMessage"));
     assert!(lxmf.contains("apply_lrgp_fields_to_message"));
     assert!(lxmf.contains(".set_msgpack_field(field_id, bytes)"));
     assert!(games.contains("db::persist_outbound_game_action("));
     assert!(games.contains("db::rollback_outbound_game_action("));
     assert!(games.contains("reason = \"resend_required\";"));
+    assert!(games.contains("lrgp::protocol::pack_lxmf_fields"));
+    assert!(runtime.contains("lrgp::protocol::unpack_envelope"));
+    assert!(db.contains("lrgp::protocol::validate_envelope"));
     assert!(db.contains("pub fn persist_outbound_game_action("));
     assert!(db.contains("pub fn rollback_outbound_game_action("));
     assert!(!db.contains("INSERT OR REPLACE INTO app_actions"));
@@ -2363,7 +2728,10 @@ fn games_transport_uses_native_lxmf_fields_and_a_durable_outbox() {
     assert!(runtime.contains(".forget_incoming_nonce("));
     assert!(runtime.contains("fn game_delivery_state_is_in_flight(state: &str)"));
     assert!(runtime.contains("sweep_stale_game_deliveries(&tick_state).await"));
-    assert!(runtime.contains("update_game_session_delivery_state(\n                    &state,"));
+    let proof_completion =
+        rust_function_block(&runtime, "complete_authenticated_lxmf_delivery_proof");
+    assert!(proof_completion.contains(".lrgp_msg_to_session"));
+    assert!(proof_completion.contains("update_game_session_delivery_state("));
     assert!(state.contains("LrgpRouter::with_builtin_apps()"));
     assert!(!state.contains("register(Box::new(lrgp::apps::tictactoe"));
     for field in ["validation", "preferred_delivery", "ttl"] {
@@ -2401,7 +2769,11 @@ fn process_diagnostics_are_explicit_opt_in() {
 
     assert!(source.contains("fn diagnostics_enabled()"));
     assert!(source.contains("env_flag(\"RATSPEAK_DIAGNOSTICS\")"));
-    assert!(source.contains("if !diagnostics_enabled()"));
+    assert!(source.contains("fn process_diagnostics_enabled()"));
+    assert!(source.contains("fn process_diagnostics_enabled_for_build("));
+    assert!(source.contains("cfg!(all(target_os = \"ios\", debug_assertions))"));
+    assert!(source.contains("explicit_opt_in || ios_debug_build"));
+    assert!(source.contains("if !process_diagnostics_enabled()"));
     assert!(source.contains("fn diagnostic_file_enabled()"));
     assert!(source.contains("RATSPEAK_DIAGNOSTIC_FILE"));
     assert!(!source.contains("const DEFAULT_FILTER"));
@@ -2416,6 +2788,11 @@ fn process_diagnostics_are_explicit_opt_in() {
     assert!(policy.contains("pub fn target_allowed(target: &str) -> bool"));
     assert!(policy.contains("pub fn metadata_allowed(metadata: &tracing::Metadata<'_>) -> bool"));
     assert!(policy.contains("PROHIBITED_FIELD_NAMES"));
+    assert!(policy.contains(
+        "const SAFE_BLE_LIFECYCLE_TARGET: &str = \"rns_interface::ble_rnode::lifecycle\""
+    ));
+    assert!(policy.contains("const SAFE_BLE_LIFECYCLE_FIELDS: &[&str]"));
+    assert!(policy.contains("fn safe_ble_lifecycle_metadata("));
     for denied in ["rns_interface", "lxmf_core::router", "ble_diag"] {
         assert!(policy.contains(denied));
     }
@@ -2423,6 +2800,48 @@ fn process_diagnostics_are_explicit_opt_in() {
     assert!(!core.contains("spawn_ble_diag_broadcaster"));
     assert!(!ble.contains("subscribe_ble_diag"));
     assert!(!events.contains("RS.listen('ble_diag'"));
+}
+
+#[test]
+fn rsreticulum_ble_lifecycle_diagnostics_use_one_closed_privacy_safe_callsite() {
+    let root = repo_root();
+    let policy = read_source(root.join("crates/ratspeak-tauri/src/diagnostics.rs"))
+        .expect("diagnostics target policy");
+    let ble = read_source(root.join("../rsReticulum/crates/rns-interface/src/ble_rnode.rs"))
+        .expect("rsReticulum BLE RNode source");
+    let helper = rust_function_block(&ble, "trace_ble_lifecycle");
+
+    assert!(policy.contains("rns_interface::ble_rnode::lifecycle"));
+    assert_eq!(
+        ble.matches("target: BLE_LIFECYCLE_TRACE_TARGET").count(),
+        1,
+        "the reviewed target must have one structured emission callsite"
+    );
+    assert!(helper.contains("stage: &'static str"));
+    assert!(helper.contains("result_class: &'static str"));
+    assert!(helper.contains("tx_read: Option<bool>"));
+    assert!(helper.contains("tx_notify: Option<bool>"));
+    assert!(helper.contains("\"BLE RNode generation lifecycle\""));
+    assert!(helper.contains("tracing::info!("));
+    for prohibited in [
+        "address",
+        "device",
+        "error",
+        "name",
+        "packet",
+        "passkey",
+        "payload",
+        "peripheral",
+        "pin",
+        "uri",
+        "uuid",
+        "value",
+    ] {
+        assert!(
+            !helper.contains(prohibited),
+            "privacy-safe BLE lifecycle helper must not accept {prohibited}"
+        );
+    }
 }
 
 #[test]
@@ -2808,14 +3227,13 @@ fn interface_command_lifecycles_use_origin_fences_truthful_terminals_and_scoped_
     assert!(!add_lora.contains("online.load(std::sync::atomic::Ordering::SeqCst)"));
     assert!(interfaces.contains("teardown_spawned_rnode_exact(handle, spawned)"));
     let freshness_transaction = add_lora
-        .split(
-            "let (operation_lease, fresh_marker, existing_rnode_port, handoff_targets, config_written)",
-        )
-        .nth(1)
-        .and_then(|tail| tail.split("let fresh_add = fresh_marker.is_some()").next())
+        .split("if !config_written")
+        .next()
         .expect("fresh BLE add config transaction");
     assert!(freshness_transaction.contains("with_rns_config_lock"));
     assert!(freshness_transaction.contains("begin_rnode_lifecycle_operation"));
+    assert!(freshness_transaction.contains("deferred_fresh_ble_config"));
+    assert!(freshness_transaction.contains("port.starts_with(\"ble://\")"));
     let stale_clear = freshness_transaction
         .find("mark_lora_add_freshness(&config_dir, &name, false)")
         .expect("stale marker clear");
@@ -2828,6 +3246,21 @@ fn interface_command_lifecycles_use_origin_fences_truthful_terminals_and_scoped_
     assert!(stale_clear < config_write && config_write < marker_install);
     assert!(add_lora.contains("clear_fresh_lora_add_marker"));
     assert!(add_lora.contains("rollback_fresh_lora_add_marker"));
+    let readiness = add_lora
+        .find("await_owned_rnode_ready")
+        .expect("observed readiness boundary");
+    let deferred_commit = add_lora
+        .rfind("crate::rns_config::add_rnode_interface")
+        .expect("post-readiness fresh BLE config commit");
+    assert!(
+        readiness < deferred_commit,
+        "a fresh desktop BLE interface must not persist before protocol Ready"
+    );
+    let commit_tail = &add_lora[deferred_commit.saturating_sub(1_000)..];
+    assert!(commit_tail.contains("with_rns_config_lock"));
+    assert!(commit_tail.contains("is_current_rnode_lifecycle_operation"));
+    assert!(commit_tail.contains("find_config_interface_with_group"));
+    assert!(commit_tail.contains("teardown_spawned_rnode_exact"));
 
     let update_lora = interfaces
         .split("pub async fn update_lora_interface")
@@ -3333,6 +3766,58 @@ fn android_ble_gatt_close_targets_captured_connection() {
 }
 
 #[test]
+fn android_name_based_jni_boundary_is_pinned_and_final_artifacts_are_inspected() {
+    let root = repo_root();
+    let manifest: serde_json::Value = serde_json::from_str(
+        &read_source(root.join("scripts/release/android-jni-boundaries.json"))
+            .expect("Android JNI boundary manifest"),
+    )
+    .expect("valid Android JNI boundary manifest");
+    let proguard = read_source(root.join("src-tauri/gen/android/app/proguard-rules.pro"))
+        .expect("Android R8 rules");
+    let classes = manifest["classes"].as_array().expect("boundary classes");
+
+    assert_eq!(manifest["schemaVersion"], 1);
+    assert_eq!(classes.len(), 10);
+    for class in classes {
+        let name = class["name"].as_str().expect("boundary class name");
+        assert!(
+            proguard.contains(&format!("-keep class {name} {{ *; }}")),
+            "R8 must preserve name-based JNI class {name}"
+        );
+        assert!(
+            !class["methods"]
+                .as_array()
+                .expect("boundary methods")
+                .is_empty(),
+            "final artifact verifier needs methods for {name}"
+        );
+    }
+
+    let verifier = read_source(root.join("scripts/release/assert-android-jni-boundaries.py"))
+        .expect("Android JNI verifier");
+    assert!(verifier.contains("def verify_source("));
+    assert!(verifier.contains("def verify_archive("));
+    assert!(verifier.contains("defined_methods"));
+
+    let ci = read_source(root.join(".github/workflows/ci.yml")).expect("CI workflow");
+    assert!(ci.contains("cargo tauri android build --target aarch64 --apk -- --locked"));
+    assert!(ci.contains(
+        "apk=gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk"
+    ));
+    assert!(ci.contains(":app:lintArm64Release"));
+    assert!(ci.contains("assert-android-jni-boundaries.py archive"));
+    assert!(!ci.contains(":app:assembleArm64Release"));
+    assert!(!ci.contains(":app:compileArm64DebugKotlin :app:lintArm64Debug"));
+
+    let release = read_source(root.join(".github/workflows/release-android.yml"))
+        .expect("Android release workflow");
+    assert!(release.contains("Validate Android JNI boundaries in final artifacts"));
+    assert!(release.contains("-name '*.apk' -o -name '*.aab'"));
+    assert!(release.contains("assert-android-jni-boundaries.py archive"));
+}
+
+#[test]
 fn frontend_ipc_waits_and_connect_errors_are_visible() {
     let root = repo_root();
     let state_js = read_source(root.join("dashboard/static/js/state.js")).expect("state js");
@@ -3386,7 +3871,24 @@ fn frontend_ipc_waits_and_connect_errors_are_visible() {
             "settings interface actions must not swallow IPC/backend failures"
         );
     }
-    assert!(settings_js.contains("data.error === 'not_sent'"));
+    assert!(settings_js.contains("Announce queued"));
+    assert!(settings_js.contains("var _announcePending = false;"));
+    let pending_guard = settings_js
+        .find("_announcePending = true;")
+        .expect("shared announce guard is set");
+    let announce_ipc = settings_js
+        .find("RS.invoke('trigger_announce')")
+        .expect("manual announce IPC");
+    assert!(
+        pending_guard < announce_ipc,
+        "manual announce ownership must be claimed before IPC"
+    );
+    assert!(settings_js.contains("_announcePending = false;"));
+    assert!(settings_js.contains("Announce already queued"));
+    assert!(settings_js.contains("function handleManualAnnounceResult(data)"));
+    assert!(settings_js.contains("RS.invoke('trigger_announce').then(function(data)"));
+    assert!(!settings_js.contains("RS.listen('announce_triggered'"));
+    assert!(!settings_js.contains("data.error === 'not_sent'"));
     assert!(settings_js.contains("delete networkBtn.dataset.announcePending"));
     assert!(
         settings_js.contains("var ANNOUNCE_COOLDOWN = 5000;"),
@@ -3395,9 +3897,19 @@ fn frontend_ipc_waits_and_connect_errors_are_visible() {
 
     let health_js = read_source(root.join("dashboard/static/js/health.js")).expect("health js");
     assert!(health_js.contains("networkAnnounceBtn.dataset.announcePending = '1'"));
-    assert!(health_js.contains("networkAnnounceBtn.dataset.announcePending !== '1'"));
+    assert!(!health_js.contains("networkAnnounceBtn.dataset.announcePending !== '1'"));
     assert!(health_js.contains("function interfaceStatsWithoutAutoPeerDoubleCount"));
     assert!(health_js.contains("AutoInterfacePeer["));
+
+    let propagation_js =
+        read_source(root.join("dashboard/static/js/propagation.js")).expect("propagation js");
+    let host_announce = propagation_js
+        .split("var hostAnnounceBtn")
+        .nth(1)
+        .and_then(|tail| tail.split("var stampToggle").next())
+        .expect("propagation announce control");
+    assert!(host_announce.contains("tryTriggerAnnounce()"));
+    assert!(!host_announce.contains("RS.invoke('trigger_announce')"));
 
     let connections_js =
         read_source(root.join("dashboard/static/js/connections.js")).expect("connections js");
@@ -3406,7 +3918,93 @@ fn frontend_ipc_waits_and_connect_errors_are_visible() {
     let network_rs = read_source(root.join("crates/ratspeak-tauri/src/commands/network.rs"))
         .expect("network command source");
     assert!(network_rs.contains("send_manual_announce_from_origin"));
-    assert!(network_rs.contains("\"not_sent\""));
+    let trigger_announce = rust_function_block(&network_rs, "trigger_announce");
+    assert!(!trigger_announce.contains("state.lxmf.try_lock()"));
+    assert!(!trigger_announce.contains("state.lxmf.lock()"));
+    assert!(trigger_announce.contains("any_interface_online_cached"));
+    assert!(!trigger_announce.contains("TransportQuery::GetInterfaceStats"));
+    assert!(!network_rs.contains("\"announce_triggered\""));
+    assert!(!network_rs.contains("\"not_sent\""));
+    assert!(!network_rs.contains("Duration::from_millis(450)"));
+
+    let runtime_rs =
+        read_source(root.join("crates/ratspeak-runtime/src/lib.rs")).expect("runtime source");
+    assert!(runtime_rs.contains("match state.lxmf.try_lock()"));
+    assert!(
+        runtime_rs
+            .contains("const ANNOUNCE_LXMF_BUILD_RETRY_WINDOW: Duration = Duration::from_secs(30)")
+    );
+    assert!(runtime_rs.contains("ANNOUNCE_LXMF_BUILD_RETRY_INTERVAL"));
+    assert!(runtime_rs.contains("leadership.revisions.identity"));
+    assert!(runtime_rs.contains("current_identity_session_generation()"));
+    assert!(runtime_rs.contains("ANNOUNCE_QUEUE_ADMISSION_WAIT"));
+    assert_eq!(
+        runtime_rs
+            .matches("state.interface_stats_payload(&s)")
+            .count(),
+        2,
+        "eager and polling stats must share the canonical row projection"
+    );
+    let submit = rust_function_block(&runtime_rs, "submit_announce_intent");
+    assert!(submit.contains("tokio::spawn(async move"));
+    assert!(submit.contains("run_announce_lifecycle("));
+    let lifecycle = rust_function_block(&runtime_rs, "run_announce_lifecycle");
+    assert!(
+        lifecycle.contains(
+            "let success = matches!(report.disposition, AnnounceSendDisposition::Queued)"
+        )
+    );
+    let burst = rust_function_block(&runtime_rs, "execute_announce_burst");
+    let packet_build = burst
+        .find("try_build_presence_announce_packets")
+        .expect("cooperative LXMF packet build");
+    let transport_capture = burst
+        .find("mgr.handle.transport_tx.clone()")
+        .expect("post-build current transport capture");
+    assert!(packet_build < transport_capture);
+    assert!(burst.contains("state.is_current_activity_origin_fence(activity_origin)"));
+    assert!(burst.contains("state.identity_switch_lock.lock().await"));
+    assert!(
+        burst.contains("is_current_activity_request_fence_after_identity_lock(activity_origin)")
+    );
+    assert!(burst.contains("any_interface_online_cached(state)"));
+    assert!(!burst.contains("report.disposition = AnnounceSendDisposition::AlreadyQueued"));
+    assert!(!runtime_rs.contains("announce waited on lxmf manager lock"));
+}
+
+#[test]
+fn lxmf_persistence_and_announce_dispatch_do_not_conflate_ownership_boundaries() {
+    let root = repo_root();
+    let runtime = read_source(root.join("crates/ratspeak-runtime/src/lib.rs")).unwrap();
+    let prune = read_source(root.join("crates/ratspeak-runtime/src/identity_prune.rs")).unwrap();
+    let persistence =
+        read_source(root.join("crates/ratspeak-runtime/src/lxmf_persistence.rs")).unwrap();
+    let handlers =
+        read_source(root.join("crates/ratspeak-runtime/src/announce_handlers.rs")).unwrap();
+    let lxmf = read_source(root.join("crates/ratspeak-runtime/src/lxmf.rs")).unwrap();
+    let catalog =
+        read_source(root.join("crates/ratspeak-runtime/src/activity/catalog.rs")).unwrap();
+
+    assert!(!runtime.contains("mgr.save_crypto_state()"));
+    assert!(!prune.contains("mgr.save_crypto_state()"));
+    assert!(!handlers.contains("mgr.save_router_state()"));
+    assert!(prune.contains("manager.known_identities_snapshot()"));
+    assert!(prune.contains("delete_prunable_identity_activity_after("));
+    assert!(prune.contains("snapshot.persist()"));
+    assert!(prune.contains("identity_prune_rollback"));
+    assert!(persistence.contains("manager.checkpoint_snapshot()"));
+    assert!(persistence.contains("run_blocking(reason, 2"));
+    assert!(persistence.contains("blocked_checkpoint_io_never_holds_live_lxmf_manager"));
+    assert!(persistence.contains("failed_identity_and_ratchet_delta_remain_dirty_for_retry"));
+    assert!(persistence.contains("delete_expired_received_ratchets"));
+    assert!(lxmf.contains("pending_expired_received_ratchets"));
+    assert!(!lxmf.contains("clean_received_ratchets_dir"));
+    assert!(!lxmf.contains("purge_expired_ratchets_in_memory"));
+    assert!(runtime.contains("TransportMessage::SendPacket"));
+    assert!(runtime.contains("OutboundDispatchResult::Sent"));
+    assert!(runtime.contains("announce accepted by Reticulum interface layer"));
+    assert!(catalog.contains("kinds::RNS_ANNOUNCE_QUEUED"));
+    assert!(catalog.contains("ActivityOutcome::Success"));
 }
 
 #[test]
@@ -3754,10 +4352,14 @@ fn interface_pause_resume_is_config_backed_and_visible() {
     assert!(health_js.contains("label: 'Rename'"));
     assert!(health_js.contains("pause_interface"));
     assert!(health_js.contains("resume_interface"));
-    assert!(health_js.contains("conn-iface-pill-paused"));
-    assert!(health_js.contains("waitingForAndroidUsb"));
+    assert!(health_js.contains(r#"conn-iface-status-text">Paused"#));
+    assert!(!health_js.contains("conn-iface-pill-paused"));
+    assert!(health_js.contains("function _configuredInterfaceFallback"));
+    assert!(health_js.contains("var fallback = _configuredInterfaceFallback"));
     assert!(health_js.contains("Waiting for USB"));
-    assert!(health_js.contains("enabled && !waitingForAndroidUsb"));
+    assert!(health_js.contains("connecting: fallback.connecting"));
+    assert!(health_js.contains("else if (connecting)"));
+    assert!(!health_js.contains("waitingForAndroidUsb"));
     assert!(!health_js.contains("Display Name"));
     assert!(!health_js.contains("dangerDivider"));
 
@@ -3770,17 +4372,20 @@ fn interface_pause_resume_is_config_backed_and_visible() {
         .expect("interfaces commands");
     assert!(interfaces_rs.contains("pub async fn pause_interface"));
     assert!(interfaces_rs.contains("pub async fn resume_interface"));
+    assert!(interfaces_rs.contains("set_exact_interface_enabled(&config_dir, &name, false)"));
+    assert!(interfaces_rs.contains("set_exact_interface_enabled(&config_dir, &name, true)"));
     assert!(
         interfaces_rs
-            .contains("crate::rns_config::set_interface_enabled(&config_dir, &name, false)")
+            .matches("begin_interface_lifecycle_operation([&name])")
+            .count()
+            >= 2
     );
-    assert!(
-        interfaces_rs
-            .contains("crate::rns_config::set_interface_enabled(&config_dir, &name, true)")
-    );
+    assert!(interfaces_rs.contains("is_current_interface_lifecycle_operation(lease)"));
+    assert!(interfaces_rs.contains("outcome.interface_id"));
     assert!(interfaces_rs.contains("teardown_live_interface_by_name(&st, &iface_name"));
     assert!(interfaces_rs.contains("resolve_android_usb_runtime_selector"));
     assert!(interfaces_rs.contains("preflight_android_usb_selector_for_interface"));
+    assert!(interfaces_rs.contains("iface_type.as_deref(),\n        &name,"));
     assert!(interfaces_rs.contains("request_android_usb_permission"));
     assert!(!interfaces_rs.contains("format!(\"TCP to {}:{}\""));
 
@@ -4003,13 +4608,14 @@ fn empty_ghost_conversations_are_removed_when_leaving_chat_detail() {
     assert!(lxmf.contains("function _onChatDetailExit()"));
     assert!(lxmf.contains("function _conversationHasVisibleMessages()"));
     assert!(lxmf.contains("function _mergeOptimisticConversation(convos)"));
-    assert!(lxmf.contains(
-        "if (!_ghostConversationHash || _ghostConversationHash !== exitingHash) return;"
-    ));
+    assert!(
+        lxmf.contains("if (!_ghostConversationHash || _ghostConversationHash !== exitingHash)")
+    );
+    assert!(lxmf.contains("_activateConversation(null, 'left_conversation');"));
     assert!(lxmf.contains("if (_conversationHasVisibleMessages())"));
     assert!(lxmf.contains("_removeGhostRow();"));
     assert!(lxmf.contains("cacheDel(exitingHash);"));
-    assert!(lxmf.contains("lxmfActiveContact = null;"));
+    assert!(lxmf.contains("_activateConversation(null, 'left_conversation');"));
     assert!(lxmf.contains("lxmfConversation = [];"));
     assert!(lxmf.contains("convos = _mergeOptimisticConversation(convos);"));
     assert!(lxmf.contains("_renderConversationsFromCache(lxmfConversations || []);"));
@@ -4037,7 +4643,9 @@ fn message_composer_send_preserves_preexisting_focus_state() {
 
     assert!(lxmf.contains("function _captureLxmfSendFocusState()"));
     assert!(lxmf.contains("function _consumeLxmfSendFocusState(input)"));
-    assert!(lxmf.contains("function _finishLxmfComposerSend(input, shouldRestoreFocus)"));
+    assert!(
+        lxmf.contains("function _finishLxmfComposerSend(input, shouldRestoreFocus, targetHash)")
+    );
     // Send button uses split touchstart/mousedown handlers with non-passive
     // preventDefault to keep the soft keyboard up while the long-press timer
     // runs. Both wire `_captureLxmfSendFocusState` so the existing focus-
@@ -4049,7 +4657,10 @@ fn message_composer_send_preserves_preexisting_focus_state() {
         send_function
             .contains("var shouldRestoreComposerFocus = _consumeLxmfSendFocusState(input);")
     );
-    assert!(send_function.contains("_finishLxmfComposerSend(input, shouldRestoreComposerFocus);"));
+    assert!(
+        send_function
+            .contains("_finishLxmfComposerSend(input, shouldRestoreComposerFocus, targetHash);")
+    );
     assert!(
         !send_function.contains("input.focus();"),
         "send must not unconditionally focus the composer after a button send"
@@ -4058,6 +4669,9 @@ fn message_composer_send_preserves_preexisting_focus_state() {
     assert!(ui_shared.contains("RS.composer.consumeFocus = function(input)"));
     assert!(ui_shared.contains("RS.composer.focusWithoutScroll = function(input)"));
     assert!(ui_shared.contains("RS.composer.bindTapToSend = function(button, input, onSend)"));
+    assert!(ui_shared.contains("RS.composer.bindTypingPolicy = function(input)"));
+    assert!(lxmf.contains("RS.composer.bindTypingPolicy(textarea);"));
+    assert!(channels.contains("RS.composer.bindTypingPolicy(input);"));
     assert!(channels.contains("RS.composer.bindTapToSend(send, input, channelsSendMessage)"));
     assert!(channels.contains("var shouldRestoreComposerFocus = RS.composer"));
     assert!(channels.contains("RS.composer.consumeFocus(input)"));
@@ -4151,14 +4765,15 @@ fn message_camera_and_photo_attachment_flow_is_native_and_previewed() {
         lxmf.contains("{ label: 'Video', icon: ICON_VIDEO, onSelect: triggerVideoAttachment }")
     );
     assert!(lxmf.contains("function _pendingAttachmentName(file)"));
-    assert!(lxmf.contains("function _stripImageMetadataForShare(file)"));
-    assert!(lxmf.contains("ctx.drawImage(decoded.source"));
-    assert!(lxmf.contains("metadata_stripped: true"));
-    assert!(lxmf.contains("Could not remove image metadata; image not attached"));
+    assert!(lxmf.contains("function _chooseImageSize(file, inspection)"));
+    assert!(lxmf.contains("RS.invoke('inspect_image_attachment_stage'"));
+    assert!(lxmf.contains("RS.invoke('prepare_image_attachment_stage'"));
+    assert!(lxmf.contains("meta: '~' + prettySize(estimate)"));
+    assert!(lxmf.contains("Location and camera details are removed."));
+    assert!(!lxmf.contains("createImageBitmap("));
+    assert!(!lxmf.contains("document.createElement('canvas')"));
     assert!(lxmf.contains("pending-file-thumbnail"));
-    assert!(lxmf.contains(
-        "pendingFile.preview_url = isImage ? URL.createObjectURL(pendingFile.blob) : null;"
-    ));
+    assert!(lxmf.contains("pendingFile.preview_url = _imagePreviewUrl("));
     assert!(lxmf.contains("escapeHtml(lxmfPendingFile.preview_url || '')"));
     assert!(lxmf.contains("URL.revokeObjectURL(pending.preview_url)"));
     assert!(lxmf.contains("container.classList.toggle('pending-file-has-image', isImage);"));
@@ -4169,6 +4784,51 @@ fn message_camera_and_photo_attachment_flow_is_native_and_previewed() {
     assert!(messaging_css.contains(".pending-file-thumbnail img"));
     assert!(messaging_css.contains("object-fit: cover;"));
     assert!(messaging_css.contains(".pending-file-copy"));
+}
+
+#[test]
+fn image_size_choices_are_bounded_shared_and_outcome_level() {
+    let root = repo_root();
+    let runtime = read_source(root.join("crates/ratspeak-runtime/src/image_attachment.rs"))
+        .expect("image attachment runtime");
+    let state =
+        read_source(root.join("crates/ratspeak-runtime/src/state.rs")).expect("runtime state");
+    let messaging = read_source(root.join("crates/ratspeak-tauri/src/commands/messaging.rs"))
+        .expect("messaging commands");
+    let shell = read_source(root.join("src-tauri/src/lib.rs")).expect("tauri shell");
+    let dialogs = read_source(root.join("dashboard/static/js/dialogs.js")).expect("shared dialogs");
+    let lxmf = read_source(root.join("dashboard/static/js/lxmf.js")).expect("messaging js");
+
+    assert!(runtime.contains("pub const IMAGE_SIZE_PROMPT_BYTES: usize = 1_000_000;"));
+    assert!(runtime.contains("Self::Small => Some(250_000)"));
+    assert!(runtime.contains("Self::Medium => Some(750_000)"));
+    assert!(runtime.contains("Self::Large => Some(2_000_000)"));
+    assert!(runtime.contains("pub const IMAGE_MAX_PIXELS: u64 = 16_000_000;"));
+    assert!(runtime.contains("pub const IMAGE_PREVIEW_MAX_EDGE: u32 = 192;"));
+    assert!(runtime.contains("Animated images must be sent as files"));
+    assert!(runtime.contains("original.apply_orientation(orientation)"));
+    assert!(state.contains("pub image_preparation_lock: tokio::sync::Mutex<()>"));
+    assert!(state.contains("!staged.image_preparing"));
+    assert!(state.contains("finish_staged_image_preparation"));
+    assert!(messaging.contains("tokio::task::spawn_blocking(move ||"));
+    assert!(messaging.contains("prepare_image_attachment("));
+    assert!(messaging.contains("\"image_size_prompt_bytes\""));
+    for command in [
+        "inspect_image_attachment_stage",
+        "prepare_image_attachment_stage",
+        "mark_image_attachment_stage_as_file",
+    ] {
+        assert!(shell.contains(command));
+    }
+    assert!(dialogs.contains("function rsChoice(opts)"));
+    assert!(dialogs.contains("opts.sheetClass"));
+    assert!(dialogs.contains("rs-dialog-choice-meta"));
+    assert!(lxmf.contains("sheetClass: 'image-size-sheet'"));
+    assert!(lxmf.contains("title: 'Photo size'"));
+    assert!(lxmf.contains("meta: '~' + prettySize(estimate)"));
+    assert!(lxmf.contains("if (pendingAttachment.preparing)"));
+    assert!(!lxmf.contains("createImageBitmap("));
+    assert!(!lxmf.contains("document.createElement('canvas')"));
 }
 
 #[test]
@@ -4188,7 +4848,7 @@ fn message_media_viewer_links_and_native_saves_are_wired() {
     assert!(lxmf.contains("function _syncImageViewerActions(viewer)"));
     assert!(lxmf.contains("copyBtn.hidden = !canCopy;"));
     assert!(lxmf.contains("_saveDownloadedMediaFile(file, { preferPhotos: true })"));
-    assert!(lxmf.contains("Saved to photos!"));
+    assert!(lxmf.contains("Saved to Photos"));
     assert!(lxmf.contains("function _compensateImageLoadScroll(container, img, before)"));
     assert!(lxmf.contains("function _messageHasTransferPayload(msg)"));
     assert!(lxmf.contains("function _messageCanCancelSend(msg)"));
@@ -4201,7 +4861,8 @@ fn message_media_viewer_links_and_native_saves_are_wired() {
     assert!(lxmf.contains("lxmfLimits.efficient_resource_bytes || 1048575"));
     assert!(lxmf.contains("if (!_messageShowsTransferPercent(msg)) return null;"));
     assert!(lxmf.contains("if (!_messageCanCancelSend(msg)) return '';"));
-    assert!(lxmf.contains("aria-label=\"Cancel send\">Cancel</button>"));
+    assert!(lxmf.contains("aria-label=\"Cancel sending message\">Cancel</button>"));
+    assert!(lxmf.contains("message: 'Cancel preparation and retries for this message?'"));
     assert!(lxmf.contains("canCancelSend ? _messageInlineCancelHtml(msg) : '<span class=\"msg-time\">' + time + '</span>'"));
 
     let state_js = read_source(root.join("dashboard/static/js/state.js")).expect("state js");
@@ -4264,6 +4925,15 @@ fn voice_and_capture_paths_preflight_media_permissions() {
             "src-tauri/gen/android/app/src/main/java/org/ratspeak/android/RatspeakCallAudio.kt",
         ))
         .expect("Android call audio owner");
+    let memo_audio = read_source(root.join(
+        "src-tauri/gen/android/app/src/main/java/org/ratspeak/android/RatspeakVoiceMemoAudio.kt",
+    ))
+    .expect("Android voice memo audio owner");
+    let service =
+        read_source(root.join(
+            "src-tauri/gen/android/app/src/main/java/org/ratspeak/android/RatspeakService.kt",
+        ))
+        .expect("Android foreground service");
     assert!(activity.contains("MEDIA_PERMISSION_REQUEST_CODE"));
     assert!(activity.contains("fun hasMediaPermissions(audio: Boolean, camera: Boolean): Boolean"));
     assert!(activity.contains(
@@ -4298,6 +4968,15 @@ fn voice_and_capture_paths_preflight_media_permissions() {
     assert!(call_audio.contains("RatspeakMobilePolicy.callSessionOwns(ownerToken, sessionToken)"));
     assert!(activity.contains("RatspeakVoiceAudio.stop()"));
     assert!(call_audio.contains("fun stopForSession("));
+    assert!(service.contains("CountDownLatch"));
+    assert!(service.contains("ensureReadyForMicrophoneCapture"));
+    assert!(service.contains("ready.await"));
+    assert!(memo_audio.contains("fun lastStartFailureCode(): String"));
+    assert!(memo_audio.contains("lateinit var listener"));
+    assert!(memo_audio.contains("voiceMemoInterruptionOwns"));
+    assert!(memo_audio.contains("RatspeakAndroidObservers.voiceMemoAudioInterruption"));
+    assert!(activity.contains("isVoiceMemoAudioSessionActive(token)"));
+    assert!(activity.contains("handleAudioInterruption"));
 
     let voice_audio = read_source(root.join(
         "src-tauri/gen/android/app/src/main/java/org/ratspeak/android/RatspeakVoiceAudio.kt",
@@ -4305,6 +4984,12 @@ fn voice_and_capture_paths_preflight_media_permissions() {
     .expect("android voice audio");
     assert!(voice_audio.contains("object RatspeakVoiceAudio"));
     assert!(voice_audio.contains("AudioAttributes.USAGE_VOICE_COMMUNICATION"));
+    assert!(voice_audio.contains("AudioAttributes.USAGE_MEDIA"));
+    assert!(voice_audio.contains("fun startVoiceMemoPlayback("));
+    assert!(voice_audio.contains("fun playbackHeadFrames(): Long"));
+    assert!(voice_audio.contains("fun voiceMemoStartupPrimeFrames(): Long"));
+    assert!(voice_audio.contains("fun voiceMemoPlaybackStarted(): Boolean"));
+    assert!(voice_audio.contains("fun finishVoiceMemoInput(): Boolean"));
     assert!(voice_audio.contains("AudioAttributes.CONTENT_TYPE_SPEECH"));
     assert!(voice_audio.contains("AudioFormat.ENCODING_PCM_FLOAT"));
     assert!(voice_audio.contains("AudioFormat.ENCODING_PCM_16BIT"));
@@ -4312,7 +4997,23 @@ fn voice_and_capture_paths_preflight_media_permissions() {
     assert!(voice_audio.contains("AudioTrack.WRITE_BLOCKING"));
     assert!(voice_audio.contains("AudioTrack.WRITE_NON_BLOCKING"));
     assert!(voice_audio.contains("setStartThresholdInFrames"));
-    assert!(voice_audio.contains("if (written > 0 && starting)"));
+    assert!(voice_audio.contains("RatspeakMobilePolicy.voiceMemoStartupFrames("));
+    assert!(voice_audio.contains("active.startThresholdInFrames"));
+    assert!(voice_audio.contains("trackSubmittedFrames += writtenFrames.toLong()"));
+    let memo_encoding_order = voice_audio
+        .split("if (usage == AudioAttributes.USAGE_MEDIA)")
+        .nth(1)
+        .and_then(|source| source.split("} else {").next())
+        .expect("voice memo encoding preference");
+    let memo_pcm16 = memo_encoding_order
+        .find("AudioFormat.ENCODING_PCM_16BIT")
+        .expect("voice memos prefer PCM16");
+    let memo_float = memo_encoding_order
+        .find("AudioFormat.ENCODING_PCM_FLOAT")
+        .expect("voice memos retain float fallback");
+    assert!(memo_pcm16 < memo_float);
+    assert!(voice_audio.contains("if (written > 0)"));
+    assert!(voice_audio.contains("maybeStartAfterWrite(active)"));
     assert!(!voice_audio.contains("created.play()"));
     let first_write = voice_audio
         .find("val written = if (trackEncoding")
@@ -4369,6 +5070,19 @@ fn voice_and_capture_paths_preflight_media_permissions() {
     assert!(lxmf.contains("function _voiceBlockMobileNavigation(ms)"));
     assert!(lxmf.contains("var dialToken = ++_voiceDialToken;"));
     assert!(lxmf.contains("function _voiceCancelMemoForCall()"));
+    assert!(lxmf.contains("var _voiceAnswerToken = 0;"));
+    assert!(lxmf.contains("function _voiceIncomingIsExact(linkId)"));
+    assert!(lxmf.contains("RS.invoke('voice_answer', { args: { link_id: expectedLinkId } })"));
+    let answer_call = lxmf
+        .split("function _voiceAnswerCall()")
+        .nth(1)
+        .and_then(|tail| tail.split("function _voiceRejectCall()").next())
+        .expect("voice answer function");
+    assert!(answer_call.contains("incoming.status = 'answering';"));
+    assert!(answer_call.contains("_voiceIncomingIsExact(expectedLinkId)"));
+    assert!(!answer_call.contains("lxstVoiceState.incoming = null"));
+    assert!(lxmf.contains("if (!incoming || incoming.status !== 'ringing')"));
+    assert!(lxmf.contains("var terminatedMatches = (!data.link_id) ||"));
     assert!(lxmf.contains(
         "return _voiceCancelMemoForCall().then(_voiceAfterNextPaint).then(_voiceEnsurePlaybackReady).then(_voiceEnsureMicrophonePermission)"
     ));
@@ -4426,6 +5140,16 @@ fn voice_and_capture_paths_preflight_media_permissions() {
 
     let voice_rs =
         read_source(root.join("crates/ratspeak-runtime/src/voice.rs")).expect("voice rs");
+    assert!(voice_rs.contains("TelephonyService::registered_with_config("));
+    assert!(voice_rs.contains("fn coordinated_telephony_service_config()"));
+    assert!(voice_rs.contains("announce_on_start: false"));
+    assert!(voice_rs.contains("announce_interval: None"));
+    assert!(voice_rs.contains("startup_announce_retry_interval: None"));
+    assert!(voice_rs.contains("shutdown_voice_service_for_runtime_teardown"));
+    assert!(voice_rs.contains("if publish_presence_update"));
+    assert!(!voice_rs.contains("TelephonyRnsEndpoint"));
+    assert!(!voice_rs.contains("TelephonyRuntimeCore"));
+    assert!(!voice_rs.contains("TelephonyService::new("));
     assert!(voice_rs.contains("fn notify_incoming_call_if_background("));
     assert!(voice_rs.contains("NativeNotification::call("));
     assert!(voice_rs.contains("Incoming call from {label}"));
@@ -4443,6 +5167,15 @@ fn voice_and_capture_paths_preflight_media_permissions() {
     assert!(voice_rs.contains("pub async fn announce_if_running(state: &AppState)"));
     assert!(voice_rs.contains("static VOICE_MICROPHONE_MUTED: AtomicBool"));
     assert!(voice_rs.contains("pub fn set_microphone_muted("));
+    assert!(voice_rs.contains("request_answer(&tx, expected_link_id)"));
+    assert!(voice_rs.contains("\"snapshot\": snapshot"));
+    assert!(voice_rs.contains("*persisted = Some(payload.clone());"));
+    assert!(lxmf.contains("if (status && status.snapshot)"));
+    assert!(lxmf.contains("_voiceHandleUpdate(status.snapshot);"));
+    let voice_command = read_source(root.join("crates/ratspeak-tauri/src/commands/voice.rs"))
+        .expect("voice command");
+    assert!(voice_command.contains("pub struct VoiceAnswerArgs"));
+    assert!(voice_command.contains("crate::voice::answer(&app_state, expected_link_id)"));
     assert!(voice_rs.contains("enum VoiceAudioControl"));
     assert!(voice_rs.contains("RestartSpeaker { speakerphone: bool }"));
     assert!(voice_rs.contains("async fn restart_speaker("));
@@ -4466,8 +5199,31 @@ fn voice_and_capture_paths_preflight_media_permissions() {
 
     let runtime_rs =
         read_source(root.join("crates/ratspeak-runtime/src/lib.rs")).expect("runtime lib");
-    assert!(runtime_rs.contains("voice::announce_if_running(state).await"));
-    assert!(runtime_rs.contains("producer::AnnounceMethod::LxstService"));
+    assert!(runtime_rs.contains("voice::announce_if_running(state),"));
+    assert!(runtime_rs.contains("report.lxst_queued = true"));
+    assert!(runtime_rs.contains("voice::shutdown_voice_service_for_runtime_teardown(state).await"));
+    let presence_burst = rust_function_block(&runtime_rs, "execute_announce_burst");
+    let presence_build = rust_function_block(&runtime_rs, "try_build_presence_announce_packets");
+    let propagation_build = presence_build
+        .find("create_propagation_announce_packet()")
+        .expect("propagation component build");
+    let delivery_build = presence_build
+        .find("create_coordinated_announce_packet()")
+        .expect("delivery component build");
+    assert!(
+        propagation_build < delivery_build,
+        "a failed sibling build must not consume the delivery ratchet"
+    );
+    assert!(presence_burst.contains("if report.lxmf_delivery_queued"));
+    assert_eq!(
+        presence_burst.matches("tokio::time::timeout(").count(),
+        3,
+        "transport admission, interface dispatch and LXST admission must remain bounded"
+    );
+    assert!(
+        presence_burst
+            .contains("LXST telephony announce suppressed because delivery was not admitted")
+    );
 
     let notification_rs =
         read_source(root.join("crates/ratspeak-core/src/notification.rs")).expect("notification");
@@ -4481,6 +5237,7 @@ fn voice_and_capture_paths_preflight_media_permissions() {
     assert!(notifier_rs.contains("NativeNotificationKind::Call => \"ratspeak_calls\""));
     assert!(notifier_rs.contains("| ratspeak_core::NativeNotificationKind::Channel"));
     assert!(notifier_rs.contains("builder.action_type_id(thread_id)"));
+    assert!(notifier_rs.contains("builder = builder.sound(\"default\")"));
     let tauri_events =
         read_source(root.join("dashboard/static/js/tauri_events.js")).expect("tauri events");
     assert!(tauri_events.contains("notification.actionTypeId"));
@@ -4541,10 +5298,10 @@ fn voice_and_capture_paths_preflight_media_permissions() {
     assert!(activity.contains("track.setLoopPoints(0, frameCount, -1)"));
 
     let index = read_source(root.join("dashboard/index.html")).expect("dashboard index");
-    assert!(index.contains("/static/js/state.js?v=ui-20260804"));
-    assert!(index.contains("/static/js/voice_ringtones.js?v=ui-20260804"));
-    assert!(index.contains("/static/js/lxmf.js?v=ui-20260804"));
-    assert!(index.contains("/static/js/tauri_events.js?v=ui-20260804"));
+    assert!(index.contains("/static/js/state.js?v=ui-20260826-1"));
+    assert!(index.contains("/static/js/voice_ringtones.js?v=ui-20260826-1"));
+    assert!(index.contains("/static/js/lxmf.js?v=ui-20260826-1"));
+    assert!(index.contains("/static/js/tauri_events.js?v=ui-20260826-1"));
     assert!(index.contains("id=\"lxst-call-global-mute-btn\""));
     assert!(index.contains("id=\"lxst-call-global-speaker-btn\""));
     assert!(index.contains("id=\"lxst-call-mute-btn\""));
@@ -4603,7 +5360,6 @@ fn ios_project_model_owns_app_store_info_declarations() {
         "CFBundleURLTypes",
         "NSBluetoothAlwaysUsageDescription",
         "NSBluetoothPeripheralUsageDescription",
-        "NSBonjourServices",
         "NSCameraUsageDescription",
         "NSLocalNetworkUsageDescription",
         "NSMicrophoneUsageDescription",
@@ -4624,6 +5380,38 @@ fn ios_project_model_owns_app_store_info_declarations() {
             "generated Info.plist must contain {mode}"
         );
     }
+}
+
+#[test]
+fn ios_voice_capture_classifies_higher_priority_microphone_ownership() {
+    let root = repo_root();
+    let platform = read_source(root.join("crates/ratspeak-runtime/src/platform_ios.rs"))
+        .expect("iOS platform audio bridge");
+    let commands = read_source(root.join("crates/ratspeak-tauri/src/commands/voice.rs"))
+        .expect("voice commands");
+
+    assert!(platform.contains("AV_AUDIO_SESSION_ERROR_INSUFFICIENT_PRIORITY"));
+    assert!(platform.contains("AV_AUDIO_SESSION_ERROR_SIRI_IS_RECORDING"));
+    assert!(platform.contains("msg_send![error, code]"));
+    assert!(platform.contains("Another app or call is using the microphone"));
+    assert!(commands.contains("microphone_in_use"));
+    assert!(commands.contains("AppError::conflict(VOICE_MEMO_AUDIO_BUSY)"));
+    assert!(!commands.contains("tracing::warn!(error"));
+}
+
+#[test]
+fn ios_project_links_runtime_resolved_audio_without_copying_rust_archives() {
+    let root = repo_root();
+    let model =
+        read_source(root.join("src-tauri/gen/apple/project.yml")).expect("iOS project model");
+    let generated =
+        read_source(root.join("src-tauri/gen/apple/ratspeak.xcodeproj/project.pbxproj"))
+            .expect("generated iOS project");
+
+    assert!(model.contains("- path: Externals\n        excludes:\n          - \"**/*.a\""));
+    assert!(model.contains("- sdk: AVFAudio.framework"));
+    assert!(generated.contains("AVFAudio.framework in Frameworks"));
+    assert!(!generated.contains("libapp.a in Resources"));
 }
 
 #[test]
@@ -4747,8 +5535,17 @@ fn active_call_surface_is_passive_and_shows_elapsed_duration() {
 #[test]
 fn settings_version_display_uses_package_version_api() {
     let root = repo_root();
+    let dependency_set: serde_json::Value = serde_json::from_str(
+        &read_source(root.join("release/dependency-set.json")).expect("dependency set"),
+    )
+    .expect("valid dependency set");
     let version_file = read_source(root.join("VERSION")).expect("display version");
-    assert_eq!(version_file.trim(), "1.0.26e");
+    assert_eq!(
+        version_file.trim(),
+        dependency_set["product"]["displayVersion"]
+            .as_str()
+            .expect("display version")
+    );
 
     let system_rs =
         read_source(root.join("crates/ratspeak-tauri/src/commands/system.rs")).expect("system rs");
@@ -4834,7 +5631,20 @@ fn settings_version_display_uses_package_version_api() {
     assert!(
         tauri_conf.contains("connect-src 'self' ipc: http://ipc.localhost https://api.github.com")
     );
-    assert!(tauri_conf.contains(r#""versionCode": 1000034"#));
+    let tauri_conf_json: serde_json::Value =
+        serde_json::from_str(&tauri_conf).expect("valid Tauri config");
+    assert_eq!(
+        tauri_conf_json["bundle"]["android"]["versionCode"],
+        dependency_set["product"]["platformBuilds"]["androidVersionCode"]
+    );
+    assert_eq!(
+        tauri_conf_json["bundle"]["iOS"]["bundleVersion"],
+        dependency_set["product"]["platformBuilds"]["iosBundleVersion"]
+    );
+    assert_eq!(
+        tauri_conf_json["bundle"]["resources"]["../third_party/opus-rs-0.1.29-COPYING"],
+        "third-party/opus-rs-0.1.29-COPYING.txt"
+    );
 
     let android_gradle = read_source(root.join("src-tauri/gen/android/app/build.gradle.kts"))
         .expect("android gradle");
@@ -4844,77 +5654,343 @@ fn settings_version_display_uses_package_version_api() {
 }
 
 #[test]
-fn release_workflows_pin_v1_0_26d_and_stage_tag_builds_as_prereleases() {
+fn release_workflows_build_once_and_publish_only_after_complete_aggregation() {
     let root = repo_root();
-    let rsreticulum_commit = "RATSPEAK_RSRETICULUM_REF: a1b78564e08988c11f8ecac80c3ea6d596b22cab";
-    let rslxmf_commit = "RATSPEAK_RSLXMF_REF: 681c0f5961acce637183efc9a4047bf25ead56bf";
-    let dependency_refs = [
-        "RATSPEAK_RSRETICULUM_REF: ratspeak-v1.0.26d",
-        "RATSPEAK_RSLXMF_REF: ratspeak-v1.0.26d",
-        "RATSPEAK_RSLXST_REF: ratspeak-v1.0.26d",
-        "RATSPEAK_LRGP_REF: ratspeak-v1.0.26d",
+    let dependency_set: serde_json::Value = serde_json::from_str(
+        &read_source(root.join("release/dependency-set.json")).expect("dependency set"),
+    )
+    .expect("valid dependency set");
+    let components = dependency_set["components"]
+        .as_array()
+        .expect("component array");
+    let release_note_fragments = [
+        "Prevented app-managed shared Reticulum instances on Linux and Android",
+        "Restored mobile keyboard avoidance across Direct Messages",
+        "Enabled iOS notification sounds when permitted",
+        "Hardened voice messages across Android versions",
+        "Aligned Channel receive-window handling with Reticulum 1.4.2",
     ];
-
-    for workflow_path in [
-        ".github/workflows/release-android.yml",
-        ".github/workflows/release-desktop.yml",
-        ".github/workflows/release-macos.yml",
-        ".github/workflows/release-windows.yml",
-    ] {
-        let workflow = read_source(root.join(workflow_path)).expect("release workflow");
-        for dependency_ref in dependency_refs {
-            assert!(
-                workflow.contains(dependency_ref),
-                "{workflow_path} must pin {dependency_ref}"
-            );
-        }
-        assert!(workflow.contains("default: true\n        type: boolean"));
-        assert!(
-            workflow
-                .contains("prerelease: ${{ github.event_name == 'push' || inputs.prerelease }}")
-        );
-    }
 
     for workflow_path in [
         ".github/workflows/ci.yml",
         ".github/workflows/build-desktop.yml",
     ] {
         let workflow = read_source(root.join(workflow_path)).expect("build workflow");
-        assert!(
-            workflow.contains(rsreticulum_commit),
-            "{workflow_path} must build the reviewed rsReticulum commit"
-        );
-        assert!(
-            workflow.contains(rslxmf_commit),
-            "{workflow_path} must build the synchronized rsLXMF commit"
-        );
+        for component in components {
+            let commit = component["commit"].as_str().expect("component commit");
+            assert!(
+                workflow.contains(commit),
+                "{workflow_path} must build reviewed component commit {commit}"
+            );
+        }
     }
 
     for workflow_path in [
         ".github/workflows/release-android.yml",
         ".github/workflows/release-desktop.yml",
+        ".github/workflows/release-ios.yml",
         ".github/workflows/release-macos.yml",
+        ".github/workflows/release-windows.yml",
+    ] {
+        let workflow = read_source(root.join(workflow_path)).expect("release workflow");
+        assert!(workflow.contains("source-integrity.mjs github-outputs"));
+        assert!(workflow.contains("source-integrity.mjs verify-release-source"));
+        assert!(workflow.contains("bom --output") || workflow.contains("\"bom\""));
+        assert!(!workflow.contains("RATSPEAK_RSRETICULUM_REF:"));
+        assert!(workflow.contains("cache-bin: true"));
+        assert!(workflow.contains("key: tauri-${{ steps.source.outputs.tauri_cli }}"));
+        assert!(workflow.contains("scripts/release/install-tauri-cli.sh"));
+        assert!(!workflow.contains("cargo install tauri-cli --version"));
+        if workflow_path != ".github/workflows/release-ios.yml" {
+            assert!(workflow.contains("workflow_call:"));
+            assert!(workflow.contains("source-integrity.mjs verify-tags"));
+            assert!(workflow.contains("source-integrity.mjs verify-release-ref"));
+            assert!(workflow.contains("QUALIFY_RELEASE_REF"));
+            assert!(
+                workflow.contains("permissions:\n  contents: read")
+                    || workflow.contains("permissions:\n  actions: read\n  contents: read")
+            );
+            assert!(!workflow.contains("uses: softprops/action-gh-release@"));
+            assert!(!workflow.contains("publish_github_release"));
+            assert!(!workflow.contains("PUBLISH_GITHUB_RELEASE"));
+            assert!(!workflow.contains("push:\n    tags:"));
+        }
+        assert!(!workflow.contains("Public Channels beta:"));
+    }
+
+    for (workflow_path, concurrency_group, flat_artifact_upload) in [
+        (
+            ".github/workflows/release-android.yml",
+            "group: release-android-${{ inputs.release_tag || github.ref }}",
+            "name: ratspeak-android\n          path: Ratspeak/dist/android/*",
+        ),
+        (
+            ".github/workflows/release-desktop.yml",
+            "group: release-linux-${{ inputs.release_tag || github.ref }}",
+            "name: ratspeak-linux\n          path: Ratspeak/dist/linux/*",
+        ),
+        (
+            ".github/workflows/release-macos.yml",
+            "group: release-macos-${{ inputs.release_tag || github.ref }}",
+            "name: ratspeak-macos\n          path: Ratspeak/dist/macos/*",
+        ),
+        (
+            ".github/workflows/release-windows.yml",
+            "group: release-windows-${{ inputs.release_tag || github.ref }}",
+            "name: ratspeak-windows\n          path: Ratspeak/dist/windows/*",
+        ),
+    ] {
+        let workflow = read_source(root.join(workflow_path)).expect("release workflow");
+        assert!(
+            workflow.contains(concurrency_group),
+            "{workflow_path} must not share a reusable-workflow concurrency group"
+        );
+        assert!(
+            workflow.contains(flat_artifact_upload),
+            "{workflow_path} must upload one flat public-artifact directory"
+        );
+    }
+
+    let release_notes =
+        read_source(root.join("release/release-notes.md")).expect("shared release notes");
+    let changelog = read_source(root.join("CHANGELOG.md")).expect("changelog");
+    for fragment in release_note_fragments {
+        assert!(
+            release_notes.contains(fragment),
+            "shared release notes are missing approved copy: {fragment}"
+        );
+        assert!(
+            changelog.contains(fragment),
+            "changelog is missing approved release copy: {fragment}"
+        );
+    }
+
+    let orchestrator =
+        read_source(root.join(".github/workflows/release.yml")).expect("release orchestrator");
+    assert!(!orchestrator.contains("push:\n    tags:\n      - \"v*\""));
+    assert!(orchestrator.contains(
+        "qualification_run_id:\n        description: \"Successful final pre-tag qualification run to promote.\""
+    ));
+    assert!(orchestrator.contains(
+        "integration_tag_run_id:\n        description: \"Successful post-qualification sibling-tag verification run.\""
+    ));
+    assert_eq!(
+        orchestrator
+            .matches("uses: softprops/action-gh-release@")
+            .count(),
+        1
+    );
+    assert!(orchestrator.contains("body_path: Ratspeak/release/release-notes.md"));
+    assert!(orchestrator.contains("scripts/release/verify-release-artifacts.mjs"));
+    assert!(orchestrator.contains("name: Promote, verify, and publish complete release"));
+    assert!(orchestrator.contains("name: Require successful final pre-tag qualification"));
+    assert!(orchestrator.contains("name: Require successful pre-product-tag sibling verification"));
+    assert!(orchestrator.contains("actions/workflows/verify-integration-tags.yml"));
+    assert!(orchestrator.contains("test \"$head_sha\" = \"$SOURCE_SHA\""));
+    assert!(orchestrator.contains("name: ratspeak-release-qualification"));
+    assert!(orchestrator.contains("run-id: ${{ inputs.qualification_run_id }}"));
+    assert!(orchestrator.contains(
+        "verify-release-artifacts.mjs ../release-assets \"$RELEASE_TAG\" --qualification"
+    ));
+    assert!(orchestrator.contains("name: Bind qualified source BOMs to the immutable tag"));
+    assert!(orchestrator.contains(".product.ref = $release_tag"));
+    assert!(orchestrator.contains("name: Require successful ordinary CI on the exact source"));
+    assert!(orchestrator.contains("source-integrity.mjs verify-release-source"));
+    assert!(orchestrator.contains("source-integrity.mjs verify-tags"));
+    assert!(orchestrator.contains("WORKFLOW_REF: ${{ github.ref }}"));
+    assert!(orchestrator.contains("refs/tags/$RELEASE_TAG"));
+    assert!(orchestrator.contains("actions/workflows/ci.yml/runs"));
+    assert!(orchestrator.contains("-f head_sha=\"$SOURCE_SHA\""));
+    assert!(orchestrator.contains("-f event=push"));
+    assert!(orchestrator.contains("-f status=success"));
+    assert!(orchestrator.contains("contents: write"));
+    assert!(!orchestrator.contains("uses: ./.github/workflows/release-android.yml"));
+    assert!(!orchestrator.contains("uses: ./.github/workflows/release-macos.yml"));
+    assert!(orchestrator.contains(
+        "prerelease:\n        description: \"Mark the final GitHub Release as a prerelease.\"\n        required: true\n        default: false\n        type: boolean"
+    ));
+    assert!(orchestrator.contains("prerelease: ${{ inputs.prerelease }}"));
+    assert!(orchestrator.contains("name: Upload one complete draft GitHub Release"));
+    assert!(orchestrator.contains("name: Refuse to mutate an existing public release"));
+    assert!(orchestrator.contains("draft: true"));
+    assert!(orchestrator.contains("Accept: application/octet-stream"));
+    assert!(orchestrator.contains("remote-release-assets"));
+    assert!(!orchestrator.contains("releases/tags/$RELEASE_TAG"));
+    assert!(orchestrator.matches("releases?per_page=100").count() >= 3);
+    assert!(orchestrator.contains("name: Publish verified normal release"));
+    assert!(orchestrator.contains("-X PATCH"));
+    assert!(orchestrator.contains("-F draft=false"));
+    assert!(!orchestrator.contains("draft: false"));
+
+    let qualifier = read_source(root.join(".github/workflows/qualify-release.yml"))
+        .expect("pre-tag release qualifier");
+    assert!(qualifier.contains("name: Release qualification"));
+    assert!(qualifier.contains("description: \"Exact untagged candidate commit to qualify.\""));
+    assert!(qualifier.contains("Pre-tag qualification requires $release_tag to be absent"));
+    assert!(qualifier.contains("source-integrity.mjs verify-release-source"));
+    assert!(qualifier.contains("WORKFLOW_SHA: ${{ github.sha }}"));
+    assert!(qualifier.contains("workflow $WORKFLOW_SHA, candidate $source_sha"));
+    assert!(
+        qualifier.contains("git ls-remote --exit-code --tags origin \"refs/tags/$release_tag\"")
+    );
+    assert!(qualifier.contains("name: Require successful ordinary CI on the exact source"));
+    assert!(qualifier.contains("upload_play: false"));
+    assert!(qualifier.contains("notarize: true"));
+    assert!(qualifier.contains("--qualification"));
+    assert!(qualifier.contains("name: ratspeak-release-qualification"));
+    assert!(qualifier.contains("recovery_run_id"));
+    assert!(!qualifier.contains("uses: softprops/action-gh-release@"));
+    assert!(!qualifier.contains("contents: write"));
+    for workflow in [
+        "release-desktop.yml",
+        "release-windows.yml",
+        "release-android.yml",
+        "release-macos.yml",
+    ] {
+        assert!(
+            qualifier.contains(&format!("uses: ./.github/workflows/{workflow}")),
+            "release qualifier does not call {workflow}"
+        );
+    }
+
+    let integration_verifier =
+        read_source(root.join(".github/workflows/verify-integration-tags.yml"))
+            .expect("pre-product-tag integration verifier");
+    assert!(integration_verifier.contains("name: Verify integration tags"));
+    assert!(
+        integration_verifier
+            .contains("description: \"Exact qualified untagged candidate commit.\"")
+    );
+    assert!(integration_verifier.contains(
+        "description: \"Successful final pre-tag qualification run for this candidate.\""
+    ));
+    assert!(integration_verifier.contains("source-integrity.mjs verify-release-source"));
+    assert!(integration_verifier.contains("source-integrity.mjs verify-tags"));
+    assert!(integration_verifier.contains("actions/workflows/qualify-release.yml"));
+    assert!(integration_verifier.contains("WORKFLOW_SHA: ${{ github.sha }}"));
+    assert!(
+        integration_verifier
+            .contains("git ls-remote --exit-code --tags origin \"refs/tags/$release_tag\"")
+    );
+    assert!(integration_verifier.contains("test \"$head_sha\" = \"$source_sha\""));
+    assert!(!integration_verifier.contains("contents: write"));
+
+    let ios =
+        read_source(root.join(".github/workflows/release-ios.yml")).expect("iOS release workflow");
+    assert!(ios.contains(
+        "description: \"Exact candidate commit to build; defaults to the selected dispatch ref.\""
+    ));
+    assert!(ios.contains("ref: ${{ inputs.source_ref || github.sha }}"));
+    assert!(ios.contains(
+        "description: \"Successful final pre-tag qualification run required for TestFlight.\""
+    ));
+    assert!(ios.contains(
+        "description: \"Successful sibling-tag verification run required for TestFlight.\""
+    ));
+    assert!(ios.contains("name: Require exact successful qualification for TestFlight"));
+    assert!(ios.contains("actions/workflows/qualify-release.yml"));
+    assert!(ios.contains("actions/workflows/verify-integration-tags.yml"));
+    assert!(ios.contains("name: Verify coordinated sibling tags for TestFlight"));
+    assert!(ios.contains("test \"$head_sha\" = \"$source_sha\""));
+
+    for workflow_path in [
+        ".github/workflows/release-android.yml",
+        ".github/workflows/release-desktop.yml",
     ] {
         let workflow = read_source(root.join(workflow_path)).expect("release workflow");
         assert!(workflow.contains(r#""$(basename "$artifact")""#));
     }
+    for workflow_path in [
+        ".github/workflows/release-desktop.yml",
+        ".github/workflows/release-windows.yml",
+        ".github/workflows/release-macos.yml",
+    ] {
+        let workflow = read_source(root.join(workflow_path)).expect("desktop release workflow");
+        assert!(
+            workflow.contains("- name: Run tests\n        timeout-minutes: 20"),
+            "{workflow_path} must fail a hung test step before the platform build budget expires"
+        );
+    }
     let windows =
         read_source(root.join(".github/workflows/release-windows.yml")).expect("Windows release");
+    assert!(windows.contains("git config --global core.autocrlf false"));
     assert!(windows.contains(r#""$hash  $($_.Name)""#));
     assert!(!windows.contains("$hash  $path"));
+    let macos =
+        read_source(root.join(".github/workflows/release-macos.yml")).expect("macOS release");
+    assert!(macos.contains("sudo xcode-select -s /Applications/Xcode_26.3.app"));
+    assert!(macos.contains("scripts/release/notarize-macos-dmgs.sh"));
+    assert!(macos.contains("scripts/release/finalize-macos-dmgs.sh"));
+    assert!(macos.contains("NOTARY_WAIT_TIMEOUT: 30m"));
+    assert!(macos.contains("ratspeak-macos-notarization-recovery"));
+    assert!(macos.contains("recovery_run_id"));
+    assert!(macos.contains("name: Reject unsupported post-tag recovery"));
+    assert!(macos.contains("unset APPLE_ID"));
+    assert!(!macos.contains("--skip-stapling"));
+    let notarization_gate = read_source(root.join("scripts/release/notarize-macos-dmgs.sh"))
+        .expect("bounded macOS notarization gate");
+    for required in [
+        "notarytool submit",
+        "--no-wait",
+        "notarytool wait",
+        "--timeout",
+        "submissions.tsv",
+        "stapler staple",
+        "stapler validate",
+    ] {
+        assert!(
+            notarization_gate.contains(required),
+            "macOS notarization gate is missing {required}"
+        );
+    }
+    let macos_finalizer = read_source(root.join("scripts/release/finalize-macos-dmgs.sh"))
+        .expect("macOS final artifact gate");
+    assert!(macos_finalizer.contains(r#""$(basename "$artifact")""#));
+    for required in [
+        "verify-macos-dmg.sh",
+        "codesign --verify",
+        "stapler validate",
+        "spctl -a",
+        "assert-no-tauri-dev-url.sh",
+    ] {
+        assert!(
+            macos_finalizer.contains(required),
+            "macOS final artifact gate is missing {required}"
+        );
+    }
+    let artifact_gate = read_source(root.join("scripts/release/verify-release-artifacts.mjs"))
+        .expect("complete release artifact gate");
+    assert!(artifact_gate.contains("release artifact set mismatch"));
+    assert!(artifact_gate.contains("SHA-256 mismatch"));
+    assert!(artifact_gate.contains("product commit drift"));
+    assert!(artifact_gate.contains("component count drift"));
     let linux =
         read_source(root.join(".github/workflows/release-desktop.yml")).expect("Linux release");
     assert!(linux.contains(r#"test -n "$rpm""#));
-    assert!(linux.contains(r#"test "$artifact_count" = "4""#));
+    assert!(linux.contains(r#"test "$artifact_count" = "6""#));
+    assert!(linux.contains("linux-${BOM_ARCH}-source-bom.json"));
+    for gate in ["stage-appimage-runtime.sh", "verify-appimage-runtime.sh"] {
+        assert!(linux.contains(gate), "Linux release is missing {gate}");
+    }
+    let desktop =
+        read_source(root.join(".github/workflows/build-desktop.yml")).expect("desktop build");
+    for gate in ["stage-appimage-runtime.sh", "verify-appimage-runtime.sh"] {
+        assert!(desktop.contains(gate), "desktop build is missing {gate}");
+    }
 
     let ios =
         read_source(root.join(".github/workflows/release-ios.yml")).expect("iOS release workflow");
-    for dependency_ref in dependency_refs {
-        assert!(ios.contains(dependency_ref));
-    }
-    assert!(ios.contains(r#"--build-number "${GITHUB_RUN_NUMBER}""#));
+    assert!(ios.contains("sudo xcode-select -s /Applications/Xcode_26.3.app"));
+    assert!(ios.contains("source-integrity.mjs github-outputs"));
+    assert!(ios.contains("source-integrity.mjs verify-release-source"));
+    assert!(ios.contains("source-integrity.mjs bom"));
+    assert_eq!(ios.matches("Ratspeak-ios-source-bom.json").count(), 2);
+    assert!(!ios.contains("RATSPEAK_RSRETICULUM_REF:"));
+    assert!(!ios.contains("--build-number"));
     assert!(ios.contains("--export-method app-store-connect"));
-    assert!(ios.contains("APPLE_DEVELOPMENT_TEAM: ${{ vars.APPLE_TEAM_ID }}"));
+    assert!(ios.contains("APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}"));
+    assert!(ios.contains("Normalize Tauri-generated iOS project"));
+    assert!(ios.contains("git diff --exit-code -- \"$plist\""));
     for required in [
         "IOS_DISTRIBUTION_CERTIFICATE_BASE64",
         "IOS_DISTRIBUTION_CERTIFICATE_PASSWORD",
@@ -4949,12 +6025,36 @@ fn release_workflows_pin_v1_0_26d_and_stage_tag_builds_as_prereleases() {
         .expect("iOS project specification");
     assert!(ios_project.contains("path: ratspeak_iOS/PrivacyInfo.xcprivacy"));
     assert!(ios_project.contains("buildPhase: resources"));
-    assert!(!ios_project.contains("entitlements:"));
+    assert!(ios_project.contains("entitlements:"));
+    assert!(ios_project.contains("path: ratspeak_iOS/ratspeak_iOS.entitlements"));
+    assert!(ios_project.contains("com.apple.developer.networking.multicast: true"));
+    assert!(!ios_project.contains("NSBonjourServices"));
 
     let ios_pbx = read_source(root.join("src-tauri/gen/apple/ratspeak.xcodeproj/project.pbxproj"))
         .expect("generated iOS project");
     assert!(ios_pbx.contains("PrivacyInfo.xcprivacy in Resources"));
-    assert!(!ios_pbx.contains("CODE_SIGN_ENTITLEMENTS"));
+    assert_eq!(
+        ios_pbx
+            .matches("CODE_SIGN_ENTITLEMENTS = ratspeak_iOS/ratspeak_iOS.entitlements;")
+            .count(),
+        2
+    );
+
+    let signing_profile_gate =
+        read_source(root.join("scripts/release/assert-ios-signing-profile.sh"))
+            .expect("iOS signing profile gate");
+    let bundle_gate =
+        read_source(root.join("scripts/release/assert-ios-bundle.sh")).expect("iOS bundle gate");
+    for gate in [&signing_profile_gate, &bundle_gate] {
+        assert!(gate.contains("com.apple.developer.networking.multicast"));
+    }
+
+    let health = read_source(root.join("dashboard/static/js/health.js")).expect("health js");
+    assert!(!health.contains("Pending Apple approval"));
+    assert!(health.contains("Multicast unavailable"));
+    let tauri_events =
+        read_source(root.join("dashboard/static/js/tauri_events.js")).expect("tauri events js");
+    assert!(tauri_events.contains("if (recoveredUnavailable) window._autoUnavailable = null;"));
 
     let app_cargo = read_source(root.join("src-tauri/Cargo.toml")).expect("app Cargo.toml");
     assert!(app_cargo.contains(r#"tauri = { version = "2", features = [] }"#));
@@ -4996,6 +6096,7 @@ fn settings_information_architecture_groups_one_off_settings() {
     assert!(general_panel.contains(r#"id="settings-row-notifications""#));
     assert!(general_panel.contains(r#"id="desktop-notifications-toggle""#));
     assert!(general_panel.contains(r#"id="settings-notification-action""#));
+    assert!(general_panel.contains("sound and haptics follow device settings"));
     assert!(general_panel.contains(r#"id="settings-row-keep-connected""#));
     assert!(general_panel.contains(r#"<span class="settings-row-label">Block List</span>"#));
     assert!(general_panel.contains(
@@ -5609,7 +6710,7 @@ fn cache_clear_buttons_clear_reticulum_db_and_frontend_caches() {
     assert!(events.contains("announceCache = [];"));
     assert!(events.contains("RS.invoke('api_get_peers_snapshot')"));
     assert!(peers_cache.contains("function replace(rows)"));
-    assert!(settings.contains("Path table cleared."));
+    assert!(settings.contains("Path table cleared"));
     assert!(!settings.contains("Hub node restarting"));
 }
 
@@ -5827,7 +6928,8 @@ fn contact_card_qr_flow_exports_public_key_and_imports_known_identity() {
     assert!(
         contact_card_rs.contains("mgr.update_remote_crypto(&dest_hash, &card.public_key, None)")
     );
-    assert!(contact_card_rs.contains("mgr.save_crypto_state()"));
+    assert!(contact_card_rs.contains("lxmf_persistence::persist_current_delta("));
+    assert!(!contact_card_rs.contains("mgr.save_crypto_state()"));
     assert!(contact_card_rs.contains("save_contact_with_identity_pubkey"));
     assert!(db.contains("pub fn save_contact_with_identity_pubkey"));
 
@@ -5959,7 +7061,7 @@ fn mobile_haptics_use_tauri_plugin_commands_and_semantic_feedback() {
 }
 
 #[test]
-fn message_actions_use_mobile_long_press_and_action_state() {
+fn message_actions_stage_touch_selection_and_preserve_accessible_actions() {
     let root = repo_root();
     let lxmf = read_source(root.join("dashboard/static/js/lxmf.js")).expect("lxmf js");
     let messaging_css =
@@ -5976,6 +7078,24 @@ fn message_actions_use_mobile_long_press_and_action_state() {
         .expect("messaging command");
 
     assert!(lxmf.contains("RS.gestures.attachLongPress(bubble"));
+    assert!(lxmf.contains("function _messageSelectionIntersectsBubble(bubble)"));
+    assert!(lxmf.contains("function _messageActionOwnsText(bubble, target)"));
+    assert!(lxmf.contains("function _messageElevatedTextStartsNativeSelection(touch, bubble)"));
+    assert!(lxmf.contains("function _handleNativeMessageCopy()"));
+    assert!(lxmf.contains("document.addEventListener('copy', _handleNativeMessageCopy, true);"));
+    assert!(lxmf.contains("if (_activeContextMenu !== active) return;"));
+    assert!(lxmf.contains("_clearNativeMessageSelection();"));
+    assert!(lxmf.contains("function _messageTouchStartsDirectControl(touch, bubble)"));
+    assert!(lxmf.contains("function _messageLinkUsesNativeContext(target)"));
+    assert!(lxmf.contains("function _rememberMessagePointerContextSelection(event, bubble)"));
+    assert!(lxmf.contains("function _consumeMessagePointerContextSelection(bubble)"));
+    assert!(lxmf.contains(
+        "function _messageContextMenuDisposition(target, bubble, now, selectionExistedBeforePointer)"
+    ));
+    assert!(lxmf.contains("excludeZone: function(touch)"));
+    assert!(lxmf.contains("hapticStages: [{ at: 0.55, level: 'light' }]"));
+    assert!(lxmf.contains("return _messageElevatedTextStartsNativeSelection(touch, bubble) ||"));
+    assert!(lxmf.contains("_messageTouchStartsDirectControl(touch, bubble);"));
     assert!(!lxmf.contains("preventDefaultOnStart: function()"));
     assert!(lxmf.contains("container.addEventListener('touchstart', function()"));
     assert!(lxmf.contains("state.settleToken++;"));
@@ -5985,12 +7105,40 @@ fn message_actions_use_mobile_long_press_and_action_state() {
     assert!(lxmf.contains("(t.closest('.lxmf-msg') && _shouldPreserveLxmfComposerKeyboard())"));
     assert!(lxmf.contains("function _bindMessageFocusPreservingActivation"));
     assert!(lxmf.contains("preserveComposerKeyboard"));
-    assert!(lxmf.contains("var _suppressImageOpenUntil = 0;"));
+    assert!(lxmf.contains("var _pendingMessageHoldActivation = null;"));
+    assert!(lxmf.contains("var _messageHoldActivationSequence = 0;"));
+    assert!(lxmf.contains("function _armPendingMessageHoldActivation(bubble, msgId, touch)"));
+    assert!(lxmf.contains("function _releasePendingMessageHoldActivation(bubble, now)"));
+    assert!(lxmf.contains("function _consumePendingMessageHoldContext(target, bubble, now)"));
+    assert!(lxmf.contains("function _consumePendingMessageHoldActivation(event, surface, now)"));
+    assert!(lxmf.contains("pending.surface !== surface || bubble !== pending.bubble"));
     assert!(lxmf.contains("container.querySelectorAll('.lxmf-send-cancel, .msg-send-cancel-inline').forEach(function(btn)"));
     assert!(lxmf.contains("_bindMessageFocusPreservingActivation(btn, function()"));
     assert!(lxmf.contains("_cancelLxmfSend(btn.getAttribute('data-msg-id'));"));
-    assert!(lxmf.contains("_suppressImageOpenUntil = Date.now() + 900;"));
-    assert!(lxmf.contains("if (Date.now() < _suppressImageOpenUntil)"));
+    assert!(lxmf.contains("title: 'Cancel sending?'"));
+    assert!(lxmf.contains(
+        "Cancelled local retries. A copy already handed to the network may still arrive."
+    ));
+    assert!(lxmf.contains(
+        "No live send remained. The local message was cancelled, but a copy may still arrive."
+    ));
+    assert!(messaging.contains("\"stop_scope\": \"preparation\""));
+    assert!(messaging.contains("\"active_and_retries\""));
+    assert!(messaging.contains("\"local_record_only\""));
+    assert!(messaging.contains("\"live_owner_stopped\": stopped.live_owner_stopped"));
+    assert!(messaging.contains("\"row_marked_stopped\": stopped.row_marked_stopped"));
+    assert!(messaging.contains("\"stopped_retrying\": stopped.live_owner_stopped"));
+    assert!(messaging.contains("\"may_have_left_device\": true"));
+    assert!(inbound.contains("lxmf_step_starts_delivery_timeout"));
+    assert!(inbound.contains("manager.cancel_outbound_message(msg_id)"));
+    assert!(inbound.contains("\"step\": \"timeout\""));
+    assert!(lxmf.contains("_armPendingMessageHoldActivation(bubble, msgId, touch);"));
+    assert!(lxmf.contains("_releasePendingMessageHoldActivation(this);"));
+    assert!(
+        lxmf.matches("if (_consumePendingMessageHoldActivation(e, this)) return;")
+            .count()
+            >= 4
+    );
     assert!(lxmf.contains("function _restoreLxmfComposerKeyboard"));
     assert!(lxmf.contains("window.RS.closeMessageActionMenu"));
     assert!(lxmf.contains("var ICON_SEND_OPPORTUNISTIC"));
@@ -6003,8 +7151,51 @@ fn message_actions_use_mobile_long_press_and_action_state() {
     assert!(lxmf.contains("function _resolveMessageImageFile(msgData)"));
     assert!(lxmf.contains("function _resolveMessageAttachmentFile(att)"));
     assert!(lxmf.contains("var mediaAction = _messageMediaContextAction(msgData);"));
-    assert!(lxmf.contains("_messageActionIcon(mediaAction ? mediaAction.icon : 'copy')"));
-    assert!(lxmf.contains("mediaAction ? mediaAction.label : 'Copy'"));
+    assert!(!lxmf.contains("<span>Select Text</span>"));
+    assert!(!lxmf.contains("data-message-action', 'select-text"));
+    assert!(lxmf.contains("<span>Copy Message</span>"));
+    assert!(lxmf.contains("label: canCopyImage ? 'Copy Image' : 'Save Image'"));
+    assert!(lxmf.contains("label: 'Save File'"));
+    assert!(lxmf.contains("menu.setAttribute('role', 'dialog')"));
+    assert!(lxmf.contains("menu.setAttribute('aria-modal', 'false')"));
+    assert!(lxmf.contains("menu.setAttribute('aria-label', 'Message actions')"));
+    assert!(!lxmf.contains("menu.setAttribute('role', 'menu')"));
+    assert!(lxmf.contains("var messageActionsClass = 'msg-actions-trigger' +"));
+    assert!(lxmf.contains("mobileMessageActions ? ' msg-actions-trigger-mobile-hidden' : ''"));
+    assert!(lxmf.contains("<path d=\"M12 5v14M5 12h14\"/>"));
+    assert!(
+        lxmf.contains(
+            "if (selectionExistedBeforePointer === false) _clearNativeMessageSelection();"
+        )
+    );
+    assert!(!lxmf.contains("function _enterMessageTextSelectionMode("));
+    assert!(!lxmf.contains("function _exitMessageTextSelectionMode("));
+    assert!(
+        lxmf.contains("if (_messageActionOwnsText(_activeContextMenu.bubble, e.target)) return;")
+    );
+    assert!(!lxmf.contains("msg-text-selection-guide"));
+    assert!(!lxmf.contains("Text selected. Adjust the selection or choose Done."));
+    assert!(lxmf.contains("function _messageActivationExpectsFocus(event)"));
+    assert!(lxmf.contains("var _deferredConversationRenderOwnerHash = null;"));
+    assert!(lxmf.contains("var _deferredConversationRenderGeneration = 0;"));
+    assert!(lxmf.contains("function _deferActiveMessageInteractionRender(options)"));
+    assert!(lxmf.contains("function _pendingRenderReleaseOwnsCurrentConversation()"));
+    assert!(lxmf.contains("function _scheduleDeferredConversationRenderAfterPointer()"));
+    assert!(
+        lxmf.contains("if (!_deferredConversationRenderOptions) _deferConversationRender({});")
+    );
+    assert!(lxmf.contains("function _flushDeferredConversationRender(expectedGeneration)"));
+    assert!(lxmf.contains("if (_deferActiveMessageInteractionRender(options)) return;"));
+    assert!(lxmf.contains("document.addEventListener('click', clickAfterRelease, true);"));
+    assert!(lxmf.contains("record.fallbackTimer = setTimeout(runFlush, 450);"));
+    assert!(lxmf.contains("document.addEventListener('touchcancel', cancelRelease, true);"));
+    assert!(lxmf.contains("flushDeferredRender: false"));
+    assert!(lxmf.contains("function _prepareMessageActionTarget(msgData, bubble, trigger, x, y)"));
+    assert!(!lxmf.contains("function _captureMessageInteractionForRender()"));
+    assert!(!lxmf.contains("function _restoreMessageInteractionAfterRender(state, container)"));
+    assert!(
+        lxmf.contains("function _restoreRenderedMessageActionFocus(msgId, emoji, focusExpected)")
+    );
     assert!(lxmf.contains("function _optimisticApplyReaction"));
     assert!(lxmf.contains("showToast(ok ? 'Message copied'"));
     assert!(gestures.contains("var preventDefaultOnStart = opts.preventDefaultOnStart || null;"));
@@ -6014,6 +7205,24 @@ fn message_actions_use_mobile_long_press_and_action_state() {
     assert!(emoji_picker.contains("btn.addEventListener('touchstart', function(e) { e.preventDefault(); }, { passive: false });"));
     assert!(messaging_css.contains(".lxmf-messages.msg-action-mode .msg-row"));
     assert!(messaging_css.contains(".msg-row.msg-action-selected .lxmf-msg"));
+    assert!(messaging_css.contains(".lxmf-msg-content {"));
+    assert!(messaging_css.contains("-webkit-touch-callout: default;"));
+    assert!(messaging_css.contains("html[data-input-modality=\"touch\"] .lxmf-msg-content"));
+    assert!(
+        messaging_css.contains(
+            ".lxmf-messages.msg-action-mode .msg-row.msg-action-selected .lxmf-msg-content"
+        )
+    );
+    assert!(messaging_css.contains("touch-action: auto;"));
+    assert!(messaging_css.contains(".msg-actions-trigger::before"));
+    assert!(messaging_css.contains("pointer-events: none;"));
+    assert!(messaging_css.contains(".lxmf-msg:hover .msg-actions-trigger"));
+    assert!(messaging_css.contains("html[data-input-modality=\"touch\"] .msg-actions-trigger"));
+    assert!(messaging_css.contains(".msg-actions-trigger.msg-actions-trigger-mobile-hidden"));
+    assert!(messaging_css.contains("clip-path: inset(50%);"));
+    assert!(!messaging_css.contains(".msg-text-selection-guide"));
+    assert!(messaging_css.contains(".msg-context-actions > :last-child:nth-child(odd)"));
+    assert!(messaging_css.contains("grid-column: 1 / -1;"));
     assert!(messaging_css.contains("position: fixed; z-index: calc(var(--z-modal) + 3);"));
     assert!(nav.contains("RS.closeMessageActionMenu()"));
 
@@ -6043,7 +7252,8 @@ fn optimistic_lxmf_cancel_is_native_before_canonical_reconciliation() {
     assert!(messaging.contains("LxmfClientSendCancellation::Preparing"));
     assert!(messaging.contains("LxmfClientSendCancellation::Queued"));
     assert!(lxmf.contains("_pendingLxmfCancelByClientId[msgId] = true;"));
-    assert!(lxmf.contains("_invokeLxmfCancel(msgId).catch(function(err)"));
+    assert!(lxmf.contains("return _invokeLxmfCancel(msgId).then(function(resp)"));
+    assert!(lxmf.contains("title: 'Cancel sending?'"));
     assert!(lxmf.contains("var eventMsgId = data.msg_id || data.client_msg_id;"));
 }
 
@@ -6157,8 +7367,8 @@ fn identity_management_is_first_class_tab() {
     assert!(identity_js.contains("var fromSetup = !!window._identityImportFromSetup;"));
     assert!(identity_js.contains("var activateHtml = fromSetup ? ''"));
     assert!(identity_js.contains("completeSetupAfterIdentityImport(data);"));
-    assert!(identity_js.contains("Choose Reticulum Identity Key import"));
-    assert!(identity_js.contains("Choose Ratspeak Identity Backup import"));
+    assert!(identity_js.contains("Choose Reticulum Identity Key to import this file."));
+    assert!(identity_js.contains("Choose Ratspeak Identity Backup to import this file."));
     assert!(identity_js.contains("mimeType: 'application/octet-stream'"));
     assert!(identity_js.contains("function saveIdentityBackupWithAndroid(fileName, backupBase64)"));
     assert!(
@@ -6306,6 +7516,18 @@ fn identity_management_is_first_class_tab() {
     let setup_js = read_source(root.join("dashboard/static/js/setup.js")).expect("setup js");
     assert!(setup_js.contains("function completeSetupAfterIdentityImport()"));
     assert!(setup_js.contains("runConnectingProgress();"));
+    assert!(setup_js.contains("function setupCompletionView()"));
+    assert!(setup_js.contains("window.location.href = '/#' + setupCompletionView()"));
+    assert!(!setup_js.contains("window.location.href = '/#dashboard'"));
+    let nav_js = read_source(root.join("dashboard/static/js/nav.js")).expect("nav js");
+    assert!(nav_js.contains("function _viewForNavigationSurface(viewId)"));
+    assert!(nav_js.contains("appUsesMobileNavigation()"));
+    let state_js = read_source(root.join("dashboard/static/js/state.js")).expect("state js");
+    assert!(state_js.contains("function appUsesMobileNavigation()"));
+    assert!(state_js.contains("function appLandingView()"));
+    let identity_js =
+        read_source(root.join("dashboard/static/js/identity.js")).expect("identity js");
+    assert!(!identity_js.contains("window.location.href = '/#dashboard'"));
 
     let tauri_lib = read_source(root.join("src-tauri/src/lib.rs")).expect("tauri lib");
     assert!(tauri_lib.contains("api_export_identity_reticulum_base64"));
@@ -6520,7 +7742,8 @@ fn activity_producers_are_sealed_and_legacy_rows_have_one_masked_source() {
     let runtime =
         read_source(root.join("crates/ratspeak-runtime/src/lib.rs")).expect("runtime lib");
     assert!(runtime.contains("pub async fn send_announce_from_origin("));
-    assert!(runtime.contains("send_announce_from_origin(&state, activity_origin).await"));
+    assert!(runtime.contains("pub async fn send_typed_announce_from_origin("));
+    assert!(runtime.contains("submit_announce_intent("));
     assert!(runtime.contains("biased;\n                        _ = tick_shutdown.wait()"));
     assert!(runtime.contains("biased;\n            _ = shutdown.wait() => break"));
     assert!(runtime.contains("let poll_activity_origin = state.activity_request_fence();"));
@@ -6586,10 +7809,7 @@ fn activity_producers_are_sealed_and_legacy_rows_have_one_masked_source() {
     let startup_announce = runtime
         .split("fn schedule_startup_auto_announce(")
         .nth(1)
-        .and_then(|tail| {
-            tail.split("async fn send_announce_from_state_inner(")
-                .next()
-        })
+        .and_then(|tail| tail.split("async fn submit_announce_intent(").next())
         .expect("startup auto-announce task");
     let startup_wait = startup_announce
         .find("_ = tokio::time::sleep(Duration::from_secs(2))")
@@ -6599,23 +7819,20 @@ fn activity_producers_are_sealed_and_legacy_rows_have_one_masked_source() {
         .unwrap();
     let startup_shutdown = startup_announce.find("if shutdown.is_triggered()").unwrap();
     let startup_send = startup_announce
-        .find("send_announce_from_origin(&state, activity_origin).await")
+        .find("send_typed_announce_from_origin(")
         .unwrap();
-    let startup_success = startup_announce.find("if report.queued > 0").unwrap();
-    let startup_fenced = startup_announce
-        .find("record_activity_if_current(&state, activity_origin, ||")
-        .unwrap();
-    let startup_aggregate = startup_announce
-        .find("method: producer::AnnounceMethod::Startup")
+    let startup_admitted = startup_announce
+        .find("if !matches!(report.disposition, AnnounceSendDisposition::Failed)")
         .unwrap();
     assert!(
         startup_wait < startup_origin
             && startup_origin < startup_shutdown
             && startup_shutdown < startup_send
-            && startup_send < startup_success
-            && startup_success < startup_fenced
-            && startup_fenced < startup_aggregate
+            && startup_send < startup_admitted
     );
+    assert!(!startup_announce.contains("record_activity_if_current"));
+    let lifecycle = rust_function_block(&runtime, "run_announce_lifecycle");
+    assert!(lifecycle.contains("record_presence_lifecycle_activity("));
 
     let periodic_announce = runtime
         .split("// Auto-announce loop; wakes on timer or interval change.")
@@ -6632,7 +7849,7 @@ fn activity_producers_are_sealed_and_legacy_rows_have_one_masked_source() {
         .find("if periodic_shutdown.is_triggered()")
         .unwrap();
     let periodic_send = periodic_announce
-        .find("send_announce_from_origin(")
+        .find("send_typed_announce_from_origin(")
         .unwrap();
     assert!(
         periodic_wait < periodic_origin
@@ -6853,6 +8070,40 @@ fn mobile_native_ownership_and_usb_recovery_remain_closed_and_single_flight() {
     assert!(health.contains("window._onUsbSelectorPermissionResult === ownedCallback"));
     assert!(health.contains("function applyMobileHardwareState(data)"));
     assert!(health.contains("if (online) mobileHealth = null;"));
+}
+
+#[test]
+fn android_audio_initializes_process_context_before_cpal_access() {
+    let root = repo_root();
+    let runtime =
+        read_source(root.join("crates/ratspeak-runtime/src/voice.rs")).expect("voice runtime");
+    let runtime_manifest =
+        read_source(root.join("crates/ratspeak-runtime/Cargo.toml")).expect("runtime manifest");
+
+    assert!(runtime_manifest.contains("ndk-context = \"0.1.1\""));
+    assert!(runtime.contains("static ANDROID_AUDIO_CONTEXT: OnceLock<"));
+    assert!(runtime.contains("ndk_context::initialize_android_context("));
+    assert!(runtime.contains(".new_global_ref(application)"));
+
+    let call_start = runtime
+        .find("async fn start(\n        link_id: [u8; 16]")
+        .expect("call audio start");
+    let call_start = &runtime[call_start..];
+    assert!(
+        call_start.find("ensure_android_audio_context()?")
+            < call_start.find("let host = cpal::default_host()"),
+        "live calls must establish ndk-context before CPAL"
+    );
+
+    let memo_start = runtime
+        .find("pub(crate) fn start_microphone_capture(")
+        .expect("voice memo capture start");
+    let memo_start = &runtime[memo_start..];
+    assert!(
+        memo_start.find("ensure_android_audio_context()?")
+            < memo_start.find("let host = cpal::default_host()"),
+        "voice memos must establish ndk-context before CPAL"
+    );
 }
 
 #[test]
@@ -7112,8 +8363,10 @@ fn path_resolution_diagnostics_are_not_duplicate_or_stale() {
     );
 
     let runtime = read_source(root.join("crates/ratspeak-runtime/src/lib.rs")).expect("runtime");
-    assert!(runtime.contains("\"held_announces\": e.held_announces"));
-    assert!(runtime.contains("\"burst_active\": e.burst_active"));
+    let runtime_state =
+        read_source(root.join("crates/ratspeak-runtime/src/state.rs")).expect("runtime state");
+    assert!(runtime_state.contains("\"held_announces\": entry.held_announces"));
+    assert!(runtime_state.contains("\"burst_active\": entry.burst_active"));
     assert!(runtime.contains("PollActivityObservation::AnnounceIngressBurst"));
     assert!(runtime.contains("PollActivityObservation::AnnouncesHeld"));
     assert!(runtime.contains("for observation in activity_observations"));
@@ -7132,6 +8385,19 @@ fn path_resolution_diagnostics_are_not_duplicate_or_stale() {
             .contains("emit_ingress_diagnostics_snapshot(state.inner(), diagnostics_fence).await;")
     );
     assert!(network.contains("\"interfaces_holding_announces\""));
+}
+
+#[test]
+fn announce_observers_use_exact_owned_subscriptions() {
+    let handlers =
+        read_source(repo_root().join("crates/ratspeak-runtime/src/announce_handlers.rs"))
+            .expect("announce handlers");
+
+    assert!(handlers.contains("subscribe_announces_with_capacity("));
+    assert!(handlers.contains("subscription.dropped_events()"));
+    assert!(handlers.contains("subscription.close().await"));
+    assert!(!handlers.contains("RegisterAnnounceHandler"));
+    assert!(!handlers.contains("DeregisterAnnounceHandler"));
 }
 
 #[test]
@@ -7266,6 +8532,25 @@ fn network_view_hides_shared_instance_internal_interfaces() {
 }
 
 #[test]
+fn interface_warning_statuses_use_plain_text() {
+    let root = repo_root();
+    let health = read_source(root.join("dashboard/static/js/health.js")).expect("health js");
+    assert!(health.contains("connecting: 'Connecting'"));
+    assert!(health.contains("reconnecting: 'Waiting for radio'"));
+    assert!(health.contains("conn-iface-status-text is-warning"));
+    assert!(!health.contains("conn-iface-pill"));
+
+    let css = read_source(root.join("dashboard/static/css/10-views.css")).expect("views css");
+    assert!(css.contains(".conn-iface-status-text.is-warning"));
+    assert!(css.contains("color: var(--status-warning-fg);"));
+    assert!(!css.contains(".conn-iface-pill"));
+
+    let events = read_source(root.join("dashboard/static/js/tauri_events.js")).expect("events js");
+    assert!(events.contains("conn-iface-status-text is-warning"));
+    assert!(!events.contains("conn-iface-pill"));
+}
+
+#[test]
 fn propagated_send_paths_run_relay_readiness_preflight() {
     let root = repo_root();
     let propagation = read_source(root.join("crates/ratspeak-runtime/src/propagation.rs"))
@@ -7379,7 +8664,7 @@ fn lxmf_tick_runs_blocking_work_off_async_runtime() {
 }
 
 #[test]
-fn voice_memos_share_lxst_capture_and_the_bounded_lxmf_attachment_path() {
+fn voice_memos_share_lxst_capture_and_use_first_class_lxmf_audio() {
     let root = repo_root();
     let memo = read_source(root.join("crates/ratspeak-runtime/src/voice_memo.rs"))
         .expect("voice memo runtime");
@@ -7388,6 +8673,11 @@ fn voice_memos_share_lxst_capture_and_the_bounded_lxmf_attachment_path() {
     let commands = read_source(root.join("crates/ratspeak-tauri/src/commands/voice.rs"))
         .expect("voice commands");
     let messaging = read_source(root.join("dashboard/static/js/lxmf.js")).expect("messaging js");
+    let messaging_commands =
+        read_source(root.join("crates/ratspeak-tauri/src/commands/messaging.rs"))
+            .expect("messaging commands");
+    let contact_commands = read_source(root.join("crates/ratspeak-tauri/src/commands/contacts.rs"))
+        .expect("contact commands");
     let tauri = read_source(root.join("src-tauri/src/lib.rs")).expect("tauri entrypoint");
     let system = read_source(root.join("crates/ratspeak-tauri/src/commands/system.rs"))
         .expect("system commands");
@@ -7399,13 +8689,37 @@ fn voice_memos_share_lxst_capture_and_the_bounded_lxmf_attachment_path() {
         root.join("src-tauri/gen/android/app/src/main/java/org/ratspeak/android/MainActivity.kt"),
     )
     .expect("android activity");
+    let android_memo_audio = read_source(root.join(
+        "src-tauri/gen/android/app/src/main/java/org/ratspeak/android/RatspeakVoiceMemoAudio.kt",
+    ))
+    .expect("android memo audio");
+    let android_voice_audio = read_source(root.join(
+        "src-tauri/gen/android/app/src/main/java/org/ratspeak/android/RatspeakVoiceAudio.kt",
+    ))
+    .expect("android voice output");
+    let android_service =
+        read_source(root.join(
+            "src-tauri/gen/android/app/src/main/java/org/ratspeak/android/RatspeakService.kt",
+        ))
+        .expect("android service");
     let ios_audio = read_source(root.join("crates/ratspeak-runtime/src/platform_ios.rs"))
         .expect("ios audio session");
 
     assert!(memo.contains("const PROFILE: Profile = Profile::QualityMedium"));
-    assert!(memo.contains("crate::voice::start_microphone_capture(PROFILE)"));
+    assert!(
+        memo.contains("crate::voice::start_microphone_capture(PROFILE, &native_session_token)")
+    );
     assert!(voice.contains("pub(crate) fn start_microphone_capture"));
     assert!(voice.contains("MICROPHONE_CAPTURE_RETRY_DELAYS"));
+    assert!(memo.contains("RECORDING_STOP_DRAIN_TIMEOUT"));
+    assert!(memo.contains("drain_capture_before_stream_stop("));
+    assert!(memo.contains("pad_recording_to_minimum_duration("));
+    assert!(memo.contains("VOICE_MEMO_MIN_DURATION_MS: u32 = 1_000"));
+    assert!(memo.contains("MINIMUM_END_TRIM_48K"));
+    assert!(voice.contains("MICROPHONE_CONFIG_ATTEMPT_LIMIT"));
+    assert!(voice.contains("fn select_input_configs("));
+    assert!(voice.contains("android_microphone_candidate_sample_rates"));
+    assert!(voice.contains("ANDROID_MICROPHONE_NATIVE_SAMPLE_RATES"));
     assert!(voice.contains("host.input_devices()"));
     assert!(voice.contains("pub fn reserve_call_audio"));
     assert!(voice.contains("pub fn release_call_audio"));
@@ -7422,26 +8736,107 @@ fn voice_memos_share_lxst_capture_and_the_bounded_lxmf_attachment_path() {
     );
     assert!(memo.contains("call_audio_reserved"));
     assert!(memo.contains("_platform_audio_session"));
-    assert!(memo.contains("MAX_CONTAINER_BYTES < rns_protocol::resource::MAX_EFFICIENT_SIZE"));
+    assert!(memo.contains(
+        "VOICE_MEMO_MAX_GENERATED_OGG_BYTES < rns_protocol::resource::MAX_EFFICIENT_SIZE"
+    ));
+    assert!(memo.contains("pub fn parse_recording_session_id"));
+    assert!(memo.contains("pub fn parse_playback_lease_id"));
+    assert!(memo.contains("take_matching_recording(state, session_id)"));
+    assert!(memo.contains("command_tx: mpsc::Sender<PlaybackCommand>"));
+    assert!(memo.contains("runtime.block_on(drive_native_playback("));
+    assert!(memo.contains("struct NativeVoiceMemoSource"));
+    assert!(memo.contains("NATIVE_PLAYBACK_REFILL_TARGET_MS"));
+    assert!(voice.contains("VOICE_MEMO_OUTPUT_BUFFER_MS"));
+    assert!(voice.contains("FiniteAudioOutput::bounded(max_samples)"));
+    assert!(voice.contains(".try_lock()"));
     assert!(commands.contains("VOICE_MEMO_START_UNAVAILABLE"));
     assert!(commands.contains("crate::voice_memo::cancel_recording(&app_state)"));
     assert!(commands.contains("spawn_blocking(move || crate::voice_memo::decode_voice_memo"));
-    assert!(messaging.contains("RS.invoke('send_lxmf_with_staged_attachment'"));
+    assert!(commands.contains("pub session_id: String"));
+    assert!(commands.contains("pub lease_id: String"));
+    assert!(commands.contains("read_bounded_voice_memo"));
+    assert!(commands.contains(".take((crate::voice_memo::VOICE_MEMO_MAX_AUDIO_BYTES as u64) + 1)"));
+    assert!(commands.contains("voice_memo_decode_lock.lock().await"));
+    assert!(commands.contains("pub async fn send_lxmf_voice_message("));
+    assert!(commands.contains("begin_attachment_staging("));
+    assert!(commands.contains("take_completed_attachment_staging(&args.staging_token)"));
+    assert!(commands.contains("VOICE_MEMO_MAX_GENERATED_OGG_BYTES"));
+    assert!(commands.contains("crate::voice_memo::inspect_voice_memo(&inspection_bytes)"));
+    assert!(commands.contains("crate::commands::messaging::queue_prepared_audio("));
+    assert!(messaging_commands.contains("AudioMessageRequest"));
+    assert!(
+        messaging_commands
+            .contains("send_audio_message_with_preference_report(AudioMessageRequest")
+    );
+    let voice_send = messaging
+        .split("function sendLxmfVoiceMemo(")
+        .nth(1)
+        .and_then(|source| source.split("window.sendLxmfVoiceMemo").next())
+        .expect("voice-message send function");
+    assert!(voice_send.contains("RS.invoke('send_lxmf_voice_message'"));
+    assert!(voice_send.contains("voiceDraft.staging_token"));
+    assert!(!voice_send.contains("send_lxmf_with_staged_attachment"));
+    assert!(!voice_send.contains("begin_attachment_stage"));
+    assert!(!voice_send.contains("append_attachment_stage"));
+    assert!(!voice_send.contains("data_base64"));
+    assert!(!commands.contains(".lxvm"));
+    assert!(!messaging_commands.contains(".lxvm"));
+    assert!(!messaging.contains(".lxvm"));
+    assert!(!voice_memos.contains(".lxvm"));
+    assert!(messaging.contains("if (msg.audio && window.RS && RS.voiceMemos)"));
+    assert!(voice_memos.contains("Number(audio && audio.mode) === 0x10"));
+    assert!(voice_memos.contains("var unsupported = !isAudio(audio) || audio.supported === false"));
+    assert!(voice_memos.contains("data-audio-supported"));
+    assert!(voice_memos.contains("Array.from({ length: BAR_COUNT }, function() { return 0; })"));
+    assert!(voice_memos.contains("result && String(result.staging_token || '')"));
+    assert!(voice_memos.contains("Record it again to retry."));
+    assert!(messaging.contains("_conversationOwnerIsCurrent(sendOwner)"));
+    assert!(messaging.contains("_cancelStagedAttachmentToken(stageToken)"));
+    assert!(messaging.contains("_conversationOwnerIdentityIsCurrent(sendOwner)"));
+    assert!(messaging.contains("msg.source = _canonicalConversationHash(msg.source)"));
+    assert!(messaging.contains("msg.destination = _canonicalConversationHash(msg.destination)"));
+    assert!(
+        messaging_commands.contains("sanitize_text(&args.dest_hash, 128).to_ascii_lowercase()")
+    );
+    assert!(messaging_commands.contains("sanitize_text(&hash, 128).to_ascii_lowercase()"));
+    assert!(contact_commands.contains("sanitize_text(&args.hash, 128).to_ascii_lowercase()"));
     assert!(messaging.contains("_voiceCancelMemoForCall().then(function()"));
     assert!(state_js.contains("function _rsNativeMicrophonePermission(audio)"));
     assert!(shared_ui.contains("RS.composer.dismissForReplacement"));
     assert!(voice_memos.contains("window.addEventListener('pagehide'"));
-    assert!(voice_memos.contains("startVoiceMemoAudioSession"));
+    assert!(!voice_memos.contains("startVoiceMemoAudioSession"));
+    assert!(voice_memos.contains("recordingStartRetirement = pendingStart"));
+    assert!(voice_memos.contains(
+        "if (!eventSessionId || !recordingSessionId || eventSessionId !== recordingSessionId) return;"
+    ));
+    assert!(voice_memos.contains("if (recorderState === 'stopping') return;"));
+    assert!(
+        voice_memos
+            .contains("(recorderState !== 'recording' && recorderState !== 'paused')) return;")
+    );
+    assert!(voice_memos.contains("cacheGeneration !== mediaCacheGeneration"));
+    assert!(voice_memos.contains("var DRAFT_PLAYBACK_PREFIX = '__voice_memo_draft__:';"));
+    assert!(voice_memos.contains("draftPlaybackKey = createDraftPlaybackKey(result);"));
+    assert!(voice_memos.contains("evictPlaybackKey(retiringPlaybackKey);"));
+    assert!(voice_memos.contains("retiredPlaybackKeys[key]"));
+    assert!(voice_memos.contains("var permissionOnly = recorderState === 'requesting_permission'"));
+    assert!(voice_memos.contains("discardRecording({ report: !permissionOnly });"));
+    assert!(voice_memos.contains("var token = ++draftExpirySequence"));
+    assert!(voice_memos.contains("leaseId = stoppingLease"));
+    assert!(voice_memos.contains("nativeMobilePlaybackByLease[stoppingLease] = handle"));
+    assert!(voice_memos.contains("playbackAttemptIsCurrent(coordinator, audio)"));
     assert!(voice_memos.contains("handleAudioInterruption"));
     assert!(voice_memos.contains("RS.audioPlayback.ensure({ installUnlock: true })"));
-    assert!(voice_memos.contains("RS.audioPlayback.context()"));
-    assert!(voice_memos.contains("RS.audioPlayback.isReady()"));
-    assert!(voice_memos.contains("ctx.decodeAudioData"));
-    assert!(voice_memos.contains("RS.invoke('voice_memo_playback_session_start')"));
-    assert!(voice_memos.contains("RS.invoke('voice_memo_playback_session_stop')"));
+    assert!(voice_memos.contains("RS.invoke('voice_memo_playback_start'"));
+    assert!(voice_memos.contains("'voice_memo_playback_session_stop'"));
+    assert!(voice_memos.contains("return createNativeMobilePlayback(item)"));
+    assert!(voice_memos.contains("return createMediaPlayback(item)"));
     assert!(voice_memos.contains("classes = ['is-recorded']"));
     assert!(voice_memos.contains("classes.push('is-live')"));
     assert!(voice_memos.contains("class=\"is-empty\""));
+    assert!(voice_memos.contains("function setPlaybackWaveformProgress("));
+    assert!(voice_memos.contains("'--voice-playback-unplayed'"));
+    assert!(voice_memos.contains("updatePreviewPlaybackProgress(audio.duration"));
     assert!(voice_memos.contains("typeof isIOS === 'function' && isIOS()"));
     assert!(!voice_memos.contains("voice-memo-player-speed"));
     assert!(!voice_memos.contains("playbackSpeed"));
@@ -7458,20 +8853,39 @@ fn voice_memos_share_lxst_capture_and_the_bounded_lxmf_attachment_path() {
         .expect("call handoff handles an idle recorder");
     assert!(stop_playback < idle_branch);
     assert!(system.contains("mobile_background_voice_memo_cancel_failed"));
-    assert!(android.contains("AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE"));
-    assert!(android.contains("fun startVoiceMemoAudioSession(): Boolean"));
+    assert!(!android.contains("startVoiceMemoAudioSession"));
+    assert!(android_memo_audio.contains("AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE"));
+    assert!(android_memo_audio.contains("MODE_IN_COMMUNICATION"));
+    assert!(
+        android_memo_audio
+            .contains("fun startForSession(context: Context, sessionToken: String): Int")
+    );
+    assert!(android_memo_audio.contains("START_BUSY"));
+    assert!(android_memo_audio.contains("fun startPlaybackForSession("));
+    assert!(android_memo_audio.contains("fun stopPlaybackForSession("));
+    assert!(android_memo_audio.contains("AudioAttributes.USAGE_MEDIA"));
+    assert!(android_voice_audio.contains("fun startVoiceMemoPlayback("));
+    assert!(android_voice_audio.contains("fun playbackHeadFrames(): Long"));
+    assert!(
+        android_memo_audio
+            .contains("fun stopForSession(context: Context, sessionToken: String): Boolean")
+    );
+    assert!(android_service.contains("setMicrophoneCaptureActive"));
+    assert!(android_service.contains("FOREGROUND_SERVICE_TYPE_MICROPHONE"));
     assert!(ios_audio.contains("AVAudioSessionCategoryPlayAndRecord"));
     assert!(ios_audio.contains("AVAudioSessionModeVoiceChat"));
     assert!(ios_audio.contains("AVAudioSessionCategoryPlayback"));
     assert!(ios_audio.contains("AVAudioSessionModeDefault"));
     assert!(ios_audio.contains("VOICE_MEMO_PLAYBACK_SESSION_ACTIVE"));
+    assert!(ios_audio.contains("compare_exchange(lease_id, 0"));
     for command in [
         "voice_memo_start",
         "voice_memo_status",
         "voice_memo_pause",
         "voice_memo_stop",
         "voice_memo_cancel",
-        "voice_memo_playback_session_start",
+        "send_lxmf_voice_message",
+        "voice_memo_playback_start",
         "voice_memo_playback_session_stop",
         "voice_memo_decode_data",
         "voice_memo_decode_stored",
@@ -7520,6 +8934,8 @@ fn public_channels_are_adult_gated_reportable_and_link_to_public_policies() {
         .expect("settings commands");
     let channels =
         read_source(root.join("dashboard/static/js/channels.js")).expect("channels frontend");
+    let channels_css =
+        read_source(root.join("dashboard/static/css/09-channels.css")).expect("channels styles");
     let nav = read_source(root.join("dashboard/static/js/nav.js")).expect("navigation frontend");
     let legal = read_source(root.join("dashboard/static/js/legal_documents.js"))
         .expect("offline legal documents");
@@ -7531,7 +8947,7 @@ fn public_channels_are_adult_gated_reportable_and_link_to_public_policies() {
     )
     .expect("android activity");
 
-    assert!(db.contains("PUBLIC_CHANNEL_CONSENT_VERSION"));
+    assert!(db.contains("PUBLIC_CHANNEL_CONSENT_VERSION: u16 = 2"));
     assert!(db.contains("PUBLIC_CHANNEL_CONSENT_ACCEPTED_AT_SETTING"));
     assert!(runtime.contains("has_current_public_channel_consent"));
     assert!(runtime.contains("hub.desired_connected = false"));
@@ -7547,13 +8963,20 @@ fn public_channels_are_adult_gated_reportable_and_link_to_public_policies() {
     assert!(interfaces.contains("db::try_set_settings"));
 
     for copy in [
-        "Before you enter public channels",
+        "Public channels",
         "I am 18 or older.",
-        "I agree to the Terms and Community Guidelines.",
-        "independent hubs may contain unmoderated content",
+        "By continuing, you agree to the Terms and Community Guidelines.",
+        "public channels may contain content from people Ratspeak does not control",
     ] {
         assert!(channels.contains(copy));
     }
+    assert!(channels.contains("policiesAccepted: true"));
+    assert!(!channels.contains("var policiesAccepted = acknowledgement"));
+    assert!(channels.contains(
+        "['Privacy', 'privacy'],\n            ['Terms', 'terms'],\n            ['Guidelines', 'guidelines'],\n            ['Support', 'support']"
+    ));
+    assert!(channels.contains("separator.textContent = '·';"));
+    assert!(channels_css.contains(".channel-consent-policy-separator"));
     for url in [
         "https://ratspeak.org/privacy.html",
         "https://ratspeak.org/terms.html",
@@ -7562,12 +8985,23 @@ fn public_channels_are_adult_gated_reportable_and_link_to_public_policies() {
     ] {
         assert!(legal.contains(url));
     }
-    assert!(legal.contains("version: '2026-08-11'"));
+    assert!(legal.contains("version: '2026-08-15'"));
     assert!(legal.contains("Available offline"));
     assert!(legal.contains("function openDocument(documentId)"));
     assert!(legal.contains("View current version online"));
     assert!(legal.contains("Ratspeak does not currently operate a public channel hub."));
     assert!(legal.contains("Network blackholing may also be available for known identities."));
+    assert!(legal.contains("Violence and targeted harm"));
+    assert!(legal.contains("Abuse and exploitation"));
+    for stale in [
+        "Child sexual abuse and exploitation:",
+        "Sexual exploitation and abuse:",
+        "We prioritize child safety",
+        "Do not attach child sexual abuse material",
+        "exploit, endanger, sexualize, groom, or solicit a child",
+    ] {
+        assert!(!legal.contains(stale));
+    }
     assert!(channels.contains("RS.legal.open(documentId)"));
     assert!(channels.contains("RS.legal.open('support')"));
     assert!(nav.contains("data-about-document"));
@@ -7581,5 +9015,30 @@ fn public_channels_are_adult_gated_reportable_and_link_to_public_policies() {
     assert!(state.contains("window.RS.openSupportEmail"));
     assert!(tauri.contains("fn open_support_email"));
     assert!(tauri.contains("open_support_email,"));
+    assert!(tauri.contains("encode_mailto_query_component(subject)"));
+    assert!(!tauri.contains("url::form_urlencoded::Serializer"));
+    assert!(tauri.contains("canOpenURL: ns_url"));
+    assert!(tauri.contains("options: options,"));
+    assert!(tauri.contains("completionHandler: &*completion"));
+    assert!(!tauri.contains("let ok: bool = msg_send![app, openURL: ns_url]"));
     assert!(android.contains("fun openSupportEmail"));
+}
+
+#[test]
+fn service_readiness_refreshes_ui_without_a_startup_toast() {
+    let events = read_source(repo_root().join("dashboard/static/js/tauri_events.js"))
+        .expect("tauri event bridge");
+    let listener = events
+        .split("RS.listen('system_status'")
+        .nth(1)
+        .expect("system status listener")
+        .split("RS.listen('identity_error'")
+        .next()
+        .expect("system status listener body");
+
+    assert!(listener.contains("_initialConnectDone = true"));
+    assert!(listener.contains("loadConversations"));
+    assert!(listener.contains("loadIdentities"));
+    assert!(!listener.contains("showToast"));
+    assert!(!events.contains("Services ready"));
 }

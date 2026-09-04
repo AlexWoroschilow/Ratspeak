@@ -14,16 +14,22 @@ use crate::commands::shared::remove_stored_file_refs;
 use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::helpers::{active_identity_id, sanitize_text, validate_hex};
+#[cfg(feature = "lxst-voice")]
+use crate::lxmf::AudioMessageRequest;
 use crate::lxmf::{
     AttachmentMessageRequest, DeliveryPreference, DeliveryProfile, LxmfManager,
     LxmfSubmissionFailure, MessageSendRequest, ReactionSendRequest, ReplyMessageSendRequest,
 };
 use crate::state::{
     AppState, AttachmentTransferAdmissionError, AttachmentTransferLease,
-    LxmfClientSendAdmissionError, LxmfClientSendCancellation, LxmfClientSendCancellationProbe,
-    LxmfClientSendGuard, StagedAttachment,
+    ImageAttachmentStagingError, LxmfClientSendAdmissionError, LxmfClientSendCancellation,
+    LxmfClientSendCancellationProbe, LxmfClientSendGuard, StagedAttachment,
 };
 use ratspeak_runtime::activity::producer;
+use ratspeak_runtime::image_attachment::{
+    ImageAttachmentDisposition, ImageAttachmentError, ImageSizeProfile, inspect_image_attachment,
+    prepare_image_attachment, unavailable_image_inspection,
+};
 
 const MAX_LXMF_MESSAGE_BYTES: usize = rns_protocol::resource::MAX_RESOURCE_SIZE;
 const ATTACHMENT_IPC_CHUNK_BYTES: usize = 256 * 1024;
@@ -73,7 +79,7 @@ fn queue_lxmf_client_send<T>(
         ))
 }
 
-fn normalize_lxmf_client_msg_id(raw: Option<&str>) -> AppResult<Option<String>> {
+pub(crate) fn normalize_lxmf_client_msg_id(raw: Option<&str>) -> AppResult<Option<String>> {
     let Some(raw) = raw else {
         return Ok(None);
     };
@@ -113,12 +119,24 @@ fn emit_prequeue_lxmf_cancellation(state: &AppState, client_msg_id: &str) -> Val
         json!({
             "step": "cancelled",
             "client_msg_id": client_msg_id,
+            "stop_scope": "preparation",
+            "preparation_stopped": true,
+            "live_owner_stopped": false,
+            "row_marked_stopped": false,
+            "stopped_retrying": false,
+            "may_have_left_device": false,
         }),
     );
     json!({
         "ok": true,
         "cancelled": true,
         "client_msg_id": client_msg_id,
+        "stop_scope": "preparation",
+        "preparation_stopped": true,
+        "live_owner_stopped": false,
+        "row_marked_stopped": false,
+        "stopped_retrying": false,
+        "may_have_left_device": false,
     })
 }
 
@@ -132,15 +150,15 @@ fn cancelled_lxmf_client_send_response(
 }
 
 fn activity_lxmf_delivery_method(
-    method: lxmf_core::constants::DeliveryMethod,
+    method: lxmf_core::message_api::DeliveryMethod,
 ) -> producer::LxmfDeliveryMethod {
     match method {
-        lxmf_core::constants::DeliveryMethod::Direct => producer::LxmfDeliveryMethod::Direct,
-        lxmf_core::constants::DeliveryMethod::Opportunistic => {
+        lxmf_core::message_api::DeliveryMethod::Direct => producer::LxmfDeliveryMethod::Direct,
+        lxmf_core::message_api::DeliveryMethod::Opportunistic => {
             producer::LxmfDeliveryMethod::Opportunistic
         }
-        lxmf_core::constants::DeliveryMethod::Paper => producer::LxmfDeliveryMethod::Paper,
-        lxmf_core::constants::DeliveryMethod::Propagated => {
+        lxmf_core::message_api::DeliveryMethod::Paper => producer::LxmfDeliveryMethod::Paper,
+        lxmf_core::message_api::DeliveryMethod::Propagated => {
             producer::LxmfDeliveryMethod::Propagated
         }
     }
@@ -151,7 +169,7 @@ fn record_lxmf_delivery_queued(
     fence: crate::state::ActivityRequestFence,
     message_id: &str,
     destination_hash: &str,
-    method: lxmf_core::constants::DeliveryMethod,
+    method: lxmf_core::message_api::DeliveryMethod,
 ) {
     state.activity.record_event_fenced(
         || state.is_current_activity_origin_fence(fence),
@@ -437,12 +455,12 @@ pub(crate) async fn ensure_propagation_ready_for_send(
                 lxmf.as_ref()
                     .map(|mgr| mgr.pick_delivery_method(&st.db, &dh, pref, profile))
             })
-            .unwrap_or(lxmf_core::constants::DeliveryMethod::Direct)
+            .unwrap_or(lxmf_core::message_api::DeliveryMethod::Direct)
     })
     .await
     .map_err(|_| AppError::internal("delivery-method preflight task panicked"))?;
 
-    if method != lxmf_core::constants::DeliveryMethod::Propagated {
+    if method != lxmf_core::message_api::DeliveryMethod::Propagated {
         return Ok(());
     }
 
@@ -500,7 +518,7 @@ pub async fn send_lxmf_message(
     state: State<'_, Arc<AppState>>,
     args: SendLxmfArgs,
 ) -> AppResult<Value> {
-    let dest_hash = sanitize_text(&args.dest_hash, 128);
+    let dest_hash = sanitize_text(&args.dest_hash, 128).to_ascii_lowercase();
     let content = sanitize_message_content(&args.content)?;
     let title = sanitize_text(args.title.as_deref().unwrap_or(""), 256);
     let delivery_pref = parse_delivery_preference(args.delivery_method.as_deref());
@@ -662,7 +680,7 @@ pub async fn send_reaction(
     state: State<'_, Arc<AppState>>,
     args: SendReactionArgs,
 ) -> AppResult<Value> {
-    let dest_hash = sanitize_text(&args.dest_hash, 128);
+    let dest_hash = sanitize_text(&args.dest_hash, 128).to_ascii_lowercase();
     let message_id = sanitize_text(&args.message_id, 128);
     let emoji = sanitize_text(&args.emoji, 16);
     let action = sanitize_text(&args.action, 16);
@@ -765,7 +783,7 @@ pub async fn send_lxmf_reply(
     state: State<'_, Arc<AppState>>,
     args: SendReplyArgs,
 ) -> AppResult<Value> {
-    let dest_hash = sanitize_text(&args.dest_hash, 128);
+    let dest_hash = sanitize_text(&args.dest_hash, 128).to_ascii_lowercase();
     let content = sanitize_message_content(&args.content)?;
     let reply_to_id = sanitize_text(args.reply_to_id.as_deref().unwrap_or(""), 128);
     let reply_to_preview = sanitize_text(args.reply_to_preview.as_deref().unwrap_or(""), 200);
@@ -889,9 +907,9 @@ pub async fn send_lxmf_propagated(
     state: State<'_, Arc<AppState>>,
     args: SendPropagatedArgs,
 ) -> AppResult<Value> {
-    use lxmf_core::constants::DeliveryMethod;
+    use lxmf_core::message_api::DeliveryMethod;
 
-    let dest_hash = sanitize_text(&args.dest_hash, 128);
+    let dest_hash = sanitize_text(&args.dest_hash, 128).to_ascii_lowercase();
     let content = sanitize_message_content(&args.content)?;
     let title = sanitize_text(args.title.as_deref().unwrap_or(""), 200);
     let client_msg_id = normalize_lxmf_client_msg_id(args.client_msg_id.as_deref())?;
@@ -1260,12 +1278,201 @@ async fn queue_prepared_attachment(
     }
 }
 
+#[cfg(feature = "lxst-voice")]
+pub(crate) async fn queue_prepared_audio(
+    state: Arc<AppState>,
+    dest_hash: String,
+    delivery_pref: DeliveryPreference,
+    client_msg_id: Option<String>,
+    audio_bytes: Vec<u8>,
+    staged: StagedAttachment,
+) -> AppResult<Value> {
+    let client_send = begin_lxmf_client_send(&state, client_msg_id.as_ref())?;
+    let activity_fence = state.activity_request_fence();
+    let _ = crate::commands::shared::hydrate_contact_identity_for_send(&state, &dest_hash).await;
+    if let Some(response) = cancelled_lxmf_client_send_response(&state, client_send.as_ref()) {
+        return Ok(response);
+    }
+    let propagation_readiness = ensure_propagation_ready_for_send(
+        &state,
+        &dest_hash,
+        delivery_pref,
+        DeliveryProfile::Attachment,
+        client_msg_id.as_deref(),
+    )
+    .await;
+    if let Some(response) = cancelled_lxmf_client_send_response(&state, client_send.as_ref()) {
+        return Ok(response);
+    }
+    propagation_readiness?;
+
+    let identity_id = active_identity_id(&state);
+    let st = Arc::clone(&state);
+    let dh = dest_hash.clone();
+    let cancellation = client_send
+        .as_ref()
+        .map(LxmfClientSendGuard::cancellation_probe);
+    let staged_path = staged.path.clone();
+    let (send_result, staged) = tokio::task::spawn_blocking(move || {
+        let attempt = queue_lxmf_client_send(&st, cancellation.as_ref(), |manager| {
+            Some(
+                manager.send_audio_message_with_preference_report(AudioMessageRequest {
+                    dest_hash_hex: &dh,
+                    content: "Voice message",
+                    title: "",
+                    audio_bytes: &audio_bytes,
+                    staged_path: Some(&staged_path),
+                    db_pool: &st.db,
+                    identity_id: &identity_id,
+                    preference: delivery_pref,
+                }),
+            )
+        });
+        (attempt, staged)
+    })
+    .await
+    .map_err(|_| AppError::internal("send_audio task panicked"))?;
+
+    match send_result {
+        LxmfClientSendAttempt::Queued(Ok(queued)) => {
+            let id = queued.message_id;
+            state.hold_attachment_delivery_lease(id.clone(), staged.into_transfer_lease());
+            if finalize_lxmf_client_send(&state, client_send.as_ref(), &id).await? {
+                return Ok(json!({
+                    "msg_id": id,
+                    "client_msg_id": client_msg_id,
+                    "cancelled": true,
+                }));
+            }
+            schedule_announce_after_user_send_from_origin(&state, &dest_hash, activity_fence);
+            record_lxmf_delivery_queued(&state, activity_fence, &id, &dest_hash, queued.method);
+            state.emit_to_all(
+                "lxmf_step",
+                json!({
+                    "step": "sending",
+                    "message": "Voice message queued for delivery",
+                    "msg_id": id,
+                    "client_msg_id": client_msg_id,
+                }),
+            );
+            broadcast_conversations(Arc::clone(&state));
+            state.lxmf_notify.notify_one();
+            Ok(json!({ "msg_id": id, "client_msg_id": client_msg_id }))
+        }
+        LxmfClientSendAttempt::Queued(Err(LxmfSubmissionFailure::ResourceLimitExceeded {
+            actual_bytes,
+            limit_bytes,
+        })) => {
+            record_lxmf_submission_failed(
+                &state,
+                activity_fence,
+                &dest_hash,
+                producer::LxmfSubmissionFailureReason::AttachmentEnvelopeTooLarge,
+            );
+            emit_lxmf_send_error(
+                &state,
+                client_msg_id.as_deref(),
+                "audio_envelope_too_large",
+                "Voice message exceeds the protocol resource limit",
+            );
+            Err(AppError::new(
+                "audio_envelope_too_large",
+                format!(
+                    "Voice message uses {actual_bytes} bytes; the protocol limit is {limit_bytes} bytes"
+                ),
+            ))
+        }
+        LxmfClientSendAttempt::Queued(Err(LxmfSubmissionFailure::PreparationFailed)) => {
+            record_lxmf_submission_failed(
+                &state,
+                activity_fence,
+                &dest_hash,
+                producer::LxmfSubmissionFailureReason::PreparationFailed,
+            );
+            emit_lxmf_send_error(
+                &state,
+                client_msg_id.as_deref(),
+                "audio_invalid",
+                "Voice message could not be queued",
+            );
+            Err(AppError::new(
+                "audio_invalid",
+                "Voice message could not be queued",
+            ))
+        }
+        LxmfClientSendAttempt::Queued(Err(LxmfSubmissionFailure::StorageFailed)) => {
+            record_lxmf_submission_failed(
+                &state,
+                activity_fence,
+                &dest_hash,
+                producer::LxmfSubmissionFailureReason::AttachmentStorageFailed,
+            );
+            emit_lxmf_send_error(
+                &state,
+                client_msg_id.as_deref(),
+                "audio_storage_failed",
+                "Voice message storage is unavailable",
+            );
+            Err(AppError::new(
+                "audio_storage_failed",
+                "Voice message storage is unavailable",
+            ))
+        }
+        LxmfClientSendAttempt::Cancelled => Ok(emit_prequeue_lxmf_cancellation(
+            &state,
+            client_msg_id.as_deref().unwrap_or_default(),
+        )),
+        LxmfClientSendAttempt::Failed(reason) => {
+            record_lxmf_submission_failed(&state, activity_fence, &dest_hash, reason);
+            let (code, message, error) = match reason {
+                producer::LxmfSubmissionFailureReason::RouterUnavailable => (
+                    "lxmf_not_initialized",
+                    "LXMF not initialized",
+                    AppError::lxmf_not_initialized("LXMF not initialized"),
+                ),
+                producer::LxmfSubmissionFailureReason::PreparationFailed => (
+                    "audio_invalid",
+                    "Voice message could not be queued",
+                    AppError::new("audio_invalid", "Voice message could not be queued"),
+                ),
+                producer::LxmfSubmissionFailureReason::AttachmentBusy => (
+                    "attachment_busy",
+                    "Another media transfer is already active",
+                    AppError::conflict("Another media transfer is already active"),
+                ),
+                producer::LxmfSubmissionFailureReason::AttachmentMemoryPressure => (
+                    "attachment_memory_pressure",
+                    "Media transfers are paused while memory recovers",
+                    AppError::conflict("Media transfers are paused while memory recovers"),
+                ),
+                producer::LxmfSubmissionFailureReason::AttachmentTooLarge => (
+                    "audio_too_large",
+                    "Voice message exceeds the supported size",
+                    AppError::bad_request("Voice message exceeds the supported size"),
+                ),
+                producer::LxmfSubmissionFailureReason::AttachmentEnvelopeTooLarge => (
+                    "audio_envelope_too_large",
+                    "Voice message exceeds the protocol resource limit",
+                    AppError::bad_request("Voice message exceeds the protocol resource limit"),
+                ),
+                producer::LxmfSubmissionFailureReason::AttachmentStorageFailed => (
+                    "audio_storage_failed",
+                    "Voice message storage is unavailable",
+                    AppError::internal("Voice message storage is unavailable"),
+                ),
+            };
+            emit_lxmf_send_error(&state, client_msg_id.as_deref(), code, message);
+            Err(error)
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn send_lxmf_with_attachment(
     state: State<'_, Arc<AppState>>,
     args: SendWithAttachmentArgs,
 ) -> AppResult<Value> {
-    let dest_hash = sanitize_text(&args.dest_hash, 128);
+    let dest_hash = sanitize_text(&args.dest_hash, 128).to_ascii_lowercase();
     let content = sanitize_message_content(args.content.as_deref().unwrap_or(""))?;
     let delivery_pref = parse_delivery_preference(args.delivery_method.as_deref());
     let client_msg_id = normalize_lxmf_client_msg_id(args.client_msg_id.as_deref())?;
@@ -1527,6 +1734,199 @@ pub async fn cancel_attachment_stage(
     Ok(json!({ "cancelled": removed }))
 }
 
+fn map_image_staging_error(error: ImageAttachmentStagingError) -> AppError {
+    match error {
+        ImageAttachmentStagingError::NotFound => AppError::not_found("Image staging expired"),
+        ImageAttachmentStagingError::InvalidState => {
+            AppError::conflict("Image staging is not ready")
+        }
+        ImageAttachmentStagingError::Admission(error) => match error {
+            AttachmentTransferAdmissionError::Busy => {
+                AppError::conflict("Another large attachment is being prepared")
+            }
+            AttachmentTransferAdmissionError::MemoryPressure => {
+                AppError::service_unavailable("Attachment memory budget is currently full")
+            }
+            AttachmentTransferAdmissionError::TooLarge => AppError::new(
+                "attachment_too_large",
+                "Prepared image exceeds the supported attachment limit",
+            ),
+            AttachmentTransferAdmissionError::Storage => AppError::new(
+                "attachment_storage_failed",
+                "Could not update private attachment staging",
+            ),
+        },
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ImageAttachmentStageArgs {
+    pub token: String,
+}
+
+#[tauri::command]
+pub async fn inspect_image_attachment_stage(
+    state: State<'_, Arc<AppState>>,
+    args: ImageAttachmentStageArgs,
+) -> AppResult<Value> {
+    let _preparation = state.image_preparation_lock.lock().await;
+    let snapshot = state
+        .inspect_staged_image_attachment(&args.token)
+        .map_err(map_image_staging_error)?;
+    let source_size = snapshot.source_size;
+    let inspection = tokio::task::spawn_blocking(move || inspect_image_attachment(&snapshot.path))
+        .await
+        .map_err(|_| AppError::internal("image inspection task panicked"))?;
+    let inspection = match inspection {
+        Ok(inspection) => inspection,
+        Err(ImageAttachmentError::TooLarge) => {
+            unavailable_image_inspection(source_size, ImageAttachmentDisposition::TooLarge)
+        }
+        Err(ImageAttachmentError::Io(_)) => {
+            return Err(AppError::new(
+                "attachment_storage_failed",
+                "Could not inspect private image staging",
+            ));
+        }
+        Err(_) => {
+            unavailable_image_inspection(source_size, ImageAttachmentDisposition::Unsupported)
+        }
+    };
+    Ok(json!(inspection))
+}
+
+#[derive(Deserialize)]
+pub struct PrepareImageAttachmentStageArgs {
+    pub token: String,
+    pub profile: ImageSizeProfile,
+}
+
+#[tauri::command]
+pub async fn prepare_image_attachment_stage(
+    state: State<'_, Arc<AppState>>,
+    args: PrepareImageAttachmentStageArgs,
+) -> AppResult<Value> {
+    let _preparation = state.image_preparation_lock.lock().await;
+    let snapshot = state
+        .begin_staged_image_preparation(&args.token)
+        .map_err(map_image_staging_error)?;
+    let output_path = snapshot.path.with_file_name(format!(
+        "{}.prepared.{}",
+        args.token, snapshot.preparation_revision
+    ));
+    let source_path = snapshot.path.clone();
+    let source_name = snapshot.file_name.clone();
+    let profile = args.profile;
+    let prepared_path = output_path.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        prepare_image_attachment(
+            &source_path,
+            &prepared_path,
+            &source_name,
+            profile,
+            ratspeak_runtime::state::LXMF_DELIVERY_LIMIT_MAX_BYTES,
+        )
+    })
+    .await
+    .map_err(|_| AppError::internal("image preparation task panicked"));
+
+    let prepared = match result {
+        Ok(Ok(prepared)) => prepared,
+        Ok(Err(error)) => {
+            let _ = tokio::fs::remove_file(&output_path).await;
+            state.abort_staged_image_preparation(&args.token, snapshot.preparation_revision);
+            return Err(match error {
+                ImageAttachmentError::Animated => AppError::new(
+                    "attachment_image_animated",
+                    "Animated images can be sent as files",
+                ),
+                ImageAttachmentError::TooLarge => AppError::new(
+                    "attachment_image_too_large",
+                    "This image is too large to resize safely",
+                ),
+                ImageAttachmentError::CannotMeetProfile => AppError::new(
+                    "attachment_image_profile_failed",
+                    "Could not prepare the selected photo size",
+                ),
+                ImageAttachmentError::OutputTooLarge => AppError::new(
+                    "attachment_too_large",
+                    "Prepared image exceeds the supported attachment limit",
+                ),
+                ImageAttachmentError::Io(_) => AppError::new(
+                    "attachment_storage_failed",
+                    "Could not prepare private image staging",
+                ),
+                ImageAttachmentError::Unsupported | ImageAttachmentError::Codec(_) => {
+                    AppError::new(
+                        "attachment_image_unsupported",
+                        "This image format can be sent as a file",
+                    )
+                }
+            });
+        }
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&output_path).await;
+            state.abort_staged_image_preparation(&args.token, snapshot.preparation_revision);
+            return Err(error);
+        }
+    };
+
+    let finish_state = Arc::clone(&state);
+    let finish_token = args.token.clone();
+    let finish_path = prepared.path.clone();
+    let finish_name = prepared.file_name.clone();
+    let finish_mime = prepared.mime.to_string();
+    let finish_size = prepared.size;
+    let finish_revision = snapshot.preparation_revision;
+    let finish_result = tokio::task::spawn_blocking(move || {
+        finish_state.finish_staged_image_preparation(
+            &finish_token,
+            finish_revision,
+            finish_path,
+            finish_name,
+            finish_mime,
+            finish_size,
+        )
+    })
+    .await;
+    let finish_result = match finish_result {
+        Ok(result) => result,
+        Err(_) => {
+            let _ = tokio::fs::remove_file(&prepared.path).await;
+            state.abort_staged_image_preparation(&args.token, snapshot.preparation_revision);
+            return Err(AppError::internal("image staging task panicked"));
+        }
+    };
+    if let Err(error) = finish_result {
+        let _ = tokio::fs::remove_file(&prepared.path).await;
+        state.abort_staged_image_preparation(&args.token, snapshot.preparation_revision);
+        return Err(map_image_staging_error(error));
+    }
+
+    Ok(json!({
+        "token": args.token,
+        "file_name": prepared.file_name,
+        "mime": prepared.mime,
+        "size": prepared.size,
+        "width": prepared.width,
+        "height": prepared.height,
+        "profile": prepared.profile,
+        "preview_mime": prepared.preview_mime,
+        "preview_base64": B64.encode(prepared.preview_bytes),
+    }))
+}
+
+#[tauri::command]
+pub async fn mark_image_attachment_stage_as_file(
+    state: State<'_, Arc<AppState>>,
+    args: ImageAttachmentStageArgs,
+) -> AppResult<Value> {
+    state
+        .mark_staged_image_as_file(&args.token)
+        .map_err(map_image_staging_error)?;
+    Ok(json!({ "token": args.token, "as_file": true }))
+}
+
 #[derive(Deserialize)]
 pub struct SendStagedAttachmentArgs {
     pub dest_hash: String,
@@ -1544,7 +1944,7 @@ pub async fn send_lxmf_with_staged_attachment(
     state: State<'_, Arc<AppState>>,
     args: SendStagedAttachmentArgs,
 ) -> AppResult<Value> {
-    let dest_hash = sanitize_text(&args.dest_hash, 128);
+    let dest_hash = sanitize_text(&args.dest_hash, 128).to_ascii_lowercase();
     let content = sanitize_message_content(args.content.as_deref().unwrap_or(""))?;
     let delivery_pref = parse_delivery_preference(args.delivery_method.as_deref());
     let client_msg_id = normalize_lxmf_client_msg_id(args.client_msg_id.as_deref())?;
@@ -1628,11 +2028,33 @@ fn resolve_lxmf_message_id_for_cancel(
     })
 }
 
+#[derive(Clone, Copy, Debug)]
+struct CanonicalLxmfStopResult {
+    live_owner_stopped: bool,
+    row_marked_stopped: bool,
+}
+
+impl CanonicalLxmfStopResult {
+    fn stopped(self) -> bool {
+        self.live_owner_stopped || self.row_marked_stopped
+    }
+
+    fn scope(self) -> &'static str {
+        if self.live_owner_stopped {
+            "active_and_retries"
+        } else if self.row_marked_stopped {
+            "local_record_only"
+        } else {
+            "none"
+        }
+    }
+}
+
 async fn cancel_canonical_lxmf_message(
     state: &Arc<AppState>,
     msg_id: &str,
     client_msg_id: Option<&str>,
-) -> AppResult<bool> {
+) -> AppResult<CanonicalLxmfStopResult> {
     let activity_fence = state.activity_request_fence();
     let st = Arc::clone(state);
     let msg_id_for_cancel = msg_id.to_string();
@@ -1659,8 +2081,11 @@ async fn cancel_canonical_lxmf_message(
     .await
     .map_err(|_| AppError::internal("cancel_lxmf_message db task panicked"))?;
 
-    let cancelled = transport_cancelled || db_cancelled;
-    if cancelled {
+    let result = CanonicalLxmfStopResult {
+        live_owner_stopped: transport_cancelled,
+        row_marked_stopped: db_cancelled,
+    };
+    if result.stopped() {
         state.release_attachment_delivery_lease(msg_id);
         if let Ok(mut times) = state.message_send_times.lock() {
             times.remove(msg_id);
@@ -1675,6 +2100,12 @@ async fn cancel_canonical_lxmf_message(
                 "msg_id": msg_id,
                 "client_msg_id": client_msg_id,
                 "method": method.clone(),
+                "stop_scope": result.scope(),
+                "preparation_stopped": false,
+                "live_owner_stopped": result.live_owner_stopped,
+                "row_marked_stopped": result.row_marked_stopped,
+                "stopped_retrying": result.live_owner_stopped,
+                "may_have_left_device": true,
             }),
         );
         state.activity.record_event_fenced(
@@ -1698,7 +2129,7 @@ async fn cancel_canonical_lxmf_message(
         broadcast_conversations(Arc::clone(state));
         state.lxmf_notify.notify_one();
     }
-    Ok(cancelled)
+    Ok(result)
 }
 
 async fn finalize_lxmf_client_send(
@@ -1719,9 +2150,9 @@ async fn finalize_lxmf_client_send(
         return Ok(false);
     }
 
-    let cancelled =
+    let stopped =
         cancel_canonical_lxmf_message(state, canonical_msg_id, Some(guard.client_msg_id())).await?;
-    if !cancelled {
+    if !stopped.stopped() {
         return Err(AppError::internal(
             "Queued message could not be cancelled before delivery",
         ));
@@ -1753,26 +2184,40 @@ pub async fn cancel_lxmf_message(
                     "ok": true,
                     "cancelled": false,
                     "msg_id": requested_msg_id,
+                    "stop_scope": "none",
+                    "preparation_stopped": false,
+                    "live_owner_stopped": false,
+                    "row_marked_stopped": false,
+                    "stopped_retrying": false,
+                    "may_have_left_device": false,
                 }));
             };
             resolved
         }
     };
-    let cancelled =
-        cancel_canonical_lxmf_message(&state, &msg_id, client_msg_id.as_deref()).await?;
+    let stopped = cancel_canonical_lxmf_message(&state, &msg_id, client_msg_id.as_deref()).await?;
 
     Ok(json!({
         "ok": true,
-        "cancelled": cancelled,
+        "cancelled": stopped.stopped(),
         "msg_id": msg_id,
         "client_msg_id": client_msg_id,
+        "stop_scope": stopped.scope(),
+        "preparation_stopped": false,
+        "live_owner_stopped": stopped.live_owner_stopped,
+        "row_marked_stopped": stopped.row_marked_stopped,
+        "stopped_retrying": stopped.live_owner_stopped,
+        // A canonical hash means the message crossed the preparation boundary.
+        // Stopping our remaining owners and retries cannot recall bytes already
+        // admitted to Reticulum or a device interface.
+        "may_have_left_device": true,
     }))
 }
 
 /// Marks inbound read; returns latest 100 + aggregate unread count.
 #[tauri::command]
 pub async fn get_conversation(state: State<'_, Arc<AppState>>, hash: String) -> AppResult<Value> {
-    let dest_hash = sanitize_text(&hash, 128);
+    let dest_hash = sanitize_text(&hash, 128).to_ascii_lowercase();
     if !validate_hex(&dest_hash, 16, 64) {
         return Err(AppError::bad_request("Invalid identity hash"));
     }
@@ -1800,7 +2245,7 @@ pub async fn get_conversation(state: State<'_, Arc<AppState>>, hash: String) -> 
 
 #[tauri::command]
 pub async fn mark_read(state: State<'_, Arc<AppState>>, hash: String) -> AppResult<Value> {
-    let dest_hash = sanitize_text(&hash, 128);
+    let dest_hash = sanitize_text(&hash, 128).to_ascii_lowercase();
     if !validate_hex(&dest_hash, 16, 64) {
         return Err(AppError::bad_request("Invalid identity hash"));
     }
@@ -1829,7 +2274,7 @@ pub async fn mark_read(state: State<'_, Arc<AppState>>, hash: String) -> AppResu
 
 #[tauri::command]
 pub async fn hide_conversation(state: State<'_, Arc<AppState>>, hash: String) -> AppResult<Value> {
-    let dest_hash = sanitize_text(&hash, 128);
+    let dest_hash = sanitize_text(&hash, 128).to_ascii_lowercase();
     if !validate_hex(&dest_hash, 16, 64) {
         return Err(AppError::bad_request("Invalid identity hash"));
     }
@@ -1867,7 +2312,7 @@ pub async fn delete_conversation(
     state: State<'_, Arc<AppState>>,
     hash: String,
 ) -> AppResult<Value> {
-    let dest_hash = sanitize_text(&hash, 128);
+    let dest_hash = sanitize_text(&hash, 128).to_ascii_lowercase();
     if !validate_hex(&dest_hash, 16, 64) {
         return Err(AppError::bad_request("Invalid identity hash"));
     }
@@ -1938,6 +2383,7 @@ pub async fn api_lxmf_limits(state: State<'_, Arc<AppState>>) -> AppResult<Value
     });
     Ok(json!({
         "max_attachment_bytes": ratspeak_runtime::state::LXMF_DELIVERY_LIMIT_MAX_BYTES,
+        "image_size_prompt_bytes": ratspeak_runtime::image_attachment::IMAGE_SIZE_PROMPT_BYTES,
         "max_message_bytes": MAX_LXMF_MESSAGE_BYTES,
         "efficient_resource_bytes": rns_protocol::resource::MAX_EFFICIENT_SIZE,
         "default_propagation_limit_kb": lxmf_core::constants::PROPAGATION_LIMIT,
@@ -2091,16 +2537,9 @@ fn clean_download_filename(path: &std::path::Path) -> String {
 }
 
 fn download_mime(path: &std::path::Path) -> String {
-    if path
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("lxvm"))
-    {
-        "audio/x-lxst-voice-memo".to_string()
-    } else {
-        mime_guess::from_path(path)
-            .first_or_octet_stream()
-            .to_string()
-    }
+    mime_guess::from_path(path)
+        .first_or_octet_stream()
+        .to_string()
 }
 
 fn received_file_path(state: &AppState, stored_name: &str) -> AppResult<std::path::PathBuf> {
@@ -2315,6 +2754,30 @@ mod tests {
         ] {
             assert!(normalize_lxmf_client_msg_id(Some(invalid)).is_err());
         }
+    }
+
+    #[test]
+    fn canonical_stop_result_distinguishes_live_owner_from_local_record() {
+        let active = CanonicalLxmfStopResult {
+            live_owner_stopped: true,
+            row_marked_stopped: true,
+        };
+        assert!(active.stopped());
+        assert_eq!(active.scope(), "active_and_retries");
+
+        let record_only = CanonicalLxmfStopResult {
+            live_owner_stopped: false,
+            row_marked_stopped: true,
+        };
+        assert!(record_only.stopped());
+        assert_eq!(record_only.scope(), "local_record_only");
+
+        let too_late = CanonicalLxmfStopResult {
+            live_owner_stopped: false,
+            row_marked_stopped: false,
+        };
+        assert!(!too_late.stopped());
+        assert_eq!(too_late.scope(), "none");
     }
 
     /// Catches column-name drift between inline SQL and schema in `db.rs`.

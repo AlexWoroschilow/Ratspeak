@@ -546,7 +546,7 @@ function _channelHubAdminIdentityRow(identityHash, labelText, trailingText, acti
         button.addEventListener('click', function() {
             RS.copyText(identityHash).then(function(ok) {
                 if (typeof showToast === 'function') {
-                    showToast(ok ? 'Identity copied' : 'Could not copy', ok ? 'toast-green' : 'toast-orange', 1800);
+                    showToast(ok ? 'Identity copied' : 'Could not copy', ok ? 'toast-success' : 'toast-error', 1800);
                 }
             });
         });
@@ -1893,13 +1893,13 @@ function channelHubOpenManager(initialOverview) {
                 channelHubOpenManager(nextOverview);
             }
         }).catch(function(error) {
-            if (typeof showToast === 'function') showToast((error && error.message) || 'Could not load your hub', 'toast-red', 3200);
+            if (typeof showToast === 'function') showToast((error && error.message) || 'Could not load your hub', 'toast-error', 3200);
         });
         return;
     }
     if (!_channelHubHostingEnabled(overview)) {
         if (typeof showToast === 'function') {
-            showToast('Turn on Channel hosting in Settings first', 'toast-orange', 3200);
+            showToast('Turn on Channel hosting in Settings first', 'toast-warning', 3200);
         }
         return;
     }
@@ -1962,7 +1962,7 @@ function channelHubOpenManager(initialOverview) {
         var value = addressValue.textContent;
         if (!value) return;
         RS.copyText(value).then(function(ok) {
-            if (typeof showToast === 'function') showToast(ok ? 'Hub address copied' : 'Could not copy', ok ? 'toast-green' : 'toast-orange', 1800);
+            if (typeof showToast === 'function') showToast(ok ? 'Hub address copied' : 'Could not copy', ok ? 'toast-success' : 'toast-error', 1800);
         });
     });
     addressValueRow.appendChild(addressValue);
@@ -2235,7 +2235,7 @@ function channelHubOpenManager(initialOverview) {
                 adminMutationBusy
                     ? 'Another hub change is still being applied'
                     : 'Start the hub before changing channel policy or access',
-                'toast-orange',
+                'toast-warning',
                 2800
             );
         }
@@ -2334,7 +2334,7 @@ function channelHubOpenManager(initialOverview) {
         return loadAdmin();
     }
 
-    function mutateAdmin(args, successText) {
+    function mutateAdmin(args) {
         if (!mutationsAvailable()) {
             return Promise.reject(new Error(
                 adminMutationBusy
@@ -2356,9 +2356,6 @@ function channelHubOpenManager(initialOverview) {
                 adminSnapshot = validatedAdminSnapshot(nextAdmin);
                 registryMutationWarning = false;
                 renderAdmin(adminSnapshot);
-                if (successText && typeof showToast === 'function') {
-                    showToast(successText, 'toast-green', 2200);
-                }
                 return adminSnapshot;
             }
         ).catch(function(mutationError) {
@@ -2457,12 +2454,11 @@ function channelHubOpenManager(initialOverview) {
         renderDirty();
     }
 
-    function applyResult(nextOverview, toastText) {
+    function applyResult(nextOverview) {
         if (_channelHubManagerSequence !== sequence) return null;
         overview = _channelHubApplyOverview(nextOverview);
         error.textContent = '';
         renderStatus(overview);
-        if (toastText && typeof showToast === 'function') showToast(toastText, 'toast-green', 2200);
         return overview;
     }
 
@@ -2495,7 +2491,6 @@ function channelHubOpenManager(initialOverview) {
         error.textContent = '';
         saveConfig().then(function(updated) {
             if (!updated || _channelHubManagerSequence !== sequence) return;
-            if (typeof showToast === 'function') showToast('Hub settings saved', 'toast-green', 2200);
             refreshAdmin();
         }).catch(function(saveError) {
             if (_channelHubManagerSequence !== sequence) return;
@@ -2519,7 +2514,7 @@ function channelHubOpenManager(initialOverview) {
             : RS.invoke('channel_hub_stop');
         request.then(function(nextOverview) {
             if (!nextOverview || _channelHubManagerSequence !== sequence) return;
-            applyResult(nextOverview, action === 'start' ? 'Your hub is ready' : 'Hub stopped');
+            applyResult(nextOverview);
             refreshAdmin();
         }).catch(function(actionError) {
             if (_channelHubManagerSequence !== sequence) return;
@@ -2620,7 +2615,7 @@ function channelHubOpenOwnHub() {
             nickname: typeof _channelsDefaultNickname === 'function' ? _channelsDefaultNickname() : ''
         }).catch(function(error) {
             if (typeof showToast === 'function') {
-                showToast((error && error.message) || 'Could not open your hub', 'toast-red', 3200);
+                showToast((error && error.message) || 'Could not open your hub', 'toast-error', 3200);
             }
         }).then(function() {
             _channelHubHomeBusy = false;

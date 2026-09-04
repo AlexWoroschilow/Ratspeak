@@ -4,6 +4,11 @@ var setupRecoveryMnemonic = '';
 var setupConnectingDotsTimer = null;
 var setupConnectingDotCount = 1;
 
+function dismissSetupKeyboard() {
+    var input = document.getElementById('setup-display-name');
+    if (input && typeof input.blur === 'function') input.blur();
+}
+
 function requestSetupNotificationPermissionIfEnabled() {
     if (typeof isTauriMobile !== 'function' || !isTauriMobile()) return;
     if (typeof rsNotify === 'undefined' || !rsNotify.available()) return;
@@ -249,7 +254,7 @@ function runConnectingProgress() {
         var elapsed = Date.now() - startedAt;
         var remaining = Math.max(0, 2000 - elapsed);
         setTimeout(function() {
-            window.location.href = '/#dashboard';
+            window.location.href = '/#' + setupCompletionView();
             window.location.reload();
         }, remaining);
     }
@@ -295,6 +300,13 @@ function runConnectingProgress() {
     }
 
     pollAlive();
+}
+
+function setupCompletionView() {
+    if (typeof appLandingView === 'function') return appLandingView();
+    var nativeMobile = typeof isTauriMobile === 'function' && isTauriMobile();
+    var compact = typeof isCompactLayout === 'function' && isCompactLayout();
+    return nativeMobile || compact ? 'peers' : 'dashboard';
 }
 
 function showSetupConnectingStep() {
@@ -364,7 +376,7 @@ function completeSetupAfterHardwareIdentity(result, pin) {
     if (!hash || !pin) {
         resetSetupToStart();
         if (typeof showToast === 'function') {
-            showToast('Hardware setup did not return an identity to unlock.', 'toast-red', 6000);
+            showToast('Hardware setup did not provide an identity. Try setup again.', 'toast-error', 6000);
         }
         return;
     }
@@ -386,19 +398,19 @@ function completeSetupAfterHardwareIdentity(result, pin) {
                 message: 'The YubiKey PIN is locked. Ratspeak can reset the key’s PIV application and return to setup. This erases the Ratspeak identity keys on this YubiKey, but does not affect passkeys, FIDO sign-ins, OTP, or other non-PIV features.'
             }).then(function(reset) {
                 if (!reset) {
-                    if (typeof showToast === 'function') showToast(detail, 'toast-red', 7000);
+                    if (typeof showToast === 'function') showToast(detail, 'toast-error', 7000);
                     window.RS.diag('error', '[setup] Hardware identity unlock failed:', detail);
                     return;
                 }
                 RS.invoke('hw_remove', { hash: hash }).catch(function() {}).finally(function() {
                     resetSetupToStart();
-                    if (typeof showToast === 'function') showToast('Security key reset. Set up a new identity or restore from your recovery phrase.', 'toast-green', 7000);
+                    if (typeof showToast === 'function') showToast('Security key reset. Create or restore an identity to continue.', 'toast-success', 7000);
                 });
             });
             return;
         }
         resetSetupToStart();
-        if (typeof showToast === 'function') showToast(detail, 'toast-red', 7000);
+        if (typeof showToast === 'function') showToast(detail, 'toast-error', 7000);
         window.RS.diag('error', '[setup] Hardware identity unlock failed:', detail);
     }
 
@@ -464,7 +476,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     var detail = err ? (err.message || String(err)) : 'Unknown error';
                     window.RS.diag('error', '[setup] Create identity failed:', detail);
                     if (typeof showToast === 'function') {
-                        showToast('Request failed: ' + detail, 'toast-red', 5000);
+                        showToast('Could not complete the request: ' + detail, 'toast-error', 5000);
                     }
                 });
         });
@@ -491,7 +503,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         showCopyConfirmationToast('Recovery phrase');
                     }
                 } else if (typeof showToast === 'function') {
-                    showToast('Could not copy phrase', 'toast-orange', 2000);
+                    showToast('Could not copy the recovery phrase', 'toast-error', 2000);
                 }
             });
         });
@@ -562,6 +574,7 @@ document.addEventListener('DOMContentLoaded', function() {
     var finishBtn = document.getElementById('setup-finish-btn');
     if (finishBtn) {
         finishBtn.addEventListener('click', function() {
+            dismissSetupKeyboard();
             var displayName = document.getElementById('setup-display-name').value.trim();
             finishBtn.disabled = true;
             finishBtn.textContent = 'Connecting...';
@@ -594,7 +607,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 finishBtn.disabled = false;
                 finishBtn.textContent = 'Connect';
                 if (typeof showToast === 'function') {
-                    showToast('Failed to complete setup', 'toast-red', 5000);
+                    showToast('Could not complete setup', 'toast-error', 5000);
                 }
             });
         });
@@ -603,7 +616,7 @@ document.addEventListener('DOMContentLoaded', function() {
     var setupNameInput = document.getElementById('setup-display-name');
     if (setupNameInput && finishBtn) {
         setupNameInput.addEventListener('keydown', function(e) {
-            if (e.key === 'Enter') {
+            if (e.key === 'Enter' && !e.isComposing) {
                 e.preventDefault();
                 if (!finishBtn.disabled) finishBtn.click();
             }

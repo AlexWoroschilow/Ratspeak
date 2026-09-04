@@ -15,6 +15,7 @@ use tokio::sync::watch;
 
 use crate::activity::ActivityRecorder;
 use crate::activity::emitter::EmitterBatchSink;
+use crate::announce::{AnnounceCoordinator, AnnounceSemanticRevision};
 use crate::channels::ChannelsManagerHandle;
 use crate::config::DashboardConfig;
 use crate::lxmf::LxmfManager;
@@ -128,8 +129,27 @@ pub struct StagedAttachment {
     pub is_image: bool,
     written: usize,
     write_in_progress: bool,
+    image_source: bool,
+    image_prepared: bool,
+    image_preparing: bool,
+    image_preparation_revision: u64,
     identity_generation: u64,
     lease: Option<AttachmentTransferLease>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StagedImageAttachmentSnapshot {
+    pub path: PathBuf,
+    pub file_name: String,
+    pub source_size: usize,
+    pub preparation_revision: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ImageAttachmentStagingError {
+    NotFound,
+    InvalidState,
+    Admission(AttachmentTransferAdmissionError),
 }
 
 impl StagedAttachment {
@@ -288,6 +308,38 @@ struct BleRnodeRollbackContext {
     marker: u64,
 }
 
+#[cfg(any(target_os = "android", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AndroidBleReadyCacheTransition {
+    Publish,
+    AlreadyConnected,
+    PhaseMismatch,
+}
+
+#[cfg(any(target_os = "android", test))]
+fn transition_android_ble_cache_to_connected(
+    latest: &mut std::collections::BTreeMap<String, serde_json::Value>,
+) -> AndroidBleReadyCacheTransition {
+    let current = latest
+        .get("ble_rnode")
+        .and_then(|payload| payload.get("state"))
+        .and_then(serde_json::Value::as_str);
+    match current {
+        Some("initializing") => {
+            latest.insert(
+                "ble_rnode".to_string(),
+                serde_json::json!({
+                    "kind": "ble_rnode",
+                    "state": "connected",
+                }),
+            );
+            AndroidBleReadyCacheTransition::Publish
+        }
+        Some("connected") => AndroidBleReadyCacheTransition::AlreadyConnected,
+        _ => AndroidBleReadyCacheTransition::PhaseMismatch,
+    }
+}
+
 /// Closed, snapshot-free failure vocabulary for a native BLE-RNode operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BleRnodeOperationFailure {
@@ -295,6 +347,9 @@ pub enum BleRnodeOperationFailure {
     Connect,
     StartupTimeout,
     Readiness,
+    ReadyStatsTimeout,
+    ReadyObservationLost,
+    ReadySessionReplaced,
     Runtime,
     Cancelled,
 }
@@ -313,6 +368,14 @@ pub enum BleRnodeOperationResult {
 pub struct RNodeLifecycleOperationLease {
     generation: u64,
 }
+
+/// Session-local ownership token for an interface lifecycle transaction.
+///
+/// RNode operations introduced the generation fence, but the same ownership
+/// rule applies to every asynchronously paused or resumed interface. The
+/// original RNode name remains available for RNode-specific readiness and
+/// native-bridge paths.
+pub type InterfaceLifecycleOperationLease = RNodeLifecycleOperationLease;
 
 impl std::fmt::Debug for RNodeLifecycleOperationLease {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -491,15 +554,41 @@ pub struct AppState {
     /// teardown. The handle slot alone cannot make check-then-register atomic.
     pub channel_hub_control_lock: tokio::sync::Mutex<()>,
     pub lxmf: Mutex<Option<LxmfManager>>,
+    /// Serializes immutable LXMF persistence snapshots and their blocking
+    /// writes. Protocol-state mutations take `lxmf` only long enough to
+    /// capture a coherent snapshot; filesystem work must never hold `lxmf`.
+    pub lxmf_persistence_lock: tokio::sync::Mutex<()>,
     /// Public identity keys captured when a local identity is unlocked. Contact
     /// card export is read-only and must not queue behind the LXMF router lock.
     local_identity_public_keys: RwLock<HashMap<String, [u8; 64]>>,
     #[cfg(feature = "lxst-voice")]
     pub lxst_voice: Mutex<Option<crate::voice::LxstVoiceServiceHandle>>,
+    /// Last authoritative LXST call/audio snapshot for WebView reload and
+    /// mobile foreground recovery. Command admission never writes this; only
+    /// the service event loop may publish or clear it.
+    #[cfg(feature = "lxst-voice")]
+    pub(crate) voice_call_snapshot: Mutex<Option<serde_json::Value>>,
     #[cfg(feature = "lxst-voice")]
     pub voice_memo_recording: Mutex<Option<crate::voice_memo::VoiceMemoRecordingHandle>>,
     #[cfg(feature = "lxst-voice")]
     pub voice_memo_control_lock: tokio::sync::Mutex<()>,
+    /// Process-monotonic source for opaque voice-memo recording session IDs.
+    /// It deliberately survives identity-scoped runtime replacement so a stale
+    /// WebView callback cannot target a later recording through ABA reuse.
+    #[cfg(feature = "lxst-voice")]
+    pub(crate) voice_memo_recording_generation: AtomicU64,
+    /// Process-monotonic source for exact native voice-message playback IDs.
+    #[cfg(all(feature = "lxst-voice", any(target_os = "ios", target_os = "android")))]
+    pub(crate) voice_memo_playback_generation: AtomicU64,
+    /// Mobile voice-message output shares each platform's proven native LXST
+    /// speaker layer. Desktop platforms retain the bounded WAV/media backend.
+    #[cfg(all(feature = "lxst-voice", any(target_os = "ios", target_os = "android")))]
+    pub voice_memo_playback: Mutex<Option<crate::voice_memo::VoiceMemoPlaybackHandle>>,
+    /// Decoding a maximum-length memo produces roughly 14 MiB of PCM. Keep one
+    /// native decoder active at a time so concurrent WebView requests cannot
+    /// multiply that allocation.
+    #[cfg(feature = "lxst-voice")]
+    pub voice_memo_decode_lock: tokio::sync::Mutex<()>,
     /// Reserves the shared microphone for an incoming, outgoing, or active
     /// LXST call. Voice-memo startup checks this on the native side so a stale
     /// or suspended WebView cannot open a second capture stream.
@@ -524,6 +613,9 @@ pub struct AppState {
     attachment_transfer_budget: Mutex<AttachmentTransferBudgetState>,
     attachment_pressure_until_ms: AtomicU64,
     attachment_staging: Mutex<HashMap<String, StagedAttachment>>,
+    /// Serializes bounded still-image decoding/encoding across all WebViews.
+    /// The staging registry remains the lifecycle and cancellation authority.
+    pub image_preparation_lock: tokio::sync::Mutex<()>,
     /// Canonical LXMF message hash to the admission permit retained until the
     /// router reports a terminal delivery state. This keeps a queued split
     /// Resource inside the same one-large-transfer budget as its staging and
@@ -536,6 +628,10 @@ pub struct AppState {
     pub lrgp_msg_to_session: Mutex<HashMap<String, LrgpMsgMeta>>,
     pub session_shutdown: RwLock<ShutdownSignal>,
     pub is_foreground: Arc<AtomicBool>,
+    /// Immediate platform visibility used only for user-attention policy.
+    /// Transport foreground transitions may await lifecycle housekeeping, but
+    /// native notification decisions must follow the platform edge at once.
+    notification_foreground: AtomicBool,
     /// Monotonic ticket used to discard a stale asynchronous foreground
     /// transition after a newer background/foreground edge has arrived.
     foreground_transition_generation: AtomicU64,
@@ -548,6 +644,11 @@ pub struct AppState {
     pub foreground_changed: Arc<tokio::sync::Notify>,
     pub propagation_node: Mutex<Option<Arc<Mutex<lxmf_core::propagation_node::PropagationNode>>>>,
     pub last_stats: RwLock<Option<serde_json::Value>>,
+    /// Product readiness for exact runtime-owned RNodes, keyed by the
+    /// runtime-local interface ID. Generic transport `online` is only an
+    /// enabled/connected flag; the UI, announce gate, and interface-up policy
+    /// all project this stricter protocol-ready state instead.
+    rnode_product_readiness: RwLock<HashMap<rns_interface::traits::InterfaceId, bool>>,
     pub last_hub_interfaces: RwLock<Option<serde_json::Value>>,
     /// Latest closed native hardware state, retained across WebView reloads.
     /// Native callbacks must pass their generation/sequence fences before
@@ -561,8 +662,17 @@ pub struct AppState {
     /// Auto-announce interval in seconds (0 = disabled).
     pub announce_interval_tx: watch::Sender<u64>,
     pub announce_interval_rx: watch::Receiver<u64>,
+    /// Single session-local owner for complete Ratspeak presence bursts.
+    pub announce_coordinator: Mutex<AnnounceCoordinator>,
+    /// Process-monotonic semantic revisions sampled by announce intents.
+    announce_content_revision: AtomicU64,
+    announce_interface_revision: AtomicU64,
     /// If true, delivery announces include Ratspeak capability metadata.
     pub announce_ratspeak_usage: AtomicBool,
+    /// Android-only recovery policy for saved BLE RNodes. When disabled,
+    /// unexpected transport loss waits for an explicit Resume Interface while
+    /// leaving the physical RNode's LoRa session untouched.
+    android_ble_rnode_auto_resume: AtomicBool,
     /// Eager-wake for the stats poll loop; loop has 750ms debounce cooldown.
     pub poll_now: Arc<tokio::sync::Notify>,
     /// Live BLE-peer count, driven by `BlePeerEvent::Connected/Disconnected`.
@@ -686,6 +796,9 @@ impl AppState {
                 .and_then(|v| v.parse::<u8>().ok())
                 .map(|v| v != 0)
                 .unwrap_or(true);
+        let initial_android_ble_rnode_auto_resume =
+            crate::db::get_setting(&db, "android_ble_rnode_auto_resume")
+                .is_none_or(|value| value != "false");
 
         let initial_enforce_stamps = crate::db::get_setting(&db, "enforce_stamps")
             .and_then(|v| v.parse::<u8>().ok())
@@ -737,13 +850,24 @@ impl AppState {
             channel_hub: RwLock::new(None),
             channel_hub_control_lock: tokio::sync::Mutex::new(()),
             lxmf: Mutex::new(None),
+            lxmf_persistence_lock: tokio::sync::Mutex::new(()),
             local_identity_public_keys: RwLock::new(HashMap::new()),
             #[cfg(feature = "lxst-voice")]
             lxst_voice: Mutex::new(None),
             #[cfg(feature = "lxst-voice")]
+            voice_call_snapshot: Mutex::new(None),
+            #[cfg(feature = "lxst-voice")]
             voice_memo_recording: Mutex::new(None),
             #[cfg(feature = "lxst-voice")]
             voice_memo_control_lock: tokio::sync::Mutex::new(()),
+            #[cfg(feature = "lxst-voice")]
+            voice_memo_recording_generation: AtomicU64::new(0),
+            #[cfg(all(feature = "lxst-voice", any(target_os = "ios", target_os = "android")))]
+            voice_memo_playback_generation: AtomicU64::new(0),
+            #[cfg(all(feature = "lxst-voice", any(target_os = "ios", target_os = "android")))]
+            voice_memo_playback: Mutex::new(None),
+            #[cfg(feature = "lxst-voice")]
+            voice_memo_decode_lock: tokio::sync::Mutex::new(()),
             #[cfg(feature = "lxst-voice")]
             voice_call_audio_reserved: AtomicBool::new(false),
             #[cfg(feature = "lxst-voice")]
@@ -759,17 +883,20 @@ impl AppState {
             attachment_transfer_budget: Mutex::new(AttachmentTransferBudgetState::default()),
             attachment_pressure_until_ms: AtomicU64::new(0),
             attachment_staging: Mutex::new(HashMap::new()),
+            image_preparation_lock: tokio::sync::Mutex::new(()),
             attachment_delivery_leases: Mutex::new(HashMap::new()),
             inbound_attachment_transfers: Mutex::new(HashMap::new()),
             lrgp_msg_to_session: Mutex::new(HashMap::new()),
             session_shutdown: RwLock::new(ShutdownSignal::new()),
             is_foreground: Arc::new(AtomicBool::new(true)),
+            notification_foreground: AtomicBool::new(true),
             foreground_transition_generation: AtomicU64::new(0),
             network_transition_generation: AtomicU64::new(0),
             network_transition_lock: tokio::sync::Mutex::new(()),
             foreground_changed: Arc::new(tokio::sync::Notify::new()),
             propagation_node: Mutex::new(None),
             last_stats: RwLock::new(None),
+            rnode_product_readiness: RwLock::new(HashMap::new()),
             last_hub_interfaces: RwLock::new(None),
             mobile_hardware_state: RwLock::new(std::collections::BTreeMap::new()),
             lxmf_notify: Arc::new(tokio::sync::Notify::new()),
@@ -778,7 +905,11 @@ impl AppState {
             network_log_level: RwLock::new("standard".into()),
             announce_interval_tx,
             announce_interval_rx,
+            announce_coordinator: Mutex::new(AnnounceCoordinator::default()),
+            announce_content_revision: AtomicU64::new(0),
+            announce_interface_revision: AtomicU64::new(0),
             announce_ratspeak_usage: AtomicBool::new(initial_announce_ratspeak_usage),
+            android_ble_rnode_auto_resume: AtomicBool::new(initial_android_ble_rnode_auto_resume),
             poll_now: Arc::new(tokio::sync::Notify::new()),
             ble_peer_count: AtomicUsize::new(0),
             ble_peers: std::sync::Mutex::new(std::collections::BTreeMap::new()),
@@ -878,6 +1009,15 @@ impl AppState {
         self.native_notifications_enabled.load(Ordering::Relaxed)
     }
 
+    pub fn set_notification_foreground(&self, foreground: bool) {
+        self.notification_foreground
+            .store(foreground, Ordering::Release);
+    }
+
+    pub fn should_surface_native_notification(&self) -> bool {
+        !self.notification_foreground.load(Ordering::Acquire) && self.native_notifications_enabled()
+    }
+
     pub fn install_mobile_platform_bridge(&self, bridge: Arc<dyn MobilePlatformBridge>) {
         if let Ok(mut installed) = self.mobile_platform.write() {
             *installed = bridge;
@@ -942,6 +1082,15 @@ impl AppState {
             .store(enabled, Ordering::Relaxed);
     }
 
+    pub fn android_ble_rnode_auto_resume_enabled(&self) -> bool {
+        self.android_ble_rnode_auto_resume.load(Ordering::Acquire)
+    }
+
+    pub fn set_android_ble_rnode_auto_resume_enabled(&self, enabled: bool) {
+        self.android_ble_rnode_auto_resume
+            .store(enabled, Ordering::Release);
+    }
+
     pub fn bump_identity_session_generation(&self) -> u64 {
         self.identity_session_generation
             .fetch_add(1, Ordering::SeqCst)
@@ -950,6 +1099,26 @@ impl AppState {
 
     pub fn current_identity_session_generation(&self) -> u64 {
         self.identity_session_generation.load(Ordering::SeqCst)
+    }
+
+    pub fn announce_semantic_revision(&self) -> AnnounceSemanticRevision {
+        AnnounceSemanticRevision {
+            identity: self.current_identity_session_generation(),
+            content: self.announce_content_revision.load(Ordering::SeqCst),
+            interface: self.announce_interface_revision.load(Ordering::SeqCst),
+        }
+    }
+
+    pub fn bump_announce_content_revision(&self) -> u64 {
+        self.announce_content_revision
+            .fetch_add(1, Ordering::SeqCst)
+            + 1
+    }
+
+    pub fn bump_announce_interface_revision(&self) -> u64 {
+        self.announce_interface_revision
+            .fetch_add(1, Ordering::SeqCst)
+            + 1
     }
 
     /// Register one optimistic WebView message ID before the command performs
@@ -1080,6 +1249,10 @@ impl AppState {
             is_image,
             written: 0,
             write_in_progress: false,
+            image_source: is_image,
+            image_prepared: !is_image,
+            image_preparing: false,
+            image_preparation_revision: 0,
             identity_generation: self.current_identity_session_generation(),
             lease: Some(lease),
         };
@@ -1160,9 +1333,225 @@ impl AppState {
         let complete = staging.get(token).is_some_and(|staged| {
             staged.identity_generation == self.current_identity_session_generation()
                 && !staged.write_in_progress
+                && !staged.image_preparing
+                && (!staged.image_source || staged.image_prepared)
                 && staged.written == staged.declared_size
         });
         complete.then(|| staging.remove(token)).flatten()
+    }
+
+    pub fn inspect_staged_image_attachment(
+        &self,
+        token: &str,
+    ) -> Result<StagedImageAttachmentSnapshot, ImageAttachmentStagingError> {
+        let staging = self
+            .attachment_staging
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let staged = staging
+            .get(token)
+            .ok_or(ImageAttachmentStagingError::NotFound)?;
+        if staged.identity_generation != self.current_identity_session_generation()
+            || !staged.image_source
+            || staged.image_prepared
+            || staged.image_preparing
+            || staged.write_in_progress
+            || staged.written != staged.declared_size
+        {
+            return Err(ImageAttachmentStagingError::InvalidState);
+        }
+        Ok(StagedImageAttachmentSnapshot {
+            path: staged.path.clone(),
+            file_name: staged.file_name.clone(),
+            source_size: staged.declared_size,
+            preparation_revision: staged.image_preparation_revision,
+        })
+    }
+
+    pub fn begin_staged_image_preparation(
+        &self,
+        token: &str,
+    ) -> Result<StagedImageAttachmentSnapshot, ImageAttachmentStagingError> {
+        let mut staging = self
+            .attachment_staging
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let staged = staging
+            .get_mut(token)
+            .ok_or(ImageAttachmentStagingError::NotFound)?;
+        if staged.identity_generation != self.current_identity_session_generation()
+            || !staged.image_source
+            || staged.image_prepared
+            || staged.image_preparing
+            || staged.write_in_progress
+            || staged.written != staged.declared_size
+        {
+            return Err(ImageAttachmentStagingError::InvalidState);
+        }
+        staged.image_preparing = true;
+        staged.image_preparation_revision =
+            staged.image_preparation_revision.wrapping_add(1).max(1);
+        Ok(StagedImageAttachmentSnapshot {
+            path: staged.path.clone(),
+            file_name: staged.file_name.clone(),
+            source_size: staged.declared_size,
+            preparation_revision: staged.image_preparation_revision,
+        })
+    }
+
+    pub fn finish_staged_image_preparation(
+        &self,
+        token: &str,
+        preparation_revision: u64,
+        prepared_path: PathBuf,
+        file_name: String,
+        mime: String,
+        prepared_size: usize,
+    ) -> Result<(), ImageAttachmentStagingError> {
+        if prepared_size == 0 || prepared_size > rns_protocol::resource::MAX_RESOURCE_SIZE {
+            return Err(ImageAttachmentStagingError::Admission(
+                AttachmentTransferAdmissionError::TooLarge,
+            ));
+        }
+        if std::fs::metadata(&prepared_path)
+            .ok()
+            .and_then(|metadata| usize::try_from(metadata.len()).ok())
+            != Some(prepared_size)
+        {
+            return Err(ImageAttachmentStagingError::Admission(
+                AttachmentTransferAdmissionError::Storage,
+            ));
+        }
+        let mut staging = self
+            .attachment_staging
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let staged = staging
+            .get_mut(token)
+            .ok_or(ImageAttachmentStagingError::NotFound)?;
+        if staged.identity_generation != self.current_identity_session_generation()
+            || !staged.image_source
+            || staged.image_prepared
+            || !staged.image_preparing
+            || staged.image_preparation_revision != preparation_revision
+        {
+            return Err(ImageAttachmentStagingError::InvalidState);
+        }
+
+        let lease = staged
+            .lease
+            .as_mut()
+            .ok_or(ImageAttachmentStagingError::InvalidState)?;
+        let new_lane = if prepared_size > rns_protocol::resource::MAX_EFFICIENT_SIZE {
+            AttachmentTransferLane::Large
+        } else {
+            AttachmentTransferLane::Small
+        };
+        let mut budget = self
+            .attachment_transfer_budget
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match (lease.lane, new_lane) {
+            (AttachmentTransferLane::Small, AttachmentTransferLane::Small) => {
+                let without_old = budget.small_bytes.saturating_sub(lease.bytes);
+                let Some(updated) = without_old.checked_add(prepared_size) else {
+                    return Err(ImageAttachmentStagingError::Admission(
+                        AttachmentTransferAdmissionError::MemoryPressure,
+                    ));
+                };
+                if updated > LXMF_SMALL_ATTACHMENT_BUDGET_BYTES {
+                    return Err(ImageAttachmentStagingError::Admission(
+                        AttachmentTransferAdmissionError::MemoryPressure,
+                    ));
+                }
+                budget.small_bytes = updated;
+                lease.bytes = prepared_size;
+            }
+            (AttachmentTransferLane::Small, AttachmentTransferLane::Large) => {
+                if budget.large_active {
+                    return Err(ImageAttachmentStagingError::Admission(
+                        AttachmentTransferAdmissionError::Busy,
+                    ));
+                }
+                if unix_time_ms() < self.attachment_pressure_until_ms.load(Ordering::Acquire) {
+                    return Err(ImageAttachmentStagingError::Admission(
+                        AttachmentTransferAdmissionError::MemoryPressure,
+                    ));
+                }
+                budget.small_bytes = budget.small_bytes.saturating_sub(lease.bytes);
+                budget.large_active = true;
+                lease.lane = AttachmentTransferLane::Large;
+                lease.bytes = prepared_size;
+            }
+            (AttachmentTransferLane::Large, AttachmentTransferLane::Large) => {
+                lease.bytes = prepared_size;
+            }
+            (AttachmentTransferLane::Large, AttachmentTransferLane::Small) => {
+                if let Some(updated) = budget.small_bytes.checked_add(prepared_size) {
+                    if updated <= LXMF_SMALL_ATTACHMENT_BUDGET_BYTES {
+                        budget.small_bytes = updated;
+                        budget.large_active = false;
+                        lease.lane = AttachmentTransferLane::Small;
+                    }
+                }
+                lease.bytes = prepared_size;
+            }
+        }
+        drop(budget);
+
+        let old_path = std::mem::replace(&mut staged.path, prepared_path);
+        staged.file_name = file_name;
+        staged.mime = mime;
+        staged.declared_size = prepared_size;
+        staged.written = prepared_size;
+        staged.is_image = true;
+        staged.image_source = false;
+        staged.image_prepared = true;
+        staged.image_preparing = false;
+        drop(staging);
+        let _ = std::fs::remove_file(old_path);
+        Ok(())
+    }
+
+    pub fn abort_staged_image_preparation(&self, token: &str, preparation_revision: u64) {
+        let mut staging = self
+            .attachment_staging
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(staged) = staging.get_mut(token) {
+            if staged.image_source
+                && staged.image_preparing
+                && staged.image_preparation_revision == preparation_revision
+            {
+                staged.image_preparing = false;
+            }
+        }
+    }
+
+    pub fn mark_staged_image_as_file(
+        &self,
+        token: &str,
+    ) -> Result<(), ImageAttachmentStagingError> {
+        let mut staging = self
+            .attachment_staging
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let staged = staging
+            .get_mut(token)
+            .ok_or(ImageAttachmentStagingError::NotFound)?;
+        if staged.identity_generation != self.current_identity_session_generation()
+            || !staged.image_source
+            || staged.image_prepared
+            || staged.image_preparing
+            || staged.write_in_progress
+            || staged.written != staged.declared_size
+        {
+            return Err(ImageAttachmentStagingError::InvalidState);
+        }
+        staged.is_image = false;
+        staged.image_source = false;
+        staged.image_prepared = true;
+        Ok(())
     }
 
     pub fn cancel_attachment_staging(&self, token: &str) -> bool {
@@ -1368,7 +1757,7 @@ impl AppState {
     /// origin stale first or waits for/purges the already-admitted draft.
     pub fn is_current_activity_origin_fence(&self, fence: ActivityRequestFence) -> bool {
         let current_epoch = self.identity_switch_lock.epoch();
-        fence.identity_lock_epoch % 2 == 0
+        fence.identity_lock_epoch.is_multiple_of(2)
             && current_epoch == fence.identity_lock_epoch
             && self.current_identity_session_generation() == fence.identity_session_generation
             && self.current_activity_boundary_generation() == fence.activity_boundary_generation
@@ -1486,6 +1875,34 @@ impl AppState {
         let before = operations.len();
         operations.retain(|_, operation| operation.generation != lease.generation);
         operations.len() != before
+    }
+
+    /// Begin a generation-fenced lifecycle transaction for any interface.
+    pub fn begin_interface_lifecycle_operation<I, S>(
+        &self,
+        names: I,
+    ) -> Option<InterfaceLifecycleOperationLease>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.begin_rnode_lifecycle_operation(names)
+    }
+
+    /// Return whether this interface transaction still owns its names.
+    pub fn is_current_interface_lifecycle_operation(
+        &self,
+        lease: &InterfaceLifecycleOperationLease,
+    ) -> bool {
+        self.is_current_rnode_lifecycle_operation(lease)
+    }
+
+    /// Finish only the exact interface transaction represented by `lease`.
+    pub fn finish_interface_lifecycle_operation(
+        &self,
+        lease: &InterfaceLifecycleOperationLease,
+    ) -> bool {
+        self.finish_rnode_lifecycle_operation(lease)
     }
 
     /// Invalidate every active lifecycle operation owning any supplied name.
@@ -2068,6 +2485,9 @@ impl AppState {
         if let Ok(mut stats) = self.last_stats.write() {
             *stats = None;
         }
+        if let Ok(mut readiness) = self.rnode_product_readiness.write() {
+            readiness.clear();
+        }
         if let Ok(mut hub) = self.last_hub_interfaces.write() {
             *hub = None;
         }
@@ -2106,7 +2526,10 @@ impl AppState {
     }
 
     pub fn emit_native_notification(&self, notification: NativeNotification) {
-        if self.native_notifications_enabled() {
+        // This is the final notification ownership boundary. Callers may do
+        // asynchronous work after their initial lifecycle check, so recheck
+        // here to prevent a foreground transition from racing an OS alert.
+        if self.should_surface_native_notification() {
             self.notifier.notify(notification);
         }
     }
@@ -2136,7 +2559,14 @@ impl AppState {
         );
         rns.bind_rnode_activity_session(origin);
         if let Ok(mut r) = self.rns.write() {
+            if let Ok(mut readiness) = self.rnode_product_readiness.write() {
+                readiness.clear();
+            }
+            if let Ok(mut stats) = self.last_stats.write() {
+                *stats = None;
+            }
             *r = Some(rns);
+            self.request_poll_now();
             Some(origin)
         } else {
             None
@@ -2179,8 +2609,255 @@ impl AppState {
         if self.current_identity_session_generation() != origin.identity_generation() {
             return false;
         }
-        rns.as_mut()
-            .is_some_and(|rns| rns.cover_rnode_activity_interface(interface_id, origin))
+        let covered = rns
+            .as_mut()
+            .is_some_and(|rns| rns.cover_rnode_activity_interface(interface_id, origin));
+        drop(rns);
+        if covered {
+            self.set_rnode_product_readiness(interface_id, origin, false);
+        }
+        covered
+    }
+
+    /// Publish exact RNode protocol readiness for the currently installed RNS
+    /// session. Stale observers cannot mutate a replacement session.
+    pub fn set_rnode_product_readiness(
+        &self,
+        interface_id: rns_interface::traits::InterfaceId,
+        origin: RNodeActivityOrigin,
+        ready: bool,
+    ) -> bool {
+        if self.current_identity_session_generation() != origin.identity_generation() {
+            return false;
+        }
+        // Keep the exact RNS session read-locked through the readiness write.
+        // `set_rns` takes these locks in the same order, so a replacement
+        // cannot clear the map and then be repopulated by an old observer.
+        let Ok(rns) = self.rns.read() else {
+            return false;
+        };
+        if self.current_identity_session_generation() != origin.identity_generation()
+            || !rns.as_ref().is_some_and(|rns| {
+                rns.owns_rnode_activity_session(origin)
+                    && rns.is_rnode_activity_interface_covered(
+                        interface_id,
+                        origin.identity_generation(),
+                    )
+            })
+        {
+            return false;
+        }
+        let Ok(mut readiness) = self.rnode_product_readiness.write() else {
+            return false;
+        };
+        if self.current_identity_session_generation() != origin.identity_generation() {
+            return false;
+        }
+        let changed = readiness.insert(interface_id, ready) != Some(ready);
+        drop(readiness);
+        drop(rns);
+        if changed {
+            self.request_poll_now();
+        }
+        true
+    }
+
+    /// Require both driver health and exact protocol readiness for an observed
+    /// RNode. Product readiness is a veto, never a substitute for a carrier
+    /// that the transport has already marked offline. Non-RNode interfaces
+    /// retain their original transport-owned value.
+    pub fn effective_interface_online(
+        &self,
+        interface_id: rns_interface::traits::InterfaceId,
+        transport_online: bool,
+    ) -> bool {
+        self.rnode_product_readiness
+            .read()
+            .ok()
+            .and_then(|readiness| readiness.get(&interface_id).copied())
+            .map(|product_ready| transport_online && product_ready)
+            .unwrap_or(transport_online)
+    }
+
+    /// Return the handle for the exact installed RNS session that owns one
+    /// covered RNode observation. This is narrower than reading `rns`
+    /// directly: a stale Ready observer cannot publish through a replacement
+    /// session, even if that replacement reuses the same interface ID.
+    pub fn rnode_activity_handle_for_origin(
+        &self,
+        interface_id: rns_interface::traits::InterfaceId,
+        origin: RNodeActivityOrigin,
+    ) -> Option<rns_runtime::reticulum::ReticulumHandle> {
+        if self.current_identity_session_generation() != origin.identity_generation() {
+            return None;
+        }
+        let rns = self.rns.read().ok()?;
+        if self.current_identity_session_generation() != origin.identity_generation() {
+            return None;
+        }
+        let rns = rns.as_ref()?;
+        (rns.owns_rnode_activity_session(origin)
+            && rns.is_rnode_activity_interface_covered(interface_id, origin.identity_generation()))
+        .then(|| rns.handle.clone())
+    }
+
+    /// Project authoritative transport entries into the canonical dashboard
+    /// interface-stats shape, applying the exact RNode product-readiness
+    /// overlay in one shared place.
+    pub fn interface_stats_payload(
+        &self,
+        stats: &[rns_transport::messages::InterfaceStatRpcEntry],
+    ) -> serde_json::Value {
+        let readiness = self.rnode_product_readiness.read().ok();
+        Self::interface_stats_payload_with_readiness(stats, readiness.as_deref())
+    }
+
+    fn interface_stats_payload_with_readiness(
+        stats: &[rns_transport::messages::InterfaceStatRpcEntry],
+        readiness: Option<&HashMap<rns_interface::traits::InterfaceId, bool>>,
+    ) -> serde_json::Value {
+        let interfaces = stats
+            .iter()
+            .map(|entry| {
+                let online = readiness
+                    .and_then(|readiness| readiness.get(&entry.id).copied())
+                    .map(|product_ready| entry.online && product_ready)
+                    .unwrap_or(entry.online);
+                serde_json::json!({
+                    "name": entry.name,
+                    "rxb": entry.rx_bytes,
+                    "txb": entry.tx_bytes,
+                    "online": online,
+                    "bitrate": entry.bitrate,
+                    "mtu": entry.mtu,
+                    "mode": entry.mode,
+                    "role": entry.role,
+                    "announce_queue": entry.announce_queue,
+                    "held_announces": entry.held_announces,
+                    "incoming_announce_frequency": entry.incoming_announce_frequency,
+                    "outgoing_announce_frequency": entry.outgoing_announce_frequency,
+                    "incoming_pr_frequency": entry.incoming_pr_frequency,
+                    "outgoing_pr_frequency": entry.outgoing_pr_frequency,
+                    "burst_active": entry.burst_active,
+                    "burst_activated": entry.burst_activated,
+                    "pr_burst_active": entry.pr_burst_active,
+                    "pr_burst_activated": entry.pr_burst_activated,
+                    "announce_rate_target": entry.announce_rate_target,
+                    "announce_rate_grace": entry.announce_rate_grace,
+                    "announce_rate_penalty": entry.announce_rate_penalty,
+                    "announce_cap": entry.announce_cap,
+                    "ifac_size": entry.ifac_size,
+                    "tx_drops": entry.tx_drops,
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({ "interfaces": interfaces })
+    }
+
+    /// Publish one authoritative interface-stats query after an exact RNode
+    /// has reached product readiness.
+    ///
+    /// The transport query remains the sole source of interface rows and byte
+    /// counters. This method only applies the existing exact-ID product-ready
+    /// overlay, updates the canonical cached stats snapshot, and emits the
+    /// normal `stats_update` event. It deliberately does not create a second
+    /// WebView-side readiness signal.
+    pub fn publish_ready_rnode_interface_stats(
+        &self,
+        interface_id: rns_interface::traits::InterfaceId,
+        origin: RNodeActivityOrigin,
+        mode: rns_runtime::reticulum::InstanceMode,
+        stats: &[rns_transport::messages::InterfaceStatRpcEntry],
+    ) -> bool {
+        if self.current_identity_session_generation() != origin.identity_generation() {
+            return false;
+        }
+        // Hold exact session ownership across the readiness projection and
+        // cache write. This shares `set_rns`'s rns -> readiness -> cache lock
+        // order and prevents a stale same-ID observer from refilling a
+        // replacement session's cache.
+        let Ok(rns) = self.rns.read() else {
+            return false;
+        };
+        if self.current_identity_session_generation() != origin.identity_generation()
+            || !rns.as_ref().is_some_and(|rns| {
+                rns.owns_rnode_activity_session(origin)
+                    && rns.is_rnode_activity_interface_covered(
+                        interface_id,
+                        origin.identity_generation(),
+                    )
+            })
+        {
+            return false;
+        }
+        let Ok(readiness) = self.rnode_product_readiness.read() else {
+            return false;
+        };
+        if readiness.get(&interface_id).copied() != Some(true)
+            || !stats
+                .iter()
+                .any(|entry| entry.id == interface_id && entry.online)
+        {
+            return false;
+        }
+
+        let interface_stats = Self::interface_stats_payload_with_readiness(stats, Some(&readiness));
+
+        let any_online = interface_stats["interfaces"]
+            .as_array()
+            .is_some_and(|interfaces| {
+                interfaces.iter().any(|entry| {
+                    entry
+                        .get("online")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                })
+            });
+        let connected = any_online
+            && matches!(
+                mode,
+                rns_runtime::reticulum::InstanceMode::Client
+                    | rns_runtime::reticulum::InstanceMode::Shared
+            );
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        if self.current_identity_session_generation() != origin.identity_generation() {
+            return false;
+        }
+        let Ok(mut cached) = self.last_stats.write() else {
+            return false;
+        };
+        let snapshot = cached.get_or_insert_with(|| {
+            serde_json::json!({
+                "path_table": [],
+                "path_index": {},
+                "path_table_total": 0,
+                "path_table_truncated": false,
+                "rate_table": [],
+                "link_count": 0,
+            })
+        });
+        if !snapshot.is_object() {
+            *snapshot = serde_json::json!({
+                "path_table": [],
+                "path_index": {},
+                "path_table_total": 0,
+                "path_table_truncated": false,
+                "rate_table": [],
+                "link_count": 0,
+            });
+        }
+        snapshot["timestamp"] = serde_json::json!(now);
+        snapshot["connected"] = serde_json::json!(connected);
+        snapshot["interface_stats"] = interface_stats;
+        let snapshot = snapshot.clone();
+        drop(cached);
+        drop(readiness);
+        drop(rns);
+        self.emit_to_all("stats_update", snapshot);
+        true
     }
 
     pub(crate) fn owns_rnode_activity_observation(
@@ -2282,6 +2959,64 @@ impl AppState {
             latest.insert(kind.to_string(), payload.clone());
         }
         self.emit_to_all("mobile_hardware_state", payload);
+    }
+
+    /// Publish Android's healthy BLE-RNode product state only while the exact
+    /// covered runtime observation still belongs to the installed RNS
+    /// session and is protocol-ready. Holding the session/readiness guards
+    /// through emission prevents a stale observer from racing a replacement
+    /// session and painting it connected.
+    #[cfg(any(target_os = "android", test))]
+    pub(crate) fn publish_ready_android_ble_hardware_state_for_rnode_observation(
+        &self,
+        interface_id: rns_interface::traits::InterfaceId,
+        origin: RNodeActivityOrigin,
+    ) -> bool {
+        if self.current_identity_session_generation() != origin.identity_generation() {
+            return false;
+        }
+        let Ok(rns) = self.rns.read() else {
+            return false;
+        };
+        let Some(rns) = rns.as_ref() else {
+            return false;
+        };
+        if self.current_identity_session_generation() != origin.identity_generation()
+            || !rns.owns_rnode_activity_session(origin)
+            || !rns.is_rnode_activity_interface_covered(interface_id, origin.identity_generation())
+            || rns.handle.rnode_runtime(interface_id).is_err()
+        {
+            return false;
+        }
+        let Ok(readiness) = self.rnode_product_readiness.read() else {
+            return false;
+        };
+        if readiness.get(&interface_id).copied() != Some(true) {
+            return false;
+        }
+
+        let Ok(mut latest) = self.mobile_hardware_state.write() else {
+            return false;
+        };
+        // The runtime can be torn down after the first registry lookup while
+        // this observer waits for the product-state cache. Revalidate at the
+        // exact compare-and-transition boundary so an inactive old observer
+        // cannot consume a replacement operation's `initializing` state.
+        if rns.handle.rnode_runtime(interface_id).is_err() {
+            return false;
+        }
+        match transition_android_ble_cache_to_connected(&mut latest) {
+            AndroidBleReadyCacheTransition::Publish => {
+                let payload = latest
+                    .get("ble_rnode")
+                    .cloned()
+                    .expect("published BLE state must exist");
+                self.emit_to_all("mobile_hardware_state", payload);
+            }
+            AndroidBleReadyCacheTransition::AlreadyConnected
+            | AndroidBleReadyCacheTransition::PhaseMismatch => {}
+        }
+        true
     }
 
     pub fn mobile_hardware_state_snapshot(&self) -> serde_json::Value {
@@ -2455,6 +3190,124 @@ mod tests {
 
     fn make_state() -> AppState {
         make_state_with_emitter(Arc::new(ratspeak_core::NoopEmitter))
+    }
+
+    #[test]
+    fn android_ble_rnode_auto_resume_defaults_on_and_updates_atomically() {
+        let state = make_state();
+        assert!(state.android_ble_rnode_auto_resume_enabled());
+        state.set_android_ble_rnode_auto_resume_enabled(false);
+        assert!(!state.android_ble_rnode_auto_resume_enabled());
+        state.set_android_ble_rnode_auto_resume_enabled(true);
+        assert!(state.android_ble_rnode_auto_resume_enabled());
+    }
+
+    #[test]
+    fn android_ble_ready_cache_transition_is_initializing_only() {
+        let mut latest = std::collections::BTreeMap::new();
+        assert_eq!(
+            transition_android_ble_cache_to_connected(&mut latest),
+            AndroidBleReadyCacheTransition::PhaseMismatch
+        );
+
+        for protected in [
+            "waiting_for_radio",
+            "connecting",
+            "disabled",
+            "failed",
+            "conflict",
+        ] {
+            latest.insert(
+                "ble_rnode".to_string(),
+                serde_json::json!({ "kind": "ble_rnode", "state": protected }),
+            );
+            assert_eq!(
+                transition_android_ble_cache_to_connected(&mut latest),
+                AndroidBleReadyCacheTransition::PhaseMismatch
+            );
+            assert_eq!(latest["ble_rnode"]["state"], protected);
+        }
+
+        latest.insert(
+            "ble_rnode".to_string(),
+            serde_json::json!({ "kind": "ble_rnode", "state": "initializing" }),
+        );
+        assert_eq!(
+            transition_android_ble_cache_to_connected(&mut latest),
+            AndroidBleReadyCacheTransition::Publish
+        );
+        assert_eq!(latest["ble_rnode"]["state"], "connected");
+        assert_eq!(
+            transition_android_ble_cache_to_connected(&mut latest),
+            AndroidBleReadyCacheTransition::AlreadyConnected
+        );
+    }
+
+    fn interface_stat(
+        id: rns_interface::traits::InterfaceId,
+        name: &str,
+        online: bool,
+    ) -> rns_transport::messages::InterfaceStatRpcEntry {
+        rns_transport::messages::InterfaceStatRpcEntry {
+            id,
+            name: name.to_string(),
+            rx_bytes: 0,
+            tx_bytes: 0,
+            rx_rate: 0,
+            tx_rate: 0,
+            online,
+            bitrate: 115_200,
+            mtu: 500,
+            mode: "Full".to_string(),
+            role: "normal".to_string(),
+            announce_queue: Some(0),
+            held_announces: 0,
+            incoming_announce_frequency: 0.0,
+            outgoing_announce_frequency: 0.0,
+            incoming_pr_frequency: 0.0,
+            outgoing_pr_frequency: 0.0,
+            burst_active: false,
+            burst_activated: 0.0,
+            pr_burst_active: false,
+            pr_burst_activated: 0.0,
+            clients: None,
+            blocked_ips: None,
+            announce_rate_target: None,
+            announce_rate_grace: None,
+            announce_rate_penalty: None,
+            announce_cap: 0.02,
+            ifac_size: 0,
+            tx_drops: 0,
+        }
+    }
+
+    #[test]
+    fn interface_stats_payload_requires_transport_and_product_ready_at_zero_bytes() {
+        let state = make_state();
+        state
+            .rnode_product_readiness
+            .write()
+            .unwrap()
+            .insert(73, true);
+
+        let payload = state.interface_stats_payload(&[
+            interface_stat(73, "Offline Radio", false),
+            interface_stat(74, "Online Radio", true),
+        ]);
+        let row = &payload["interfaces"][0];
+        assert_eq!(row["name"], "Offline Radio");
+        assert_eq!(row["online"], false);
+        assert_eq!(row["rxb"], 0);
+        assert_eq!(row["txb"], 0);
+        assert_eq!(payload["interfaces"][1]["online"], true);
+
+        state
+            .rnode_product_readiness
+            .write()
+            .unwrap()
+            .insert(74, false);
+        let payload = state.interface_stats_payload(&[interface_stat(74, "Online Radio", true)]);
+        assert_eq!(payload["interfaces"][0]["online"], false);
     }
 
     #[tokio::test]
@@ -2687,6 +3540,87 @@ mod tests {
     }
 
     #[test]
+    fn image_staging_requires_one_exact_preparation_before_send() {
+        let state = Arc::new(make_state());
+        let token = state
+            .begin_attachment_staging("camera.jpg".to_string(), "image/jpeg".to_string(), 6, true)
+            .unwrap();
+        state
+            .append_attachment_staging(&token, 0, b"source")
+            .unwrap();
+        assert!(state.take_completed_attachment_staging(&token).is_none());
+
+        let snapshot = state.begin_staged_image_preparation(&token).unwrap();
+        assert!(matches!(
+            state.begin_staged_image_preparation(&token),
+            Err(ImageAttachmentStagingError::InvalidState)
+        ));
+        let prepared_path = snapshot.path.with_file_name("prepared-image");
+        std::fs::write(&prepared_path, b"done").unwrap();
+        state
+            .finish_staged_image_preparation(
+                &token,
+                snapshot.preparation_revision,
+                prepared_path.clone(),
+                "camera.jpg".to_string(),
+                "image/jpeg".to_string(),
+                4,
+            )
+            .unwrap();
+        assert!(!snapshot.path.exists());
+
+        let staged = state.take_completed_attachment_staging(&token).unwrap();
+        assert_eq!(staged.declared_size, 4);
+        assert_eq!(std::fs::read(&staged.path).unwrap(), b"done");
+        assert!(staged.is_image);
+        drop(staged);
+        assert!(!prepared_path.exists());
+    }
+
+    #[test]
+    fn animated_or_unsupported_image_can_be_explicitly_sent_as_file() {
+        let state = Arc::new(make_state());
+        let token = state
+            .begin_attachment_staging(
+                "animation.gif".to_string(),
+                "image/gif".to_string(),
+                3,
+                true,
+            )
+            .unwrap();
+        state.append_attachment_staging(&token, 0, b"gif").unwrap();
+        state.mark_staged_image_as_file(&token).unwrap();
+        let staged = state.take_completed_attachment_staging(&token).unwrap();
+        assert!(!staged.is_image);
+        assert_eq!(staged.mime, "image/gif");
+    }
+
+    #[test]
+    fn cancelled_image_preparation_cannot_publish_stale_output() {
+        let state = Arc::new(make_state());
+        let token = state
+            .begin_attachment_staging("photo.png".to_string(), "image/png".to_string(), 3, true)
+            .unwrap();
+        state.append_attachment_staging(&token, 0, b"png").unwrap();
+        let snapshot = state.begin_staged_image_preparation(&token).unwrap();
+        assert!(state.cancel_attachment_staging(&token));
+        let prepared_path = snapshot.path.with_file_name("stale-output");
+        std::fs::write(&prepared_path, b"stale").unwrap();
+        assert!(matches!(
+            state.finish_staged_image_preparation(
+                &token,
+                snapshot.preparation_revision,
+                prepared_path.clone(),
+                "photo.png".to_string(),
+                "image/png".to_string(),
+                5,
+            ),
+            Err(ImageAttachmentStagingError::NotFound)
+        ));
+        std::fs::remove_file(prepared_path).unwrap();
+    }
+
+    #[test]
     fn attachment_memory_pressure_clears_staging_but_not_queued_delivery() {
         let state = Arc::new(make_state());
         let size = rns_protocol::resource::MAX_EFFICIENT_SIZE + 1;
@@ -2830,6 +3764,33 @@ mod tests {
         state.bump_identity_session_generation();
         assert!(!state.is_current_activity_request_fence_after_identity_lock(after_runtime_reset));
         drop(identity_guard);
+    }
+
+    #[tokio::test]
+    async fn queued_announce_retry_cannot_cross_runtime_or_identity_replacement() {
+        let state = make_state();
+
+        let same_identity_retry = state.activity_request_fence();
+        assert!(state.is_current_activity_origin_fence(same_identity_retry));
+        state.bump_activity_boundary_generation();
+        assert!(!state.is_current_activity_origin_fence(same_identity_retry));
+        let runtime_admission = state.identity_switch_lock.lock().await;
+        assert!(
+            !state.is_current_activity_request_fence_after_identity_lock(same_identity_retry),
+            "a busy announce prepared before same-identity RNS replacement must not reach egress"
+        );
+        drop(runtime_admission);
+
+        let identity_retry = state.activity_request_fence();
+        assert!(state.is_current_activity_origin_fence(identity_retry));
+        state.bump_identity_session_generation();
+        assert!(!state.is_current_activity_origin_fence(identity_retry));
+        let identity_admission = state.identity_switch_lock.lock().await;
+        assert!(
+            !state.is_current_activity_request_fence_after_identity_lock(identity_retry),
+            "a busy announce prepared before identity replacement must not reach egress"
+        );
+        drop(identity_admission);
     }
 
     #[tokio::test]
@@ -2988,6 +3949,22 @@ mod tests {
     }
 
     #[test]
+    fn generic_interface_lifecycle_fences_tcp_pause_resume() {
+        let state = make_state();
+        let pause = state
+            .begin_interface_lifecycle_operation(["RMAP"])
+            .expect("pause operation");
+        let resume = state
+            .begin_interface_lifecycle_operation(["RMAP"])
+            .expect("resume operation");
+
+        assert!(!state.is_current_interface_lifecycle_operation(&pause));
+        assert!(state.is_current_interface_lifecycle_operation(&resume));
+        assert!(!state.finish_interface_lifecycle_operation(&pause));
+        assert!(state.finish_interface_lifecycle_operation(&resume));
+    }
+
+    #[test]
     fn rnode_lifecycle_multi_name_overlap_invalidates_entire_older_lease() {
         let state = make_state();
         let rename = state
@@ -3086,8 +4063,10 @@ mod tests {
             .expect("operation");
         {
             let mut operations = state.rnode_lifecycle_operations.lock().unwrap();
-            operations.get_mut("LoRa").unwrap().started_at =
-                Instant::now() - RNODE_LIFECYCLE_OPERATION_TTL - Duration::from_secs(1);
+            let expiry_check_at = operations.get("LoRa").unwrap().started_at
+                + RNODE_LIFECYCLE_OPERATION_TTL
+                + Duration::from_secs(1);
+            prune_rnode_lifecycle_operations(&mut operations, expiry_check_at);
         }
 
         assert!(!state.is_current_rnode_lifecycle_operation(&lease));

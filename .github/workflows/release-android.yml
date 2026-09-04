@@ -1,24 +1,50 @@
 name: Release Android
 
 on:
-  push:
-    tags:
-      - "v*"
-  workflow_dispatch:
+  workflow_call:
     inputs:
-      publish_github_release:
-        description: "Publish APK artifacts to a GitHub Release"
+      source_ref:
+        description: "Exact tag or commit to build."
         required: true
+        type: string
+      release_tag:
+        description: "Public version used in artifact names."
+        required: true
+        type: string
+      qualify_release_ref:
+        description: "Bind source BOMs to an existing annotated release tag."
+        required: true
+        type: boolean
+      upload_play:
+        description: "Build and upload a Google Play AAB."
+        required: false
         default: false
         type: boolean
-      release_tag:
-        description: "Release tag to publish when manually dispatching."
+    secrets:
+      ANDROID_UPLOAD_KEYSTORE_BASE64:
+        required: true
+      ANDROID_UPLOAD_KEYSTORE_PASSWORD:
+        required: true
+      ANDROID_UPLOAD_KEY_ALIAS:
+        required: true
+      ANDROID_UPLOAD_KEY_PASSWORD:
+        required: true
+      GOOGLE_PLAY_SERVICE_ACCOUNT_JSON:
+        required: false
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Commit or ref to build; defaults to the selected dispatch ref."
         required: false
         type: string
-      prerelease:
-        description: "Mark the GitHub Release as a prerelease."
+      release_tag:
+        description: "Artifact version label; defaults to the selected ref name."
+        required: false
+        type: string
+      qualify_release_ref:
+        description: "Require release_tag to be the exact annotated product tag."
         required: true
-        default: true
+        default: false
         type: boolean
       upload_play:
         description: "Upload the signed AAB to Google Play."
@@ -27,17 +53,11 @@ on:
         type: boolean
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: release-android-${{ inputs.release_tag || github.ref }}
   cancel-in-progress: false
-
-env:
-  RATSPEAK_RSRETICULUM_REF: ratspeak-v1.0.26d
-  RATSPEAK_RSLXMF_REF: ratspeak-v1.0.26d
-  RATSPEAK_RSLXST_REF: ratspeak-v1.0.26d
-  RATSPEAK_LRGP_REF: ratspeak-v1.0.26d
 
 jobs:
   build:
@@ -46,75 +66,111 @@ jobs:
     timeout-minutes: 150
     steps:
       - name: Checkout Ratspeak
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           path: Ratspeak
+          fetch-depth: 0
+          ref: ${{ inputs.source_ref || github.sha }}
+
+      - name: Setup source qualification Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.22.0
+
+      - name: Load reviewed source set
+        id: source
+        shell: bash
+        working-directory: Ratspeak
+        run: node scripts/release/source-integrity.mjs github-outputs >> "$GITHUB_OUTPUT"
 
       - name: Checkout rsReticulum
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/rsReticulum
-          ref: ${{ env.RATSPEAK_RSRETICULUM_REF }}
+          ref: ${{ steps.source.outputs.rsreticulum_ref }}
           path: rsReticulum
+          fetch-depth: 0
 
       - name: Checkout rsLXMF
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/rsLXMF
-          ref: ${{ env.RATSPEAK_RSLXMF_REF }}
+          ref: ${{ steps.source.outputs.rslxmf_ref }}
           path: rsLXMF
+          fetch-depth: 0
 
       - name: Checkout rsLXST
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/rsLXST
-          ref: ${{ env.RATSPEAK_RSLXST_REF }}
+          ref: ${{ steps.source.outputs.rslxst_ref }}
           path: rsLXST
+          fetch-depth: 0
 
       - name: Checkout lrgp-rs
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/lrgp-rs
-          ref: ${{ env.RATSPEAK_LRGP_REF }}
+          ref: ${{ steps.source.outputs.lrgp_ref }}
           path: lrgp-rs
+          fetch-depth: 0
+
+      - name: Verify reviewed source set
+        shell: bash
+        working-directory: Ratspeak
+        run: node scripts/release/source-integrity.mjs verify-release-source
+
+      - name: Verify qualified release ref
+        if: ${{ inputs.qualify_release_ref }}
+        shell: bash
+        working-directory: Ratspeak
+        env:
+          RELEASE_REF: ${{ inputs.release_tag }}
+        run: |
+          node scripts/release/source-integrity.mjs verify-tags
+          node scripts/release/source-integrity.mjs verify-release-ref "$RELEASE_REF"
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
+          toolchain: ${{ steps.source.outputs.rust_toolchain }}
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
 
       - name: Setup Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: ${{ steps.source.outputs.java }}
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
 
       - name: Install Android NDK
         shell: bash
         run: |
           set +e +o pipefail
-          yes | sdkmanager "ndk;27.0.12077973"
+          yes | sdkmanager "ndk;${{ steps.source.outputs.android_ndk }}"
           sdkmanager_status=${PIPESTATUS[1]}
           set -e -o pipefail
           if [ "$sdkmanager_status" -ne 0 ]; then
             exit "$sdkmanager_status"
           fi
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${{ steps.source.outputs.android_ndk }}" >> "$GITHUB_ENV"
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
-          cache-bin: false
+          cache-bin: true
+          key: tauri-${{ steps.source.outputs.tauri_cli }}
           workspaces: |
             Ratspeak
             Ratspeak/src-tauri
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2.0" --locked
+        shell: bash
+        working-directory: Ratspeak
+        run: bash scripts/release/install-tauri-cli.sh "${{ steps.source.outputs.tauri_cli }}"
 
       - name: Build CSS
         shell: bash
@@ -138,7 +194,7 @@ jobs:
         run: |
           unset TAURI_CONFIG
           unset TAURI_DEV_HOST
-          cargo tauri android build --target aarch64 armv7 x86_64 --apk --split-per-abi
+          cargo tauri android build --target aarch64 armv7 x86_64 --apk --split-per-abi -- --locked
 
       - name: Lint Android release variant
         shell: bash
@@ -146,31 +202,39 @@ jobs:
         run: ./gradlew :app:lintArm64Release --warning-mode all
 
       - name: Build signed Android AAB
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.upload_play }}
+        if: ${{ inputs.upload_play }}
         shell: bash
         working-directory: Ratspeak/src-tauri
         run: |
           unset TAURI_CONFIG
           unset TAURI_DEV_HOST
-          cargo tauri android build --target aarch64 armv7 x86_64 --aab
+          cargo tauri android build --target aarch64 armv7 x86_64 --aab -- --locked
+
+      - name: Validate Android JNI boundaries in final artifacts
+        shell: bash
+        working-directory: Ratspeak
+        run: |
+          python3 scripts/release/assert-android-jni-boundaries.py source
+          mapfile -d '' artifacts < <(
+            find src-tauri/gen/android/app/build/outputs -type f \
+              \( -name '*.apk' -o -name '*.aab' \) -print0
+          )
+          test "${#artifacts[@]}" -ge 3
+          for artifact in "${artifacts[@]}"; do
+            python3 scripts/release/assert-android-jni-boundaries.py archive "$artifact"
+          done
 
       - name: Check for bundled dev URLs
         shell: bash
         working-directory: Ratspeak
         run: bash scripts/release/assert-no-tauri-dev-url.sh src-tauri/gen/android/app/build/outputs
 
-      - name: Validate manual release tag
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_github_release && inputs.release_tag == '' }}
-        shell: bash
-        run: |
-          echo "release_tag is required when publishing a GitHub Release from workflow_dispatch."
-          exit 1
-
       - name: Stage Android release APKs
         shell: bash
         working-directory: Ratspeak
         env:
-          RELEASE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+          RELEASE_VERSION: ${{ inputs.release_tag || github.ref_name }}
+          QUALIFY_RELEASE_REF: ${{ inputs.qualify_release_ref }}
         run: |
           set -euo pipefail
           release_version="${RELEASE_VERSION:?Missing release version.}"
@@ -188,50 +252,47 @@ jobs:
           cp src-tauri/gen/android/app/build/outputs/apk/arm/release/app-arm-release.apk "$out_dir/Ratspeak-${release_version}-android-armv7.apk"
           cp src-tauri/gen/android/app/build/outputs/apk/x86_64/release/app-x86_64-release.apk "$out_dir/Ratspeak-${release_version}-android-x86_64.apk"
 
+          source_args=(bom --output "$out_dir/Ratspeak-${release_version}-android-source-bom.json")
+          if [[ "$QUALIFY_RELEASE_REF" == "true" ]]; then
+            source_args+=(--release-ref "$release_version")
+          fi
+          node scripts/release/source-integrity.mjs "${source_args[@]}"
+
       - name: Write APK checksums
         shell: bash
         working-directory: Ratspeak
         run: |
           checksum_file="checksums-android.txt"
           : > "$checksum_file"
-          find dist/android -type f -name '*.apk' -print0 |
+          find dist/android -type f -print0 |
             sort -z |
             while IFS= read -r -d '' artifact; do
               hash="$(sha256sum "$artifact" | cut -d ' ' -f 1)"
               printf '%s  %s\n' "$hash" "$(basename "$artifact")" >> "$checksum_file"
             done
           test -s "$checksum_file"
+          mv "$checksum_file" dist/android/checksums-android.txt
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: ratspeak-android
-          path: |
-            Ratspeak/src-tauri/gen/android/app/build/outputs/**/*.aab
-            Ratspeak/dist/android/*.apk
-            Ratspeak/checksums-android.txt
+          path: Ratspeak/dist/android/*
           if-no-files-found: error
           retention-days: 7
 
-      - name: Publish GitHub Release
-        if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_github_release) }}
-        uses: softprops/action-gh-release@v3
+      - name: Upload Play AAB artifact
+        if: ${{ inputs.upload_play }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
-          prerelease: ${{ github.event_name == 'push' || inputs.prerelease }}
-          body: |
-            - Public Channels beta: connect, discover, share, and join live RRC hubs with local history, unread counts, mentions, presence, and identity avatars
-            - Bidirectional RRC messages and actions with authenticated reconnect/rejoin and safer malformed-peer handling
-            - Opt-in hub hosting with graphical room, access, moderation, and discovery controls
-            - Mobile Channels polish for keyboard resizing, safe areas, Back navigation, sheets, and partial member lists
-            - Privacy-bounded Activity diagnostics plus broader Reticulum, LXMF, and LXST reliability fixes
-          files: |
-            Ratspeak/dist/android/*.apk
-            Ratspeak/checksums-android.txt
+          name: ratspeak-android-play-aab
+          path: Ratspeak/src-tauri/gen/android/app/build/outputs/**/*.aab
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Upload to Google Play
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.upload_play }}
-        uses: r0adkll/upload-google-play@v1
+        if: ${{ inputs.upload_play }}
+        uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5
         with:
           serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
           packageName: ${{ vars.GOOGLE_PLAY_PACKAGE_NAME || 'org.ratspeak.android' }}

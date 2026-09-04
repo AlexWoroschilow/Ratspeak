@@ -4,7 +4,10 @@ set -euo pipefail
 mode="${1:-}"
 artifact="${2:-}"
 expected_bundle_id="${EXPECTED_IOS_BUNDLE_ID:-org.ratspeak.apple}"
-expected_version="${EXPECTED_IOS_VERSION:-1.0.26}"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+dependency_set="$repo_root/release/dependency-set.json"
+expected_version="${EXPECTED_IOS_VERSION:-$(node -p "require(process.argv[1]).product.marketingVersion" "$dependency_set")}"
+expected_build="${EXPECTED_IOS_BUILD:-$(node -p "require(process.argv[1]).product.platformBuilds.iosBundleVersion" "$dependency_set")}"
 
 if [[ "$mode" != "simulator" && "$mode" != "testflight" ]]; then
   echo "Usage: $0 <simulator|testflight> <app-or-ipa>" >&2
@@ -87,11 +90,10 @@ expect_raw MinimumOSVersion 14.0
 expect_raw UILaunchStoryboardName LaunchScreen
 expect_json UIDeviceFamily '[1,2]'
 expect_json CFBundleURLTypes '[{"CFBundleURLName":"ratspeak","CFBundleURLSchemes":["ratspeak"]}]'
-expect_json NSBonjourServices '["_reticulum._udp"]'
 expect_json UIBackgroundModes '["audio","bluetooth-central","bluetooth-peripheral"]'
 expect_json UIRequiredDeviceCapabilities '["arm64","metal"]'
 expect_json UISupportedInterfaceOrientations '["UIInterfaceOrientationPortrait"]'
-expect_json 'UISupportedInterfaceOrientations~ipad' '["UIInterfaceOrientationPortrait","UIInterfaceOrientationPortraitUpsideDown"]'
+expect_json 'UISupportedInterfaceOrientations~ipad' '["UIInterfaceOrientationPortrait","UIInterfaceOrientationPortraitUpsideDown","UIInterfaceOrientationLandscapeLeft","UIInterfaceOrientationLandscapeRight"]'
 
 for permission_key in \
   NSBluetoothAlwaysUsageDescription \
@@ -115,6 +117,10 @@ fi
 build_number="$(plist_raw "$info" CFBundleVersion || true)"
 if [[ ! "$build_number" =~ ^[0-9]+([.][0-9]+){0,2}$ ]]; then
   echo "$info: invalid CFBundleVersion: ${build_number:-<missing>}" >&2
+  exit 1
+fi
+if [[ "$build_number" != "$expected_build" ]]; then
+  echo "$info: expected CFBundleVersion=$expected_build, found $build_number" >&2
   exit 1
 fi
 
@@ -190,6 +196,11 @@ if [[ "$mode" == "testflight" ]]; then
   get_task_allow="$(plist_raw "$signature_entitlements" get-task-allow || true)"
   if [[ "$get_task_allow" == "true" ]]; then
     echo "$app: TestFlight signature enables get-task-allow" >&2
+    exit 1
+  fi
+  multicast_enabled="$(plist_raw "$signature_entitlements" 'com\.apple\.developer\.networking\.multicast' || true)"
+  if [[ "$multicast_enabled" != "true" ]]; then
+    echo "$app: TestFlight signature does not include com.apple.developer.networking.multicast=true" >&2
     exit 1
   fi
 

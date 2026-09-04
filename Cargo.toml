@@ -9,38 +9,39 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.26"
+version = "1.0.31"
 edition = "2024"
 license = "AGPL-3.0-or-later"
-rust-version = "1.85"
+rust-version = "1.87"
+publish = false
 
 [workspace.dependencies]
 # --- From rsReticulum (sibling directory) ---
-rns-crypto = { path = "../rsReticulum/crates/rns-crypto" }
-rns-wire = { path = "../rsReticulum/crates/rns-wire" }
-rns-identity = { path = "../rsReticulum/crates/rns-identity" }
-rns-transport = { path = "../rsReticulum/crates/rns-transport" }
-rns-link = { path = "../rsReticulum/crates/rns-link" }
-rns-protocol = { path = "../rsReticulum/crates/rns-protocol" }
-rns-interface = { path = "../rsReticulum/crates/rns-interface" }
-rns-runtime = { path = "../rsReticulum/crates/rns-runtime" }
-rns-ratkey = { path = "../rsReticulum/crates/rns-ratkey" }
+rns-crypto = { path = "../rsReticulum/crates/rns-crypto", version = "1.2.0" }
+rns-wire = { path = "../rsReticulum/crates/rns-wire", version = "1.2.0" }
+rns-identity = { path = "../rsReticulum/crates/rns-identity", version = "1.2.0" }
+rns-transport = { path = "../rsReticulum/crates/rns-transport", version = "1.2.0" }
+rns-link = { path = "../rsReticulum/crates/rns-link", version = "1.2.0" }
+rns-protocol = { path = "../rsReticulum/crates/rns-protocol", version = "1.2.0" }
+rns-interface = { path = "../rsReticulum/crates/rns-interface", version = "1.2.0" }
+rns-runtime = { path = "../rsReticulum/crates/rns-runtime", version = "1.2.0" }
+rns-ratkey = { path = "../rsReticulum/crates/rns-ratkey", version = "1.2.0" }
 
 # --- From rsLXMF (sibling directory) ---
-lxmf-core = { path = "../rsLXMF/crates/lxmf-core" }
+lxmf-core = { path = "../rsLXMF/crates/lxmf-core", version = "1.2.0" }
 
 # --- From rsLXST (sibling directory) ---
-lxst-core = { path = "../rsLXST/crates/lxst-core" }
-lxst-rns = { path = "../rsLXST/crates/lxst-rns" }
-lxst-telephony = { path = "../rsLXST/crates/lxst-telephony" }
+lxst-core = { path = "../rsLXST/crates/lxst-core", version = "0.2.0" }
+lxst-rns = { path = "../rsLXST/crates/lxst-rns", version = "0.2.0" }
+lxst-telephony = { path = "../rsLXST/crates/lxst-telephony", version = "0.2.0" }
 
 # --- Internal crates ---
-# lrgp lives in the sibling lrgp-rs/ repo until we adopt crates.io publishing.
-lrgp = { path = "../lrgp-rs" }
-ratspeak-core = { path = "crates/ratspeak-core" }
-ratspeak-db = { path = "crates/ratspeak-db" }
-ratspeak-runtime = { path = "crates/ratspeak-runtime" }
-ratspeak-tauri = { path = "crates/ratspeak-tauri" }
+# lrgp is an exact sibling source dependency; registry publication is out of scope.
+lrgp = { path = "../lrgp-rs", version = "0.4.1" }
+ratspeak-core = { path = "crates/ratspeak-core", version = "1.0.31" }
+ratspeak-db = { path = "crates/ratspeak-db", version = "1.0.31" }
+ratspeak-runtime = { path = "crates/ratspeak-runtime", version = "1.0.31" }
+ratspeak-tauri = { path = "crates/ratspeak-tauri", version = "1.0.31" }
 
 # --- External dependencies ---
 
@@ -58,6 +59,7 @@ bytes = "1"
 
 # Audio
 cpal = { version = "0.15", features = ["oboe-shared-stdcxx"] }
+ogg = { version = "0.9.2", default-features = false }
 
 # Serial
 serialport = "4"
@@ -75,5 +77,8 @@ r2d2_sqlite = "0.25"
 
 # Misc
 hex = "0.4"
+# Keep this exact image version until its newer dependency surface is reviewed
+# independently; the Rust 1.87 MSRV lift does not implicitly authorize it.
+image = { version = "=0.25.5", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 
 # Testing

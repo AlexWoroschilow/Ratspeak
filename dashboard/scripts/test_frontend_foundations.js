@@ -123,10 +123,11 @@ assert(!/<a class="bottom-bar-item"/.test(html), 'mobile primary navigation must
 var revisionMatches = Array.from(html.matchAll(/\/(?:static\/(?!js\/vendor)[^"?]+)\?v=([^"&]+)/g));
 assert(revisionMatches.length > 20, 'first-party asset revisions must be explicit');
 var revisions = new Set(revisionMatches.map(function(match) { return match[1]; }));
-assert.deepStrictEqual(Array.from(revisions), ['ui-20260804'],
+assert.deepStrictEqual(Array.from(revisions), ['ui-20260826-1'],
     'first-party CSS, fonts, and JS must share one build-level asset revision');
 
 var nav = read('static/js/nav.js');
+var stateSource = read('static/js/state.js');
 assert(nav.includes("document.querySelectorAll('#bottom-sheet .bottom-sheet-item[data-view]')"));
 assert(nav.includes('sheet._ratspeakDismiss = close;'));
 assert(nav.includes('var initialView = _resolveInitialView();'));
@@ -137,11 +138,15 @@ var routeContext = {
     window: { location: { hash: '#eventlog' } },
     localStorage: { getItem: function() { return 'propagation'; } },
     isCompactLayout: function() { return true; },
+    isTauriMobile: function() { return false; },
     String: String
 };
 vm.createContext(routeContext);
 vm.runInContext(
+    functionSource(stateSource, 'appUsesMobileNavigation') + '\n' +
+    functionSource(stateSource, 'appLandingView') + '\n' +
     functionSource(nav, '_normalizeViewId') + '\n' +
+    functionSource(nav, '_viewForNavigationSurface') + '\n' +
     functionSource(nav, '_resolveInitialView'),
     routeContext
 );
@@ -150,9 +155,38 @@ assert.strictEqual(routeContext._resolveInitialView(), 'network',
 routeContext.window.location.hash = '#unknown';
 assert.strictEqual(routeContext._resolveInitialView(), 'peers',
     'compact layouts use Peers when no valid deep link exists');
+routeContext.window.location.hash = '#dashboard';
+assert.strictEqual(routeContext._resolveInitialView(), 'peers',
+    'the desktop-only Dashboard route is coerced to Peers on compact layouts');
 routeContext.isCompactLayout = function() { return false; };
+routeContext.isTauriMobile = function() { return true; };
+assert.strictEqual(routeContext._resolveInitialView(), 'peers',
+    'native mobile uses Peers even before the WebView reports its compact width');
+routeContext.isTauriMobile = function() { return false; };
+routeContext.window.location.hash = '#unknown';
 assert.strictEqual(routeContext._resolveInitialView(), 'network',
     'wide layouts normalize the saved route before falling back');
+var setupSource = read('static/js/setup.js');
+var setupRouteContext = {
+    isCompactLayout: function() { return true; },
+    isTauriMobile: function() { return false; }
+};
+vm.createContext(setupRouteContext);
+vm.runInContext(functionSource(setupSource, 'setupCompletionView'), setupRouteContext);
+assert.strictEqual(setupRouteContext.setupCompletionView(), 'peers',
+    'fresh compact setups must enter the real Peers view');
+setupRouteContext.isCompactLayout = function() { return false; };
+assert.strictEqual(setupRouteContext.setupCompletionView(), 'dashboard',
+    'fresh wide setups retain the desktop Dashboard landing view');
+setupRouteContext.isTauriMobile = function() { return true; };
+assert.strictEqual(setupRouteContext.setupCompletionView(), 'peers',
+    'fresh native-mobile setups do not depend on settled viewport dimensions');
+assert(setupSource.includes("window.location.href = '/#' + setupCompletionView()"),
+    'setup completion must route through the responsive landing-view policy');
+assert(!setupSource.includes("window.location.href = '/#dashboard'"),
+    'setup completion must not force the desktop-only Dashboard route');
+assert(!read('static/js/identity.js').includes("window.location.href = '/#dashboard'"),
+    'identity setup fallbacks must use the same platform-aware landing policy');
 var shared = read('static/js/ui_shared.js');
 assert(shared.includes('modal._ratspeakDismiss = function()'));
 assert(shared.includes('RS.composer.resize = function'));
@@ -161,16 +195,35 @@ assert(shared.includes('RS.ui.bindHelpPopovers = function'));
 assert(shared.includes('RS.ui.prefersKeyboardFocus = function'));
 assert(!read('static/js/setup.js').includes('tooltip-backdrop'),
     'setup help must not dim the entire screen with a bespoke backdrop');
+var setupKeyboardBlurred = 0;
+var setupKeyboardContext = {
+    document: {
+        getElementById: function(id) {
+            return id === 'setup-display-name'
+                ? { blur: function() { setupKeyboardBlurred += 1; } }
+                : null;
+        }
+    }
+};
+vm.createContext(setupKeyboardContext);
+vm.runInContext(functionSource(setupSource, 'dismissSetupKeyboard'), setupKeyboardContext);
+setupKeyboardContext.dismissSetupKeyboard();
+assert.strictEqual(setupKeyboardBlurred, 1,
+    'submitting the setup display name must dismiss the mobile keyboard before advancing');
+assert(setupSource.includes("e.key === 'Enter' && !e.isComposing"),
+    'setup must not submit while a mobile IME is still composing the display name');
 var channelsSource = read('static/js/channels.js');
 assert(channelsSource.includes('channel-consent-acknowledgements'),
     'public-channel safety confirmations must remain one coherent acknowledgement group');
 var legalDocumentsSource = read('static/js/legal_documents.js');
 assert(channelsSource.includes('RS.legal.open(documentId)') &&
-    legalDocumentsSource.includes("version: '2026-08-11'") &&
+    legalDocumentsSource.includes("version: '2026-08-15'") &&
     legalDocumentsSource.includes('Available offline'),
     'public-channel policies must open the versioned offline reader');
 assert(legalDocumentsSource.includes('View current version online') &&
-    legalDocumentsSource.includes('Promise.resolve(RS.openExternalUrl(current.url))'),
+    legalDocumentsSource.includes('Promise.resolve(RS.openExternalUrl(current.url))') &&
+    legalDocumentsSource.includes("handleSelector: '.bottom-sheet-handle'") &&
+    legalDocumentsSource.includes('blockIfScrolled: false'),
     'the offline reader must retain an explicit, failure-aware path to the current online copy');
 assert(channelsSource.includes('RS.ui.focusAfterUpdate(initialFocus)'),
     'compact channel sheets must not force keyboard focus during touch navigation');

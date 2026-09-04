@@ -26,12 +26,19 @@ pub fn bluetooth_authorization() -> &'static str {
 /// not configure AVAudioSession; iOS' default session is playback-only.
 pub struct VoiceAudioSessionGuard;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+/// Exact owner of a playback-only audio session used by native voice-message
+/// output. The lease check in `Drop` prevents delayed teardown from
+/// deactivating a replacement memo, call, or recorder session.
+pub struct VoiceMemoPlaybackSessionGuard {
+    lease_id: u64,
+}
 
-/// Memo playback is driven by WKWebView, while calls and recording are driven
-/// by the native audio stack. Track only the playback lease here so a delayed
-/// WebView cleanup cannot deactivate a newer call/recording session.
-static VOICE_MEMO_PLAYBACK_SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Exact process-local owner of the native playback-only AVAudioSession. Zero
+/// means there is no playback lease. A delayed worker stop may release only
+/// the lease it acquired, never a replacement call, recorder, or playback.
+static VOICE_MEMO_PLAYBACK_SESSION_ACTIVE: AtomicU64 = AtomicU64::new(0);
 
 impl VoiceAudioSessionGuard {
     pub fn activate() -> Result<Self, String> {
@@ -46,8 +53,50 @@ impl Drop for VoiceAudioSessionGuard {
     }
 }
 
+impl VoiceMemoPlaybackSessionGuard {
+    pub fn activate(lease_id: u64) -> Result<Self, String> {
+        activate_voice_memo_playback_session(lease_id)?;
+        Ok(Self { lease_id })
+    }
+}
+
+impl Drop for VoiceMemoPlaybackSessionGuard {
+    fn drop(&mut self) {
+        deactivate_voice_memo_playback_session(self.lease_id);
+    }
+}
+
 #[link(name = "AVFAudio", kind = "framework")]
 unsafe extern "C" {}
+
+// AVAudioSessionErrorCode values from CoreAudioTypes/AudioSessionTypes.h.
+// Keep these local rather than adding an FFI header dependency for two closed
+// classifications. The raw NSError description may contain platform details
+// and must not cross the application boundary.
+const AV_AUDIO_SESSION_ERROR_SIRI_IS_RECORDING: isize = 0x7369_7269;
+const AV_AUDIO_SESSION_ERROR_INSUFFICIENT_PRIORITY: isize = 0x2170_7269;
+
+fn audio_session_error_code(error: *mut objc2::runtime::AnyObject) -> Option<isize> {
+    if error.is_null() {
+        return None;
+    }
+    // SAFETY: AVAudioSession methods populate `error` with an NSError. `-code`
+    // is a synchronous NSInteger getter available on every supported iOS.
+    Some(unsafe { objc2::msg_send![error, code] })
+}
+
+fn microphone_session_failure(
+    error: *mut objc2::runtime::AnyObject,
+    fallback: &'static str,
+) -> String {
+    match audio_session_error_code(error) {
+        Some(AV_AUDIO_SESSION_ERROR_INSUFFICIENT_PRIORITY)
+        | Some(AV_AUDIO_SESSION_ERROR_SIRI_IS_RECORDING) => {
+            "Another app or call is using the microphone".to_string()
+        }
+        _ => fallback.to_string(),
+    }
+}
 
 fn configure_voice_audio_session() -> Result<(), String> {
     use objc2::msg_send;
@@ -55,7 +104,7 @@ fn configure_voice_audio_session() -> Result<(), String> {
 
     // A capture/call session supersedes memo playback. Clear its lease before
     // reconfiguring so a late playback stop cannot deactivate this session.
-    VOICE_MEMO_PLAYBACK_SESSION_ACTIVE.store(false, Ordering::Release);
+    VOICE_MEMO_PLAYBACK_SESSION_ACTIVE.store(0, Ordering::Release);
 
     unsafe {
         let session_class = AnyClass::get(c"AVAudioSession")
@@ -87,13 +136,19 @@ fn configure_voice_audio_session() -> Result<(), String> {
             error: &mut error
         ];
         if !configured.as_bool() {
-            return Err("iOS could not configure the voice audio session".to_string());
+            return Err(microphone_session_failure(
+                error,
+                "iOS could not configure the voice audio session",
+            ));
         }
 
         error = std::ptr::null_mut();
         let active: Bool = msg_send![session, setActive: true, error: &mut error];
         if !active.as_bool() {
-            return Err("iOS could not activate the voice audio session".to_string());
+            return Err(microphone_session_failure(
+                error,
+                "iOS could not activate the voice audio session",
+            ));
         }
     }
     Ok(())
@@ -105,9 +160,13 @@ fn configure_voice_audio_session() -> Result<(), String> {
 /// may prefer the receiver route. Recorded messages are ordinary media: the
 /// playback category follows the selected speaker/headset route and continues
 /// to work when the Ring/Silent switch is enabled.
-pub fn activate_voice_memo_playback_session() -> Result<(), String> {
+pub fn activate_voice_memo_playback_session(lease_id: u64) -> Result<(), String> {
     use objc2::msg_send;
     use objc2::runtime::{AnyClass, AnyObject, Bool};
+
+    if lease_id == 0 {
+        return Err("Voice message playback lease is invalid".to_string());
+    }
 
     unsafe {
         let session_class = AnyClass::get(c"AVAudioSession")
@@ -148,16 +207,22 @@ pub fn activate_voice_memo_playback_session() -> Result<(), String> {
             return Err("iOS could not activate voice message playback".to_string());
         }
     }
-    VOICE_MEMO_PLAYBACK_SESSION_ACTIVE.store(true, Ordering::Release);
+    VOICE_MEMO_PLAYBACK_SESSION_ACTIVE.store(lease_id, Ordering::Release);
     Ok(())
 }
 
 /// Release playback only when this process still owns the playback lease.
 /// Calls and capture clear the lease before replacing the AVAudioSession.
-pub fn deactivate_voice_memo_playback_session() {
-    if VOICE_MEMO_PLAYBACK_SESSION_ACTIVE.swap(false, Ordering::AcqRel) {
-        deactivate_voice_audio_session();
+pub fn deactivate_voice_memo_playback_session(lease_id: u64) -> bool {
+    if lease_id == 0
+        || VOICE_MEMO_PLAYBACK_SESSION_ACTIVE
+            .compare_exchange(lease_id, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+    {
+        return false;
     }
+    deactivate_voice_audio_session();
+    true
 }
 
 fn deactivate_voice_audio_session() {

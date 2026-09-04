@@ -20,6 +20,8 @@ use ratspeak_runtime::activity::producer::{
 use ratspeak_runtime::mobile_platform::NativeBleRnodeDisconnect;
 #[cfg(all(feature = "ble", target_os = "android"))]
 use ratspeak_runtime::mobile_platform::NativeBleRnodeRequest;
+#[cfg(all(feature = "ble", not(target_os = "android")))]
+use ratspeak_runtime::rns::ble_rnode_startup_options;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tauri::State;
@@ -48,7 +50,9 @@ use crate::commands::shared::{
 use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::helpers::sanitize_text;
-use crate::state::{ActivityRequestFence, AppState, RNodeLifecycleOperationLease};
+use crate::state::{
+    ActivityRequestFence, AppState, InterfaceLifecycleOperationLease, RNodeLifecycleOperationLease,
+};
 
 const DEFAULT_PEERS_SORT: &str = "last_seen";
 const DEFAULT_THEME_FAMILY: &str = "ratspeak";
@@ -1113,6 +1117,7 @@ pub async fn api_app_settings(state: State<'_, Arc<AppState>>) -> AppResult<Valu
     Ok(json!({
         "auto_announce_interval": *state.announce_interval_rx.borrow(),
         "announce_ratspeak_usage": state.announce_ratspeak_usage_enabled(),
+        "android_ble_rnode_auto_resume": state.android_ble_rnode_auto_resume_enabled(),
         "peers_sort": persisted_peers_sort(&state),
         "hardware_session_timeout": hw_timeout,
         "developer_mode": developer_mode,
@@ -1129,7 +1134,7 @@ pub async fn api_app_settings(state: State<'_, Arc<AppState>>) -> AppResult<Valu
     }))
 }
 
-/// Persist the versioned, adults-only public-channel acknowledgement.
+/// Persist the versioned public-channel acknowledgement.
 ///
 /// The frontend supplies the version it displayed. Rejecting stale/future
 /// values prevents an old WebView or crafted IPC call from recording consent
@@ -1147,7 +1152,7 @@ fn validate_public_channel_consent(
     }
     if !adult_confirmed || !independent_hubs_understood || !policies_accepted {
         return Err(AppError::bad_request(
-            "Confirm every public-channel acknowledgement before continuing.",
+            "Confirm the public-channel acknowledgements before continuing.",
         ));
     }
     Ok(())
@@ -1427,6 +1432,7 @@ pub async fn set_announce_ratspeak_usage(
     state: State<'_, Arc<AppState>>,
     enabled: bool,
 ) -> AppResult<Value> {
+    let activity_origin = state.activity_request_fence();
     let persisted = if enabled { "1" } else { "0" };
     db::spawn_db(state.db.clone(), move |p| {
         db::try_set_setting(&p, "announce_ratspeak_usage", persisted)
@@ -1450,7 +1456,59 @@ pub async fn set_announce_ratspeak_usage(
             "peers_sort": persisted_peers_sort(&state),
         }),
     );
+    state.bump_announce_content_revision();
+    crate::send_typed_announce_from_origin(
+        &state,
+        crate::announce::AnnounceOrigin::ProfileChanged,
+        activity_origin,
+    )
+    .await;
     Ok(json!({ "enabled": enabled }))
+}
+
+#[tauri::command]
+pub async fn set_android_ble_rnode_auto_resume(
+    state: State<'_, Arc<AppState>>,
+    enabled: bool,
+) -> AppResult<Value> {
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (state, enabled);
+        Err(AppError::bad_request(
+            "Bluetooth RNode auto-resume is available only on Android",
+        ))
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        let previous = state.android_ble_rnode_auto_resume_enabled();
+        let bridge = state.mobile_platform_bridge();
+        if !bridge.set_android_ble_rnode_auto_resume(enabled) {
+            return Err(AppError::internal(
+                "Android Bluetooth recovery policy is unavailable",
+            ));
+        }
+
+        let persisted = if enabled { "true" } else { "false" };
+        let saved = db::spawn_db(state.db.clone(), move |p| {
+            db::try_set_setting(&p, "android_ble_rnode_auto_resume", persisted)
+        })
+        .await
+        .map_err(|_| AppError::internal("Android auto-resume db task panicked"))?;
+        if let Err(error) = saved {
+            let _ = bridge.set_android_ble_rnode_auto_resume(previous);
+            return Err(AppError::database_unavailable(format!(
+                "Failed to save Bluetooth recovery setting: {error}"
+            )));
+        }
+
+        state.set_android_ble_rnode_auto_resume_enabled(enabled);
+        state.emit_to_all(
+            "app_settings_updated",
+            json!({ "android_ble_rnode_auto_resume": enabled }),
+        );
+        Ok(json!({ "android_ble_rnode_auto_resume": enabled }))
+    }
 }
 
 #[tauri::command]
@@ -2174,24 +2232,17 @@ fn find_config_interface(config_dir: &std::path::Path, group: &str, name: &str) 
         })
 }
 
-fn interface_group_candidates(iface_type: &str) -> &'static [&'static str] {
+fn interface_group_candidates(iface_type: &str) -> Option<&'static [&'static str]> {
     match iface_type {
-        "rnode" | "lora" => &["rnode"],
-        "auto" | "local" => &["auto"],
-        "tcp_client" => &["tcp_client"],
-        "tcp_server" => &["tcp_server"],
-        "backbone_client" => &["backbone_client"],
-        "backbone_server" => &["backbone_server"],
-        "tcp" => &["tcp_client", "backbone_client"],
-        "host" => &["tcp_server", "backbone_server"],
-        _ => &[
-            "rnode",
-            "auto",
-            "tcp_client",
-            "tcp_server",
-            "backbone_client",
-            "backbone_server",
-        ],
+        "rnode" | "lora" => Some(&["rnode"]),
+        "auto" | "local" => Some(&["auto"]),
+        "tcp_client" => Some(&["tcp_client"]),
+        "tcp_server" => Some(&["tcp_server"]),
+        "backbone_client" => Some(&["backbone_client"]),
+        "backbone_server" => Some(&["backbone_server"]),
+        "tcp" => Some(&["tcp_client", "backbone_client"]),
+        "host" => Some(&["tcp_server", "backbone_server"]),
+        _ => None,
     }
 }
 
@@ -2201,24 +2252,20 @@ fn find_config_interface_with_group(
     name: &str,
 ) -> Option<(String, Value)> {
     let ifaces = crate::rns_config::get_all_interfaces(config_dir);
-    let mut groups = Vec::new();
-    if let Some(iface_type) = iface_type {
-        groups.extend(interface_group_candidates(iface_type).iter().copied());
-    }
-    for group in [
+    const ALL_GROUPS: &[&str] = &[
         "rnode",
         "auto",
         "tcp_client",
         "tcp_server",
         "backbone_client",
         "backbone_server",
-    ] {
-        if !groups.contains(&group) {
-            groups.push(group);
-        }
-    }
+    ];
+    let groups = match iface_type {
+        Some(iface_type) => interface_group_candidates(iface_type)?,
+        None => ALL_GROUPS,
+    };
 
-    for group in groups {
+    for &group in groups {
         if let Some(entry) = ifaces.get(group).and_then(Value::as_array).and_then(|arr| {
             arr.iter()
                 .find(|entry| entry.get("name").and_then(Value::as_str) == Some(name))
@@ -2229,6 +2276,40 @@ fn find_config_interface_with_group(
     }
 
     None
+}
+
+/// Mutate exactly one named interface block. Duplicate names and concurrent
+/// edits fail closed instead of toggling whichever block happens to be found.
+fn set_exact_interface_enabled(
+    config_dir: &std::path::Path,
+    name: &str,
+    enabled: bool,
+) -> AppResult<()> {
+    let revision = crate::rns_config::snapshot_interface_block(config_dir, name).map_err(
+        |error| match error {
+            crate::rns_config::InterfaceBlockSnapshotError::NotFound => {
+                AppError::bad_request("Interface not found")
+            }
+            crate::rns_config::InterfaceBlockSnapshotError::Ambiguous => {
+                AppError::conflict("More than one interface has this name")
+            }
+            crate::rns_config::InterfaceBlockSnapshotError::ReadFailed => {
+                AppError::internal("Config revision read error")
+            }
+        },
+    )?;
+    match crate::rns_config::set_interface_enabled_if_revision(config_dir, &revision, enabled) {
+        crate::rns_config::InterfaceBlockCasOutcome::Applied => Ok(()),
+        crate::rns_config::InterfaceBlockCasOutcome::Stale => Err(AppError::conflict(
+            "Interface settings changed; retry the action",
+        )),
+        crate::rns_config::InterfaceBlockCasOutcome::NotFound => {
+            Err(AppError::bad_request("Interface not found"))
+        }
+        crate::rns_config::InterfaceBlockCasOutcome::WriteFailed => {
+            Err(AppError::internal("Config write error"))
+        }
+    }
 }
 
 fn rnode_config_from_entry(entry: &Value) -> Option<EditableInterfaceConfig> {
@@ -2708,6 +2789,21 @@ impl OwnedRnodeReadinessError {
     fn is_timeout(self) -> bool {
         matches!(self, Self::Readiness(RnodeReadinessFailure::Timeout))
     }
+
+    fn ready_stats_failure_code(self) -> Option<&'static str> {
+        match self {
+            Self::Readiness(RnodeReadinessFailure::ReadyStatsPublication(
+                crate::commands::rnode_readiness::RnodeReadyStatsPublicationFailure::Timeout,
+            )) => Some("ready_stats_timeout"),
+            Self::Readiness(RnodeReadinessFailure::ReadyStatsPublication(
+                crate::commands::rnode_readiness::RnodeReadyStatsPublicationFailure::ObservationLost,
+            )) => Some("ready_observation_lost"),
+            Self::Readiness(RnodeReadinessFailure::ReadyStatsPublication(
+                crate::commands::rnode_readiness::RnodeReadyStatsPublicationFailure::SessionReplaced,
+            )) => Some("ready_session_replaced"),
+            _ => None,
+        }
+    }
 }
 
 /// Wait for the exact runtime returned by one product operation. A replacement
@@ -2913,29 +3009,50 @@ async fn resolve_android_usb_runtime_selector(
         })
 }
 
+type AndroidUsbPreflightTarget = (
+    String,
+    Option<RnodeUsbSelectorSettings>,
+    crate::rns_config::InterfaceBlockRevision,
+);
+
+/// Resolve Android USB work only after resolving the selected interface's
+/// exact class. A TCP/Auto/Backbone resume must never enter the RNode preflight.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn android_usb_preflight_target(
+    config_dir: &std::path::Path,
+    iface_type: Option<&str>,
+    name: &str,
+) -> AppResult<Option<AndroidUsbPreflightTarget>> {
+    let (group, entry) = find_config_interface_with_group(config_dir, iface_type, name)
+        .ok_or_else(|| AppError::bad_request("Interface not found"))?;
+    if group != "rnode" {
+        return Ok(None);
+    }
+    let port = cfg_str(&entry, "port").unwrap_or_default();
+    if !port.starts_with("androidusb://") {
+        return Ok(None);
+    }
+    let selector = cfg_u16(&entry, "usb_vendor_id")
+        .zip(cfg_u16(&entry, "usb_product_id"))
+        .map(|(vendor_id, product_id)| RnodeUsbSelectorSettings {
+            vendor_id,
+            product_id,
+            serial_number: cfg_non_empty_str(&entry, "usb_serial_number"),
+        });
+    let revision = crate::rns_config::snapshot_interface_block(config_dir, name)
+        .map_err(|_| AppError::internal("Config revision read error"))?;
+    Ok(Some((port, selector, revision)))
+}
+
 #[cfg(target_os = "android")]
 async fn preflight_android_usb_selector_for_interface(
     state: &AppState,
     config_dir: &std::path::Path,
+    iface_type: Option<&str>,
     name: &str,
 ) -> AppResult<()> {
     let preflight = with_rns_config_lock(state, || {
-        let entry = find_config_interface(config_dir, "rnode", name)
-            .ok_or_else(|| AppError::bad_request("Radio interface not found"))?;
-        let port = cfg_str(&entry, "port").unwrap_or_default();
-        if !port.starts_with("androidusb://") {
-            return Ok(None);
-        }
-        let selector = cfg_u16(&entry, "usb_vendor_id")
-            .zip(cfg_u16(&entry, "usb_product_id"))
-            .map(|(vendor_id, product_id)| RnodeUsbSelectorSettings {
-                vendor_id,
-                product_id,
-                serial_number: cfg_non_empty_str(&entry, "usb_serial_number"),
-            });
-        let revision = crate::rns_config::snapshot_interface_block(config_dir, name)
-            .map_err(|_| AppError::internal("Config revision read error"))?;
-        Ok::<_, AppError>(Some((port, selector, revision)))
+        android_usb_preflight_target(config_dir, iface_type, name)
     })?;
     let Some((port, previous, revision)) = preflight else {
         return Ok(());
@@ -2988,7 +3105,7 @@ async fn teardown_live_interface_by_name(
     state: &Arc<AppState>,
     name: &str,
     rnode_port: Option<&str>,
-    rnode_lease: Option<&RNodeLifecycleOperationLease>,
+    operation_lease: Option<&InterfaceLifecycleOperationLease>,
 ) -> bool {
     #[cfg(not(any(
         feature = "ble",
@@ -3001,8 +3118,9 @@ async fn teardown_live_interface_by_name(
     #[cfg(target_os = "android")]
     let native_ble_disconnect = rnode_port.is_some_and(|p| p.starts_with("ble://"));
 
-    let owns_operation =
-        || rnode_lease.is_none_or(|lease| state.is_current_rnode_lifecycle_operation(lease));
+    let owns_operation = || {
+        operation_lease.is_none_or(|lease| state.is_current_interface_lifecycle_operation(lease))
+    };
     if !owns_operation() {
         return false;
     }
@@ -3012,7 +3130,7 @@ async fn teardown_live_interface_by_name(
         // disconnect the link lingers and the RNode cannot advertise again.
         #[cfg(target_os = "android")]
         if native_ble_disconnect {
-            disconnect_native_ble_if_owned(state, rnode_lease);
+            disconnect_native_ble_if_owned(state, operation_lease);
         }
         return owns_operation();
     };
@@ -3028,7 +3146,7 @@ async fn teardown_live_interface_by_name(
     {
         #[cfg(target_os = "android")]
         if native_ble_disconnect {
-            disconnect_native_ble_if_owned(state, rnode_lease);
+            disconnect_native_ble_if_owned(state, operation_lease);
         }
         return owns_operation();
     }
@@ -3036,7 +3154,7 @@ async fn teardown_live_interface_by_name(
     else {
         #[cfg(target_os = "android")]
         if native_ble_disconnect {
-            disconnect_native_ble_if_owned(state, rnode_lease);
+            disconnect_native_ble_if_owned(state, operation_lease);
         }
         return owns_operation();
     };
@@ -3064,7 +3182,7 @@ async fn teardown_live_interface_by_name(
     // replacement that began during teardown owns the newer native link.
     #[cfg(target_os = "android")]
     if native_ble_disconnect {
-        disconnect_native_ble_if_owned(state, rnode_lease);
+        disconnect_native_ble_if_owned(state, operation_lease);
     }
     owns_operation()
 }
@@ -3072,6 +3190,7 @@ async fn teardown_live_interface_by_name(
 struct InterfaceSpawnOutcome {
     status: String,
     runtime_started: bool,
+    interface_id: Option<u64>,
     rnode_activity_monitor: Option<PendingRNodeActivityMonitor>,
 }
 
@@ -3178,6 +3297,102 @@ mod android_ble_owner_policy_tests {
             _ => panic!("expected RNode"),
         }
     }
+
+    #[test]
+    fn android_usb_preflight_skips_tcp_resume() {
+        let temp = tempfile::tempdir().expect("temp config");
+        crate::rns_config::write_config(
+            temp.path(),
+            "[interfaces]\n\
+             [[RMAP]]\n\
+             type = TCPClientInterface\n\
+             target_host = rmap.example\n\
+             target_port = 4242\n\
+             enabled = false\n",
+        );
+
+        let target = android_usb_preflight_target(temp.path(), Some("tcp_client"), "RMAP")
+            .expect("TCP resume must resolve");
+        assert_eq!(target, None, "TCP must not enter Android USB preflight");
+    }
+
+    #[test]
+    fn android_usb_preflight_targets_only_exact_usb_rnode() {
+        let temp = tempfile::tempdir().expect("temp config");
+        crate::rns_config::write_config(
+            temp.path(),
+            "[interfaces]\n\
+             [[Field Radio]]\n\
+             type = RNodeInterface\n\
+             port = androidusb://stable-device\n\
+             usb_vendor_id = 1027\n\
+             usb_product_id = 24577\n\
+             enabled = false\n",
+        );
+
+        let (port, selector, _) =
+            android_usb_preflight_target(temp.path(), Some("rnode"), "Field Radio")
+                .expect("RNode resume must resolve")
+                .expect("USB RNode must request preflight");
+        assert_eq!(port, "androidusb://stable-device");
+        assert_eq!(
+            selector,
+            Some(RnodeUsbSelectorSettings {
+                vendor_id: 1027,
+                product_id: 24577,
+                serial_number: None,
+            })
+        );
+    }
+
+    #[test]
+    fn explicit_interface_type_never_falls_through_to_another_group() {
+        let temp = tempfile::tempdir().expect("temp config");
+        crate::rns_config::write_config(
+            temp.path(),
+            "[interfaces]\n\
+             [[Shared Name]]\n\
+             type = TCPClientInterface\n\
+             target_host = node.example\n\
+             target_port = 4242\n\
+             enabled = false\n",
+        );
+
+        assert!(
+            find_config_interface_with_group(temp.path(), Some("rnode"), "Shared Name").is_none()
+        );
+        assert!(
+            find_config_interface_with_group(temp.path(), Some("unknown"), "Shared Name").is_none()
+        );
+        assert_eq!(
+            find_config_interface_with_group(temp.path(), Some("tcp_client"), "Shared Name")
+                .map(|(group, _)| group),
+            Some("tcp_client".to_string())
+        );
+    }
+
+    #[test]
+    fn pause_enable_mutation_rejects_ambiguous_same_name_blocks() {
+        let temp = tempfile::tempdir().expect("temp config");
+        let config = "[interfaces]\n\
+                      [[Duplicate]]\n\
+                      type = TCPClientInterface\n\
+                      target_host = node.example\n\
+                      target_port = 4242\n\
+                      enabled = true\n\
+                      [[Duplicate]]\n\
+                      type = AutoInterface\n\
+                      enabled = true\n";
+        crate::rns_config::write_config(temp.path(), config);
+
+        let error = set_exact_interface_enabled(temp.path(), "Duplicate", false)
+            .expect_err("ambiguous name must fail closed");
+        assert!(error.to_string().contains("More than one interface"));
+        assert_eq!(
+            crate::rns_config::read_config(temp.path()).as_deref(),
+            Some(config)
+        );
+    }
 }
 
 impl InterfaceSpawnOutcome {
@@ -3185,14 +3400,16 @@ impl InterfaceSpawnOutcome {
         Self {
             status: status.into(),
             runtime_started: false,
+            interface_id: None,
             rnode_activity_monitor: None,
         }
     }
 
-    fn started(status: impl Into<String>) -> Self {
+    fn started(status: impl Into<String>, interface_id: u64) -> Self {
         Self {
             status: status.into(),
             runtime_started: true,
+            interface_id: Some(interface_id),
             rnode_activity_monitor: None,
         }
     }
@@ -3205,11 +3422,13 @@ impl InterfaceSpawnOutcome {
     ))]
     fn started_rnode(
         status: impl Into<String>,
+        interface_id: u64,
         rnode_activity_monitor: Option<PendingRNodeActivityMonitor>,
     ) -> Self {
         Self {
             status: status.into(),
             runtime_started: true,
+            interface_id: Some(interface_id),
             rnode_activity_monitor,
         }
     }
@@ -3371,6 +3590,7 @@ async fn spawn_editable_interface(
                             }
                             Ok(InterfaceSpawnOutcome::started_rnode(
                                 format!("BLE LoRa interface active (#{interface_id})"),
+                                interface_id,
                                 monitor,
                             ))
                         }
@@ -3387,6 +3607,15 @@ async fn spawn_editable_interface(
                                 }
                                 crate::state::BleRnodeOperationFailure::Readiness => {
                                     "RNode did not become ready"
+                                }
+                                crate::state::BleRnodeOperationFailure::ReadyStatsTimeout => {
+                                    "RNode became ready, but interface status publication timed out"
+                                }
+                                crate::state::BleRnodeOperationFailure::ReadyObservationLost => {
+                                    "RNode disconnected before setup completed"
+                                }
+                                crate::state::BleRnodeOperationFailure::ReadySessionReplaced => {
+                                    "RNode setup was replaced before it completed"
                                 }
                                 crate::state::BleRnodeOperationFailure::Runtime => {
                                     "RNode runtime was unavailable"
@@ -3416,9 +3645,11 @@ async fn spawn_editable_interface(
                                 mode: rnode_runtime_mode(mode),
                                 st_alock: airtime_limit_short.map(|v| v as f32),
                                 lt_alock: airtime_limit_long.map(|v| v as f32),
-                                flow_control: true,
+                                // Upstream RNodeInterface defaults this off. Enabling it without
+                                // an active CMD_READY polling loop stalls after one packet.
+                                flow_control: false,
                             },
-                            RNodeStartupOptions::require_capability_admission(),
+                            ble_rnode_startup_options(),
                         )
                         .await
                         .map_err(|error| error.to_string())?;
@@ -3434,6 +3665,7 @@ async fn spawn_editable_interface(
                     let id = spawned.interface_id;
                     return Ok(InterfaceSpawnOutcome::started_rnode(
                         format!("BLE LoRa interface active (#{id})"),
+                        id,
                         pending_monitor,
                     ));
                 }
@@ -3472,7 +3704,7 @@ async fn spawn_editable_interface(
                         rns_runtime::reticulum::spawn_android_usb_rnode_runtime_with_config_and_options(
                             &handle,
                             config,
-                            RNodeStartupOptions::require_capability_admission(),
+                            RNodeStartupOptions::default(),
                         )
                         .await
                         .map_err(|error| error.to_string())?;
@@ -3488,6 +3720,7 @@ async fn spawn_editable_interface(
                     let id = spawned.interface_id;
                     return Ok(InterfaceSpawnOutcome::started_rnode(
                         format!("USB LoRa interface active (#{id})"),
+                        id,
                         pending_monitor,
                     ));
                 }
@@ -3519,7 +3752,7 @@ async fn spawn_editable_interface(
                         lt_alock: airtime_limit_long.map(|v| v as f32),
                         flow_control: false,
                     },
-                    RNodeStartupOptions::require_capability_admission(),
+                    RNodeStartupOptions::default(),
                 )
                 .await
                 .map_err(|error| error.to_string())?;
@@ -3536,11 +3769,13 @@ async fn spawn_editable_interface(
                 if is_rnode_tcp_port(port) {
                     Ok(InterfaceSpawnOutcome::started_rnode(
                         format!("RNode TCP interface active (#{id})"),
+                        id,
                         pending_monitor,
                     ))
                 } else {
                     Ok(InterfaceSpawnOutcome::started_rnode(
                         format!("RNode interface active (#{id})"),
+                        id,
                         pending_monitor,
                     ))
                 }
@@ -3568,9 +3803,10 @@ async fn spawn_editable_interface(
                 ifac.runtime_config(),
             )
             .await?;
-            Ok(InterfaceSpawnOutcome::started(format!(
-                "TCP client connecting (#{id})"
-            )))
+            Ok(InterfaceSpawnOutcome::started(
+                format!("TCP client connecting (#{id})"),
+                id,
+            ))
         }
         EditableInterfaceConfig::TcpServer {
             name,
@@ -3586,9 +3822,10 @@ async fn spawn_editable_interface(
                 ifac.runtime_config(),
             )
             .await?;
-            Ok(InterfaceSpawnOutcome::started(format!(
-                "TCP server listening (#{id})"
-            )))
+            Ok(InterfaceSpawnOutcome::started(
+                format!("TCP server listening (#{id})"),
+                id,
+            ))
         }
         EditableInterfaceConfig::BackboneClient {
             name,
@@ -3614,9 +3851,10 @@ async fn spawn_editable_interface(
                 },
             )
             .await?;
-            Ok(InterfaceSpawnOutcome::started(format!(
-                "Backbone client connecting (#{id})"
-            )))
+            Ok(InterfaceSpawnOutcome::started(
+                format!("Backbone client connecting (#{id})"),
+                id,
+            ))
         }
         EditableInterfaceConfig::BackboneServer {
             name,
@@ -3636,9 +3874,10 @@ async fn spawn_editable_interface(
                 ifac.runtime_config(),
             )
             .await?;
-            Ok(InterfaceSpawnOutcome::started(format!(
-                "Backbone server listening (#{id})"
-            )))
+            Ok(InterfaceSpawnOutcome::started(
+                format!("Backbone server listening (#{id})"),
+                id,
+            ))
         }
     }
 }
@@ -3664,9 +3903,10 @@ async fn spawn_resumable_interface(
                 config.clone(),
             )
             .await?;
-            Ok(InterfaceSpawnOutcome::started(format!(
-                "Local Network interface active (#{id})"
-            )))
+            Ok(InterfaceSpawnOutcome::started(
+                format!("Local Network interface active (#{id})"),
+                id,
+            ))
         }
     }
 }
@@ -3961,24 +4201,19 @@ pub async fn pause_interface(
             .as_ref()
             .map(resumable_interface_class)
             .unwrap_or(InterfaceClass::Unknown);
-        let operation_lease = if group == "rnode" {
-            Some(
-                state_arc
-                    .begin_rnode_lifecycle_operation([&name])
-                    .ok_or_else(|| AppError::internal("Failed to begin radio pause"))?,
-            )
-        } else {
-            None
-        };
+        let operation_lease = Some(
+            state_arc
+                .begin_interface_lifecycle_operation([&name])
+                .ok_or_else(|| AppError::internal("Failed to begin interface pause"))?,
+        );
         let rnode_port = (group == "rnode")
             .then(|| cfg_str(&entry, "port"))
             .flatten();
-        let config_written = crate::rns_config::set_interface_enabled(&config_dir, &name, false);
-        if !config_written {
+        if let Err(error) = set_exact_interface_enabled(&config_dir, &name, false) {
             if let Some(lease) = operation_lease.as_ref() {
-                let _ = state_arc.finish_rnode_lifecycle_operation(lease);
+                let _ = state_arc.finish_interface_lifecycle_operation(lease);
             }
-            return Err(AppError::internal("Config write error"));
+            return Err(error);
         }
         Ok::<_, AppError>((rnode_port, activity_class, operation_lease))
     })?;
@@ -3994,7 +4229,7 @@ pub async fn pause_interface(
         let iface_name = name;
         if operation_lease
             .as_ref()
-            .is_some_and(|lease| !st.is_current_rnode_lifecycle_operation(lease))
+            .is_some_and(|lease| !st.is_current_interface_lifecycle_operation(lease))
         {
             return;
         }
@@ -4015,7 +4250,7 @@ pub async fn pause_interface(
         .await;
         if operation_lease
             .as_ref()
-            .is_some_and(|lease| !st.is_current_rnode_lifecycle_operation(lease))
+            .is_some_and(|lease| !st.is_current_interface_lifecycle_operation(lease))
         {
             return;
         }
@@ -4035,7 +4270,7 @@ pub async fn pause_interface(
             None,
         );
         if let Some(lease) = operation_lease.as_ref() {
-            let _ = st.finish_rnode_lifecycle_operation(lease);
+            let _ = st.finish_interface_lifecycle_operation(lease);
         }
         let ifaces = crate::rns_config::get_all_interfaces(&config_dir);
         emit_hub_interfaces(&st, ifaces);
@@ -4063,7 +4298,13 @@ pub async fn resume_interface(
 
     let config_dir = active_rns_config_dir(&state_arc);
     #[cfg(target_os = "android")]
-    preflight_android_usb_selector_for_interface(&state_arc, &config_dir, &name).await?;
+    preflight_android_usb_selector_for_interface(
+        &state_arc,
+        &config_dir,
+        iface_type.as_deref(),
+        &name,
+    )
+    .await?;
     let (runtime, operation_lease, enabled_revision) = with_rns_config_lock(&state_arc, || {
         let (group, entry) =
             find_config_interface_with_group(&config_dir, iface_type.as_deref(), &name)
@@ -4074,15 +4315,11 @@ pub async fn resume_interface(
         if let Some(port) = runtime.rnode_port() {
             reject_android_ble_owner_conflict(&config_dir, &name, port)?;
         }
-        let operation_lease = if group == "rnode" {
-            Some(
-                state_arc
-                    .begin_rnode_lifecycle_operation([&name])
-                    .ok_or_else(|| AppError::internal("Failed to begin radio resume"))?,
-            )
-        } else {
-            None
-        };
+        let operation_lease = Some(
+            state_arc
+                .begin_interface_lifecycle_operation([&name])
+                .ok_or_else(|| AppError::internal("Failed to begin interface resume"))?,
+        );
         if group == "rnode" {
             let _ = crate::commands::shared::mark_lora_add_freshness(&config_dir, &name, false);
         }
@@ -4095,26 +4332,21 @@ pub async fn resume_interface(
                 public_tcp_server_id_from_entry(&entry),
             )?;
         }
-        let config_written = crate::rns_config::set_interface_enabled(&config_dir, &name, true);
-        if !config_written {
+        if let Err(error) = set_exact_interface_enabled(&config_dir, &name, true) {
             if let Some(lease) = operation_lease.as_ref() {
-                let _ = state_arc.finish_rnode_lifecycle_operation(lease);
+                let _ = state_arc.finish_interface_lifecycle_operation(lease);
             }
-            return Err(AppError::internal("Config write error"));
+            return Err(error);
         }
-        let enabled_revision = if group == "rnode" {
-            match crate::rns_config::snapshot_interface_block(&config_dir, &name) {
-                Ok(revision) => Some(revision),
-                Err(_) => {
-                    let _ = crate::rns_config::set_interface_enabled(&config_dir, &name, false);
-                    if let Some(lease) = operation_lease.as_ref() {
-                        let _ = state_arc.finish_rnode_lifecycle_operation(lease);
-                    }
-                    return Err(AppError::internal("Config revision read error"));
+        let enabled_revision = match crate::rns_config::snapshot_interface_block(&config_dir, &name)
+        {
+            Ok(revision) => revision,
+            Err(_) => {
+                if let Some(lease) = operation_lease.as_ref() {
+                    let _ = state_arc.finish_interface_lifecycle_operation(lease);
                 }
+                return Err(AppError::internal("Config revision read error"));
             }
-        } else {
-            None
         };
         Ok::<_, AppError>((runtime, operation_lease, enabled_revision))
     })?;
@@ -4154,8 +4386,17 @@ pub async fn resume_interface(
             Ok(mut outcome) => {
                 if operation_lease
                     .as_ref()
-                    .is_some_and(|lease| !st.is_current_rnode_lifecycle_operation(lease))
+                    .is_some_and(|lease| !st.is_current_interface_lifecycle_operation(lease))
                 {
+                    if let (Some(handle), Some(interface_id)) =
+                        (runtime_handle(&st), outcome.interface_id)
+                    {
+                        if let Some(port) = rnode_port.as_deref() {
+                            teardown_rnode_interface_for_port(&handle, interface_id, port).await;
+                        } else {
+                            rns_runtime::reticulum::teardown_interface(&handle, interface_id).await;
+                        }
+                    }
                     return;
                 }
                 emit_op_status_broadcast(
@@ -4175,7 +4416,7 @@ pub async fn resume_interface(
                 );
                 let pending_monitor = outcome.take_rnode_activity_monitor();
                 if let Some(lease) = operation_lease.as_ref() {
-                    if st.finish_rnode_lifecycle_operation(lease) {
+                    if st.finish_interface_lifecycle_operation(lease) {
                         if let Some(pending_monitor) = pending_monitor {
                             let _ = pending_monitor.activate(Arc::clone(&st));
                         }
@@ -4185,28 +4426,18 @@ pub async fn resume_interface(
             Err(e) => {
                 if operation_lease
                     .as_ref()
-                    .is_some_and(|lease| !st.is_current_rnode_lifecycle_operation(lease))
+                    .is_some_and(|lease| !st.is_current_interface_lifecycle_operation(lease))
                 {
                     return;
                 }
                 // Failed resume returns to paused; the config entry is kept
                 // so the user can retry.
                 let rollback = with_rns_config_lock(&st, || {
-                    if let Some(revision) = enabled_revision.as_ref() {
-                        crate::rns_config::set_interface_enabled_if_revision(
-                            &config_dir,
-                            revision,
-                            false,
-                        )
-                    } else if crate::rns_config::set_interface_enabled(
+                    crate::rns_config::set_interface_enabled_if_revision(
                         &config_dir,
-                        &iface_name,
+                        &enabled_revision,
                         false,
-                    ) {
-                        crate::rns_config::InterfaceBlockCasOutcome::Applied
-                    } else {
-                        crate::rns_config::InterfaceBlockCasOutcome::WriteFailed
-                    }
+                    )
                 });
                 let failure_detail = match rollback {
                     crate::rns_config::InterfaceBlockCasOutcome::Applied => e.as_str(),
@@ -4239,7 +4470,7 @@ pub async fn resume_interface(
                     resumable_interface_tcp_endpoint(&runtime),
                 );
                 if let Some(lease) = operation_lease.as_ref() {
-                    let _ = st.finish_rnode_lifecycle_operation(lease);
+                    let _ = st.finish_interface_lifecycle_operation(lease);
                 }
             }
         }
@@ -4381,58 +4612,68 @@ pub async fn add_lora_interface(
         None,
     );
 
-    let (operation_lease, fresh_marker, existing_rnode_port, handoff_targets, config_written) =
-        with_rns_config_lock(&state_arc, || {
-            #[cfg(target_os = "android")]
-            reject_android_ble_owner_conflict(&config_dir, &name, &port)?;
-            let handoff_targets = rnode_handoff_prefix_for_port(&port)
-                .map(|prefix| {
-                    crate::rns_config::rnode_names_with_port_prefix(&config_dir, prefix)
-                        .into_iter()
-                        .filter(|handoff_name| handoff_name != &name)
-                        .map(|handoff_name| {
-                            crate::rns_config::snapshot_interface_block(&config_dir, &handoff_name)
-                                .map(|revision| RnodeHandoffTarget {
-                                    name: handoff_name,
-                                    revision,
-                                })
-                                .map_err(|_| {
-                                    AppError::internal("Failed to snapshot radio handoff target")
-                                })
-                        })
-                        .collect::<Result<Vec<_>, _>>()
-                })
-                .transpose()?
-                .unwrap_or_default();
-            let mut operation_names = Vec::with_capacity(1 + handoff_targets.len());
-            operation_names.push(name.clone());
-            operation_names.extend(handoff_targets.iter().map(|target| target.name.clone()));
-            let operation_lease = state_arc
-                .begin_rnode_lifecycle_operation(operation_names.iter())
-                .ok_or_else(|| AppError::internal("Failed to begin radio setup"))?;
-            // add_rnode_interface upserts by name; only entries this add creates
-            // may be rolled back (deleted) on connect failure or cancel.
-            let _ = crate::commands::shared::mark_lora_add_freshness(&config_dir, &name, false);
-            let fresh_add = find_config_interface_with_group(&config_dir, None, &name).is_none();
-            let existing_rnode_port = find_config_interface(&config_dir, "rnode", &name)
-                .and_then(|entry| rnode_config_from_entry(&entry))
-                .and_then(|config| config.rnode_port().map(str::to_string));
-            #[cfg(target_os = "android")]
-            let usb_selector_args = android_usb_selector.as_ref().and_then(|selector| {
-                selector
-                    .vendor_id
-                    .zip(selector.product_id)
-                    .map(
-                        |(vendor_id, product_id)| crate::rns_config::RnodeUsbSelectorArgs {
-                            vendor_id,
-                            product_id,
-                            serial_number: selector.serial_number.as_deref(),
-                        },
-                    )
-            });
-            #[cfg(not(target_os = "android"))]
-            let usb_selector_args = None;
-            let config_written = crate::rns_config::add_rnode_interface_with_usb_selector(
+    let (
+        operation_lease,
+        fresh_marker,
+        deferred_fresh_ble_config,
+        existing_rnode_port,
+        handoff_targets,
+        config_written,
+    ) = with_rns_config_lock(&state_arc, || {
+        #[cfg(target_os = "android")]
+        reject_android_ble_owner_conflict(&config_dir, &name, &port)?;
+        let handoff_targets = rnode_handoff_prefix_for_port(&port)
+            .map(|prefix| {
+                crate::rns_config::rnode_names_with_port_prefix(&config_dir, prefix)
+                    .into_iter()
+                    .filter(|handoff_name| handoff_name != &name)
+                    .map(|handoff_name| {
+                        crate::rns_config::snapshot_interface_block(&config_dir, &handoff_name)
+                            .map(|revision| RnodeHandoffTarget {
+                                name: handoff_name,
+                                revision,
+                            })
+                            .map_err(|_| {
+                                AppError::internal("Failed to snapshot radio handoff target")
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let mut operation_names = Vec::with_capacity(1 + handoff_targets.len());
+        operation_names.push(name.clone());
+        operation_names.extend(handoff_targets.iter().map(|target| target.name.clone()));
+        let operation_lease = state_arc
+            .begin_rnode_lifecycle_operation(operation_names.iter())
+            .ok_or_else(|| AppError::internal("Failed to begin radio setup"))?;
+        // add_rnode_interface upserts by name; only entries this add creates
+        // may be rolled back (deleted) on connect failure or cancel.
+        let _ = crate::commands::shared::mark_lora_add_freshness(&config_dir, &name, false);
+        let fresh_add = find_config_interface_with_group(&config_dir, None, &name).is_none();
+        let deferred_fresh_ble_config = cfg!(all(feature = "ble", not(target_os = "android")))
+            && port.starts_with("ble://")
+            && fresh_add;
+        let existing_rnode_port = find_config_interface(&config_dir, "rnode", &name)
+            .and_then(|entry| rnode_config_from_entry(&entry))
+            .and_then(|config| config.rnode_port().map(str::to_string));
+        #[cfg(target_os = "android")]
+        let usb_selector_args = android_usb_selector.as_ref().and_then(|selector| {
+            selector
+                .vendor_id
+                .zip(selector.product_id)
+                .map(
+                    |(vendor_id, product_id)| crate::rns_config::RnodeUsbSelectorArgs {
+                        vendor_id,
+                        product_id,
+                        serial_number: selector.serial_number.as_deref(),
+                    },
+                )
+        });
+        #[cfg(not(target_os = "android"))]
+        let usb_selector_args = None;
+        let config_written = deferred_fresh_ble_config
+            || crate::rns_config::add_rnode_interface_with_usb_selector(
                 &config_dir,
                 crate::rns_config::RnodeInterfaceArgs {
                     name: &name,
@@ -4451,23 +4692,25 @@ pub async fn add_lora_interface(
                 },
                 usb_selector_args,
             );
-            let fresh_marker = (config_written
-                && cfg!(feature = "ble")
-                && port.starts_with("ble://"))
-            .then(|| {
-                crate::commands::shared::mark_lora_add_freshness(&config_dir, &name, fresh_add)
-            })
-            .flatten();
-            Ok::<_, AppError>((
-                operation_lease,
-                fresh_marker,
-                existing_rnode_port,
-                handoff_targets,
-                config_written,
-            ))
-        })?;
+        let fresh_marker = (!deferred_fresh_ble_config
+            && config_written
+            && cfg!(feature = "ble")
+            && port.starts_with("ble://"))
+        .then(|| crate::commands::shared::mark_lora_add_freshness(&config_dir, &name, fresh_add))
+        .flatten();
+        Ok::<_, AppError>((
+            operation_lease,
+            fresh_marker,
+            deferred_fresh_ble_config,
+            existing_rnode_port,
+            handoff_targets,
+            config_written,
+        ))
+    })?;
     #[cfg(not(feature = "ble"))]
     let _ = fresh_marker;
+    #[cfg(any(not(feature = "ble"), target_os = "android"))]
+    let _ = deferred_fresh_ble_config;
     #[cfg(not(any(feature = "ble", target_os = "android")))]
     let _ = &existing_rnode_port;
     #[cfg(not(target_os = "android"))]
@@ -4593,7 +4836,7 @@ pub async fn add_lora_interface(
                 match rns_runtime::reticulum::spawn_android_usb_rnode_runtime_with_config_and_options(
                     &rns,
                     config,
-                    RNodeStartupOptions::require_capability_admission(),
+                    RNodeStartupOptions::default(),
                 )
                 .await
                 .map_err(|error| error.to_string())
@@ -4942,9 +5185,11 @@ pub async fn add_lora_interface(
                             mode: runtime_mode,
                             st_alock: radio.airtime_limit_short.map(|v| v as f32),
                             lt_alock: radio.airtime_limit_long.map(|v| v as f32),
-                            flow_control: true,
+                            // Upstream RNodeInterface defaults this off. Enabling it without
+                            // an active CMD_READY polling loop stalls after one packet.
+                            flow_control: false,
                         },
-                        RNodeStartupOptions::require_capability_admission(),
+                        ble_rnode_startup_options(),
                     )
                     .await
                     .map_err(|error| error.to_string())
@@ -4969,6 +5214,66 @@ pub async fn add_lora_interface(
                             {
                                 Ok(pending_monitor) => {
                                     let id = spawned.interface_id;
+                                    if deferred_fresh_ble_config {
+                                        let committed = with_rns_config_lock(&st, || {
+                                            st.is_current_rnode_lifecycle_operation(
+                                                &operation_lease,
+                                            ) && find_config_interface_with_group(
+                                                &config_dir,
+                                                None,
+                                                &name_for_status,
+                                            )
+                                            .is_none()
+                                                && crate::rns_config::add_rnode_interface(
+                                                    &config_dir,
+                                                    crate::rns_config::RnodeInterfaceArgs {
+                                                        name: &name_for_status,
+                                                        port: &port_str,
+                                                        mode: Some(mode),
+                                                        frequency: radio.frequency,
+                                                        bandwidth: radio.bandwidth,
+                                                        spreading_factor: radio.spreading_factor,
+                                                        coding_rate: radio.coding_rate,
+                                                        tx_power: radio.tx_power,
+                                                        region_key: radio.region_key,
+                                                        preset_key: radio.preset_key,
+                                                        airtime_limit_short: radio
+                                                            .airtime_limit_short,
+                                                        airtime_limit_long: radio
+                                                            .airtime_limit_long,
+                                                        public_map: crate::rns_config::RnodePublicMapArgs::default(),
+                                                    },
+                                                )
+                                        });
+                                        if !committed {
+                                            teardown_spawned_rnode_exact(&rns, &spawned).await;
+                                            if !st.is_current_rnode_lifecycle_operation(
+                                                &operation_lease,
+                                            ) {
+                                                return;
+                                            }
+                                            emit_op_status_broadcast(
+                                                &st,
+                                                "add_lora",
+                                                "hub",
+                                                "BLE radio became ready, but its configuration could not be saved",
+                                                true,
+                                                Some("Config commit failed"),
+                                            );
+                                            record_interface_activity(
+                                                &st,
+                                                activity_fence,
+                                                InterfaceClass::RNode,
+                                                rnode_activity_transition(
+                                                    RnodeActivityOutcome::ConfigureFailed,
+                                                ),
+                                                None,
+                                            );
+                                            let _ = st
+                                                .finish_rnode_lifecycle_operation(&operation_lease);
+                                            return;
+                                        }
+                                    }
                                     if let Some(marker) = fresh_marker {
                                         crate::commands::shared::clear_fresh_lora_add_marker(
                                             &st,
@@ -5017,6 +5322,8 @@ pub async fn add_lora_interface(
                                         format!(
                                             "BLE pairing timed out for '{name_for_status}'. Check that the RNode is in pairing mode and retry."
                                         )
+                                    } else if error.ready_stats_failure_code().is_some() {
+                                        error.to_string()
                                     } else {
                                         "BLE radio did not become ready".to_string()
                                     };
@@ -5026,11 +5333,13 @@ pub async fn add_lora_interface(
                                         "hub",
                                         &step,
                                         true,
-                                        Some(if error.is_timeout() {
-                                            "pairing_timeout"
-                                        } else {
-                                            "startup_failed"
-                                        }),
+                                        Some(error.ready_stats_failure_code().unwrap_or(
+                                            if error.is_timeout() {
+                                                "pairing_timeout"
+                                            } else {
+                                                "startup_failed"
+                                            },
+                                        )),
                                     );
                                     record_interface_activity(
                                         &st,
@@ -5067,7 +5376,11 @@ pub async fn add_lora_interface(
                                 &st,
                                 "add_lora",
                                 "hub",
-                                &format!("Config saved. BLE connect failed: {e}"),
+                                &if deferred_fresh_ble_config {
+                                    format!("BLE connect failed: {e}")
+                                } else {
+                                    format!("Config saved. BLE connect failed: {e}")
+                                },
                                 true,
                                 Some(&e),
                             );
@@ -5097,7 +5410,11 @@ pub async fn add_lora_interface(
                         &st,
                         "add_lora",
                         "hub",
-                        "Config saved. BLE connect deferred (RNS not ready).",
+                        if deferred_fresh_ble_config {
+                            "BLE setup deferred because Reticulum is not ready; no interface was saved."
+                        } else {
+                            "Config saved. BLE connect deferred (RNS not ready)."
+                        },
                         true,
                         None,
                     );
@@ -5226,7 +5543,7 @@ pub async fn add_lora_interface(
                         lt_alock: radio.airtime_limit_long.map(|v| v as f32),
                         flow_control: false,
                     },
-                    RNodeStartupOptions::require_capability_admission(),
+                    RNodeStartupOptions::default(),
                 )
                 .await
                 .map_err(|error| error.to_string())
@@ -5285,21 +5602,26 @@ pub async fn add_lora_interface(
                             }
                             Err(OwnedRnodeReadinessError::Superseded) => return,
                             Err(error) => {
+                                let terminal_step = if error.ready_stats_failure_code().is_some() {
+                                    error.to_string()
+                                } else if is_tcp {
+                                    "RNode TCP did not become ready".to_string()
+                                } else {
+                                    "RNode did not become ready".to_string()
+                                };
                                 emit_op_status_broadcast(
                                     &st,
                                     "add_lora",
                                     "hub",
-                                    if is_tcp {
-                                        "RNode TCP did not become ready"
-                                    } else {
-                                        "RNode did not become ready"
-                                    },
+                                    &terminal_step,
                                     true,
-                                    Some(if error.is_timeout() {
-                                        "startup_timeout"
-                                    } else {
-                                        "startup_failed"
-                                    }),
+                                    Some(error.ready_stats_failure_code().unwrap_or(
+                                        if error.is_timeout() {
+                                            "startup_timeout"
+                                        } else {
+                                            "startup_failed"
+                                        },
+                                    )),
                                 );
                                 record_interface_activity(
                                     &st,

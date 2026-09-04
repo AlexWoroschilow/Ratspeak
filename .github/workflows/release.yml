@@ -1,0 +1,343 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing annotated release tag to promote and publish."
+        required: true
+        type: string
+      prerelease:
+        description: "Mark the final GitHub Release as a prerelease."
+        required: true
+        default: false
+        type: boolean
+      qualification_run_id:
+        description: "Successful final pre-tag qualification run to promote."
+        required: true
+        type: string
+      integration_tag_run_id:
+        description: "Successful post-qualification sibling-tag verification run."
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare exact release source
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    outputs:
+      release_tag: ${{ steps.source.outputs.release_tag }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+    steps:
+      - name: Checkout annotated release tag
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          path: Ratspeak
+          fetch-depth: 0
+          ref: ${{ inputs.release_tag }}
+
+      - name: Setup source qualification Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.22.0
+
+      - name: Load reviewed source set
+        id: source-set
+        working-directory: Ratspeak
+        run: node scripts/release/source-integrity.mjs github-outputs >> "$GITHUB_OUTPUT"
+
+      - name: Checkout rsReticulum
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ${{ github.repository_owner }}/rsReticulum
+          ref: ${{ steps.source-set.outputs.rsreticulum_ref }}
+          path: rsReticulum
+          fetch-depth: 0
+
+      - name: Checkout rsLXMF
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ${{ github.repository_owner }}/rsLXMF
+          ref: ${{ steps.source-set.outputs.rslxmf_ref }}
+          path: rsLXMF
+          fetch-depth: 0
+
+      - name: Checkout rsLXST
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ${{ github.repository_owner }}/rsLXST
+          ref: ${{ steps.source-set.outputs.rslxst_ref }}
+          path: rsLXST
+          fetch-depth: 0
+
+      - name: Checkout lrgp-rs
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ${{ github.repository_owner }}/lrgp-rs
+          ref: ${{ steps.source-set.outputs.lrgp_ref }}
+          path: lrgp-rs
+          fetch-depth: 0
+
+      - name: Verify release tag and qualification input
+        id: source
+        shell: bash
+        working-directory: Ratspeak
+        env:
+          INTEGRATION_TAG_RUN_ID: ${{ inputs.integration_tag_run_id }}
+          QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          WORKFLOW_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          node scripts/release/source-integrity.mjs verify-release-source
+          node scripts/release/source-integrity.mjs verify-tags
+          node scripts/release/source-integrity.mjs verify-release-ref "$RELEASE_TAG"
+          if [[ "$WORKFLOW_REF" != "refs/tags/$RELEASE_TAG" ]]; then
+            echo "Dispatch Release from the exact product tag: workflow ref $WORKFLOW_REF, requested $RELEASE_TAG" >&2
+            exit 1
+          fi
+          test -s release/release-notes.md
+          if [[ ! "$QUALIFICATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "qualification_run_id must be a positive GitHub Actions run ID" >&2
+            exit 1
+          fi
+          if [[ ! "$INTEGRATION_TAG_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "integration_tag_run_id must be a positive GitHub Actions run ID" >&2
+            exit 1
+          fi
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Require successful final pre-tag qualification
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          expected_workflow_id="$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/qualify-release.yml" \
+            --jq '.id')"
+          read -r workflow_id status conclusion event head_sha <<<"$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION_RUN_ID" \
+            --jq '[.workflow_id, .status, .conclusion, .event, .head_sha] | @tsv')"
+          test "$workflow_id" = "$expected_workflow_id"
+          test "$status" = "completed"
+          test "$conclusion" = "success"
+          test "$event" = "workflow_dispatch"
+          test "$head_sha" = "$SOURCE_SHA"
+
+          artifact_count="$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION_RUN_ID/artifacts" \
+            --jq '[.artifacts[] | select(.name == "ratspeak-release-qualification" and .expired == false)] | length')"
+          test "$artifact_count" = "1"
+
+      - name: Require successful pre-product-tag sibling verification
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INTEGRATION_TAG_RUN_ID: ${{ inputs.integration_tag_run_id }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          expected_workflow_id="$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/verify-integration-tags.yml" \
+            --jq '.id')"
+          read -r workflow_id status conclusion event head_sha <<<"$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$INTEGRATION_TAG_RUN_ID" \
+            --jq '[.workflow_id, .status, .conclusion, .event, .head_sha] | @tsv')"
+          test "$workflow_id" = "$expected_workflow_id"
+          test "$status" = "completed"
+          test "$conclusion" = "success"
+          test "$event" = "workflow_dispatch"
+          test "$head_sha" = "$SOURCE_SHA"
+
+      - name: Require successful ordinary CI on the exact source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          successful_runs="$(gh api \
+            -X GET \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+            -f head_sha="$SOURCE_SHA" \
+            -f event=push \
+            -f status=success \
+            -f per_page=1 \
+            --jq '.total_count')"
+          if [[ ! "$successful_runs" =~ ^[1-9][0-9]*$ ]]; then
+            echo "No successful ordinary CI push run exists for $SOURCE_SHA" >&2
+            exit 1
+          fi
+          echo "Ordinary CI is green for exact source $SOURCE_SHA"
+
+  publish:
+    name: Promote, verify, and publish complete release
+    needs: prepare
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Checkout exact release source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          path: Ratspeak
+          fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.source_sha }}
+
+      - name: Download final pre-tag qualification
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          name: ratspeak-release-qualification
+          path: release-assets
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.qualification_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify exact immutable qualification artifact set
+        working-directory: Ratspeak
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: node scripts/release/verify-release-artifacts.mjs ../release-assets "$RELEASE_TAG" --qualification
+
+      - name: Bind qualified source BOMs to the immutable tag
+        working-directory: release-assets
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          bom_files=(Ratspeak-*-source-bom.json)
+          test "${#bom_files[@]}" -eq 5
+          for bom in "${bom_files[@]}"; do
+            tmp="$(mktemp)"
+            jq --arg release_tag "$RELEASE_TAG" '
+              if .product.ref != null then
+                error("qualification BOM is already tag-bound")
+              else
+                .product.ref = $release_tag
+              end
+            ' "$bom" > "$tmp"
+            mv "$tmp" "$bom"
+          done
+
+          for checksum_file in checksums-*.txt; do
+            tmp="$(mktemp)"
+            while IFS= read -r line; do
+              [[ "$line" =~ ^[0-9a-f]{64}[[:space:]][[:space:]]([^/\\]+)$ ]]
+              file="${BASH_REMATCH[1]}"
+              test -f "$file"
+              printf '%s  %s\n' "$(sha256sum "$file" | cut -d ' ' -f 1)" "$file" >> "$tmp"
+            done < "$checksum_file"
+            mv "$tmp" "$checksum_file"
+          done
+
+      - name: Verify promoted exact artifact set, checksums, and source BOMs
+        working-directory: Ratspeak
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: node scripts/release/verify-release-artifacts.mjs ../release-assets "$RELEASE_TAG"
+
+      - name: Refuse to mutate an existing public release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          existing_draft="$(gh api \
+            --paginate \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" | \
+            jq -r --arg tag "$RELEASE_TAG" \
+              '.[] | select(.tag_name == $tag) | .draft')"
+          if [[ -n "$existing_draft" && "$existing_draft" != "true" ]]; then
+            echo "Refusing to modify existing public release $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+      - name: Upload one complete draft GitHub Release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228
+        with:
+          tag_name: ${{ needs.prepare.outputs.release_tag }}
+          prerelease: ${{ inputs.prerelease }}
+          draft: true
+          fail_on_unmatched_files: true
+          body_path: Ratspeak/release/release-notes.md
+          files: release-assets/*
+
+      - name: Download and verify uploaded draft bytes
+        shell: bash
+        working-directory: Ratspeak
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          release_id="$(gh api \
+            --paginate \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" | \
+            jq -r --arg tag "$RELEASE_TAG" \
+              '.[] | select(.tag_name == $tag and .draft == true) | .id')"
+          [[ "$release_id" =~ ^[1-9][0-9]*$ ]]
+          draft="$(gh api \
+            "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+            --jq '.draft')"
+          test "$draft" = "true"
+
+          remote_dir="../remote-release-assets"
+          rm -rf "$remote_dir"
+          mkdir -p "$remote_dir"
+          while IFS=$'\t' read -r asset_id asset_name; do
+            [[ -n "$asset_id" && -n "$asset_name" ]] || continue
+            if [[ "$asset_name" == */* || "$asset_name" == *\\* ]]; then
+              echo "Invalid uploaded asset name: $asset_name" >&2
+              exit 1
+            fi
+            gh api \
+              -H "Accept: application/octet-stream" \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > "$remote_dir/$asset_name"
+          done < <(gh api \
+            --paginate \
+            "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" \
+            --jq '.[] | [.id, .name] | @tsv')
+
+          node scripts/release/verify-release-artifacts.mjs "$remote_dir" "$RELEASE_TAG"
+
+      - name: Publish verified normal release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          release_id="$(gh api \
+            --paginate \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" | \
+            jq -r --arg tag "$RELEASE_TAG" \
+              '.[] | select(.tag_name == $tag and .draft == true) | .id')"
+          [[ "$release_id" =~ ^[1-9][0-9]*$ ]]
+          gh api \
+            -X PATCH \
+            "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+            -F draft=false \
+            -F prerelease="$PRERELEASE" >/dev/null
+
+          test "$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" --jq '.draft')" = "false"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" --jq '.prerelease')" = "$PRERELEASE"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" --jq '.tag_name')" = "$RELEASE_TAG"

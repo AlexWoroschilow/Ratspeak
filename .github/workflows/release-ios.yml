@@ -3,6 +3,18 @@ name: Release iOS
 on:
   workflow_dispatch:
     inputs:
+      source_ref:
+        description: "Exact candidate commit to build; defaults to the selected dispatch ref."
+        required: false
+        type: string
+      qualification_run_id:
+        description: "Successful final pre-tag qualification run required for TestFlight."
+        required: false
+        type: string
+      integration_tag_run_id:
+        description: "Successful sibling-tag verification run required for TestFlight."
+        required: false
+        type: string
       build_mode:
         description: "Build mode"
         required: true
@@ -13,18 +25,18 @@ on:
           - testflight
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: release-ios-${{ github.ref }}
   cancel-in-progress: false
 
 env:
-  RATSPEAK_RSRETICULUM_REF: ratspeak-v1.0.26d
-  RATSPEAK_RSLXMF_REF: ratspeak-v1.0.26d
-  RATSPEAK_RSLXST_REF: ratspeak-v1.0.26d
-  RATSPEAK_LRGP_REF: ratspeak-v1.0.26d
   TOOLCHAINS: com.apple.dt.toolchain.XcodeDefault
+  # Exact signing baseline from the accepted v1.0.27 (1000042) IPA.
+  IOS_SIGNING_CERTIFICATE_SHA1: 8BAA6A7C209C72BA31CC4983C09C89193B743162
+  IOS_PROVISIONING_PROFILE_UUID: 7c5b95ef-fe43-4f2a-befc-494d346727b9
 
 jobs:
   build:
@@ -33,59 +45,153 @@ jobs:
     timeout-minutes: 150
     steps:
       - name: Checkout Ratspeak
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           path: Ratspeak
+          fetch-depth: 0
+          ref: ${{ inputs.source_ref || github.sha }}
+
+      - name: Setup source qualification Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.22.0
+
+      - name: Load reviewed source set
+        id: source
+        shell: bash
+        working-directory: Ratspeak
+        run: node scripts/release/source-integrity.mjs github-outputs >> "$GITHUB_OUTPUT"
 
       - name: Checkout rsReticulum
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/rsReticulum
-          ref: ${{ env.RATSPEAK_RSRETICULUM_REF }}
+          ref: ${{ steps.source.outputs.rsreticulum_ref }}
           path: rsReticulum
+          fetch-depth: 0
 
       - name: Checkout rsLXMF
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/rsLXMF
-          ref: ${{ env.RATSPEAK_RSLXMF_REF }}
+          ref: ${{ steps.source.outputs.rslxmf_ref }}
           path: rsLXMF
+          fetch-depth: 0
 
       - name: Checkout rsLXST
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/rsLXST
-          ref: ${{ env.RATSPEAK_RSLXST_REF }}
+          ref: ${{ steps.source.outputs.rslxst_ref }}
           path: rsLXST
+          fetch-depth: 0
 
       - name: Checkout lrgp-rs
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ github.repository_owner }}/lrgp-rs
-          ref: ${{ env.RATSPEAK_LRGP_REF }}
+          ref: ${{ steps.source.outputs.lrgp_ref }}
           path: lrgp-rs
+          fetch-depth: 0
+
+      - name: Verify reviewed source set
+        shell: bash
+        working-directory: Ratspeak
+        run: node scripts/release/source-integrity.mjs verify-release-source
+
+      - name: Verify coordinated sibling tags for TestFlight
+        if: ${{ inputs.build_mode == 'testflight' }}
+        shell: bash
+        working-directory: Ratspeak
+        run: node scripts/release/source-integrity.mjs verify-tags
+
+      - name: Require exact successful qualification for TestFlight
+        if: ${{ inputs.build_mode == 'testflight' }}
+        shell: bash
+        working-directory: Ratspeak
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INTEGRATION_TAG_RUN_ID: ${{ inputs.integration_tag_run_id }}
+          QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$SOURCE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "TestFlight requires source_ref to be the exact qualified commit SHA" >&2
+            exit 1
+          fi
+          if [[ ! "$QUALIFICATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "TestFlight requires a successful qualification_run_id" >&2
+            exit 1
+          fi
+          if [[ ! "$INTEGRATION_TAG_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "TestFlight requires a successful integration_tag_run_id" >&2
+            exit 1
+          fi
+          source_sha="$(git rev-parse HEAD)"
+          if [[ "$source_sha" != "$SOURCE_REF" || "$source_sha" != "$WORKFLOW_SHA" ]]; then
+            echo "Dispatch TestFlight from the exact qualified source: workflow $WORKFLOW_SHA, input $SOURCE_REF, checkout $source_sha" >&2
+            exit 1
+          fi
+
+          expected_workflow_id="$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/qualify-release.yml" \
+            --jq '.id')"
+          read -r workflow_id status conclusion event head_sha <<<"$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION_RUN_ID" \
+            --jq '[.workflow_id, .status, .conclusion, .event, .head_sha] | @tsv')"
+          test "$workflow_id" = "$expected_workflow_id"
+          test "$status" = "completed"
+          test "$conclusion" = "success"
+          test "$event" = "workflow_dispatch"
+          test "$head_sha" = "$source_sha"
+
+          artifact_count="$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION_RUN_ID/artifacts" \
+            --jq '[.artifacts[] | select(.name == "ratspeak-release-qualification" and .expired == false)] | length')"
+          test "$artifact_count" = "1"
+
+          expected_tag_workflow_id="$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/verify-integration-tags.yml" \
+            --jq '.id')"
+          read -r tag_workflow_id tag_status tag_conclusion tag_event tag_head_sha <<<"$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$INTEGRATION_TAG_RUN_ID" \
+            --jq '[.workflow_id, .status, .conclusion, .event, .head_sha] | @tsv')"
+          test "$tag_workflow_id" = "$expected_tag_workflow_id"
+          test "$tag_status" = "completed"
+          test "$tag_conclusion" = "success"
+          test "$tag_event" = "workflow_dispatch"
+          test "$tag_head_sha" = "$source_sha"
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
+          toolchain: ${{ steps.source.outputs.rust_toolchain }}
           targets: aarch64-apple-ios,aarch64-apple-ios-sim
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
-          cache-bin: false
+          cache-bin: true
+          key: tauri-${{ steps.source.outputs.tauri_cli }}
           workspaces: |
             Ratspeak
             Ratspeak/src-tauri
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2.0" --locked
+        shell: bash
+        working-directory: Ratspeak
+        run: bash scripts/release/install-tauri-cli.sh "${{ steps.source.outputs.tauri_cli }}"
 
       - name: Build CSS
         shell: bash
         working-directory: Ratspeak
         run: bash dashboard/build-css.sh
+
+      - name: Select reviewed Xcode
+        run: sudo xcode-select -s /Applications/Xcode_26.3.app
 
       - name: Validate Apple toolchain
         shell: bash
@@ -151,6 +257,16 @@ jobs:
 
           PROFILE_UUID="$(bash Ratspeak/scripts/release/assert-ios-signing-profile.sh \
             "$PROFILE_PATH" "$APPLE_TEAM_ID" org.ratspeak.apple)"
+          if [ "$PROFILE_UUID" != "$IOS_PROVISIONING_PROFILE_UUID" ]; then
+            echo "The protected App Store profile does not match the v1.0.27 signing baseline" >&2
+            exit 1
+          fi
+          if ! security find-identity -v -p codesigning "$KEYCHAIN_PATH" | \
+            grep -Fq "$IOS_SIGNING_CERTIFICATE_SHA1"; then
+            echo "The protected Apple Distribution certificate does not match the v1.0.27 signing baseline" >&2
+            exit 1
+          fi
+          echo "RATSPEAK_IOS_PROFILE_UUID=$PROFILE_UUID" >> "$GITHUB_ENV"
           for PROFILE_DIRECTORY in \
             "$HOME/Library/MobileDevice/Provisioning Profiles" \
             "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"; do
@@ -165,20 +281,44 @@ jobs:
         run: |
           unset TAURI_CONFIG
           unset TAURI_DEV_HOST
-          cargo tauri ios build --debug --target aarch64-sim
+          cargo tauri ios build --debug --target aarch64-sim -- --locked
 
       - name: Build TestFlight IPA
         if: ${{ inputs.build_mode == 'testflight' }}
         shell: bash
         working-directory: Ratspeak/src-tauri
         env:
-          APPLE_DEVELOPMENT_TEAM: ${{ vars.APPLE_TEAM_ID }}
+          APPSTORE_API_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+          APPSTORE_API_KEY_ID: ${{ vars.APPSTORE_API_KEY_ID }}
+          APPSTORE_ISSUER_ID: ${{ vars.APPSTORE_ISSUER_ID }}
         run: |
           unset TAURI_CONFIG
           unset TAURI_DEV_HOST
+
+          # Tauri/Xcode automatic signing needs App Store Connect API
+          # authentication on a headless CI runner. With these credentials,
+          # Tauri uses its supported unsigned-archive/export path instead of
+          # requiring an Apple Development identity. The exact v1.0.27 Store
+          # certificate and profile are already imported above.
+          export APPLE_API_ISSUER="$APPSTORE_ISSUER_ID"
+          export APPLE_API_KEY="$APPSTORE_API_KEY_ID"
+          export APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey_${APPSTORE_API_KEY_ID}.p8"
+          printf '%s' "$APPSTORE_API_PRIVATE_KEY" > "$APPLE_API_KEY_PATH"
+          chmod 600 "$APPLE_API_KEY_PATH"
+          trap 'rm -f "$APPLE_API_KEY_PATH"' EXIT
+
           cargo tauri ios build --ci --target aarch64 \
-            --build-number "${GITHUB_RUN_NUMBER}" \
-            --export-method app-store-connect
+            --export-method app-store-connect -- --locked
+
+      - name: Normalize Tauri-generated iOS project
+        shell: bash
+        working-directory: Ratspeak
+        run: |
+          plist=src-tauri/gen/apple/ratspeak_iOS/Info.plist
+          if ! git diff --quiet -- "$plist"; then
+            printf '\n' >> "$plist"
+          fi
+          git diff --exit-code -- "$plist"
 
       - name: Validate iOS simulator bundle
         if: ${{ inputs.build_mode == 'simulator-smoke' }}
@@ -194,24 +334,73 @@ jobs:
           APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
         run: bash scripts/release/assert-ios-bundle.sh testflight src-tauri/gen/apple/build/arm64/Ratspeak.ipa
 
+      - name: Validate v1.0.27 signing continuity
+        if: ${{ inputs.build_mode == 'testflight' }}
+        shell: bash
+        working-directory: Ratspeak
+        run: |
+          TEMPORARY_IPA_DIRECTORY="$(mktemp -d "$RUNNER_TEMP/ratspeak-ipa-signing.XXXXXX")"
+          trap 'rm -rf "$TEMPORARY_IPA_DIRECTORY"' EXIT
+          ditto -x -k src-tauri/gen/apple/build/arm64/Ratspeak.ipa "$TEMPORARY_IPA_DIRECTORY"
+          APP_PATH="$(find "$TEMPORARY_IPA_DIRECTORY/Payload" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          if [ -z "$APP_PATH" ]; then
+            echo "The TestFlight IPA contains no application bundle" >&2
+            exit 1
+          fi
+
+          EMBEDDED_PROFILE_PLIST="$TEMPORARY_IPA_DIRECTORY/embedded-profile.plist"
+          EMBEDDED_CERTIFICATE_BASE64="$TEMPORARY_IPA_DIRECTORY/embedded-certificate.base64"
+          EMBEDDED_CERTIFICATE_DER="$TEMPORARY_IPA_DIRECTORY/embedded-certificate.der"
+          security cms -D \
+            -i "$APP_PATH/embedded.mobileprovision" \
+            -o "$EMBEDDED_PROFILE_PLIST"
+          plutil -extract DeveloperCertificates.0 raw \
+            -o "$EMBEDDED_CERTIFICATE_BASE64" \
+            "$EMBEDDED_PROFILE_PLIST"
+          base64 --decode < "$EMBEDDED_CERTIFICATE_BASE64" > "$EMBEDDED_CERTIFICATE_DER"
+          ACTUAL_CERTIFICATE_SHA1="$(openssl x509 \
+            -inform DER \
+            -in "$EMBEDDED_CERTIFICATE_DER" \
+            -noout \
+            -fingerprint \
+            -sha1 | cut -d= -f2 | tr -d ':' | tr '[:lower:]' '[:upper:]')"
+          if [ "$ACTUAL_CERTIFICATE_SHA1" != "$IOS_SIGNING_CERTIFICATE_SHA1" ]; then
+            echo "The TestFlight IPA certificate does not match v1.0.27" >&2
+            exit 1
+          fi
+
+          ACTUAL_PROFILE_UUID="$(plutil -extract UUID raw -o - "$EMBEDDED_PROFILE_PLIST")"
+          if [ "$ACTUAL_PROFILE_UUID" != "$IOS_PROVISIONING_PROFILE_UUID" ]; then
+            echo "The TestFlight IPA profile does not match v1.0.27" >&2
+            exit 1
+          fi
+
       - name: Check for bundled dev URLs
         shell: bash
         working-directory: Ratspeak
         run: bash scripts/release/assert-no-tauri-dev-url.sh src-tauri/gen/apple/build
 
+      - name: Generate source BOM
+        shell: bash
+        working-directory: Ratspeak
+        run: |
+          mkdir -p dist/ios
+          node scripts/release/source-integrity.mjs bom --output dist/ios/Ratspeak-ios-source-bom.json
+
       - name: Upload iOS artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: ratspeak-ios
           path: |
             Ratspeak/src-tauri/gen/apple/build/**/*.ipa
             Ratspeak/src-tauri/gen/apple/build/**/*.app
+            Ratspeak/dist/ios/Ratspeak-ios-source-bom.json
           if-no-files-found: error
           retention-days: 7
 
       - name: Upload to TestFlight
         if: ${{ inputs.build_mode == 'testflight' }}
-        uses: apple-actions/upload-testflight-build@v3
+        uses: apple-actions/upload-testflight-build@9fd28d4e690396e43caca69cef54cccccce77034
         with:
           app-path: Ratspeak/src-tauri/gen/apple/build/arm64/Ratspeak.ipa
           issuer-id: ${{ vars.APPSTORE_ISSUER_ID }}

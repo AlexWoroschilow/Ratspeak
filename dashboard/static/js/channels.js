@@ -162,7 +162,7 @@ function _channelsPublicConsentLink(label, documentId) {
         event.stopPropagation();
         if (!RS.legal || typeof RS.legal.open !== 'function' || !RS.legal.open(documentId)) {
             if (typeof showToast === 'function') {
-                showToast('This document could not be opened.', 'toast-red', 5000);
+                showToast('This document could not be opened.', 'toast-error', 5000);
             }
         }
     });
@@ -175,7 +175,7 @@ function _channelsShowPublicConsent() {
     if (typeof _rsBuildSheet !== 'function') return Promise.resolve(false);
 
     _channelsPublicConsentPromptPromise = new Promise(function(resolve) {
-        var built = _rsBuildSheet({ title: 'Before you enter public channels' }, function(value) {
+        var built = _rsBuildSheet({ title: 'Public channels' }, function(value) {
             _channelsPublicConsentPromptPromise = null;
             resolve(value === true);
         });
@@ -183,15 +183,15 @@ function _channelsShowPublicConsent() {
 
         var intro = document.createElement('p');
         intro.className = 'channel-consent-intro';
-        intro.textContent = 'Public channels can connect you to independently operated infrastructure and people Ratspeak does not control.';
+        intro.textContent = 'Public channels are shared spaces hosted by Ratspeak or independent operators.';
         built.body.appendChild(intro);
 
         var facts = document.createElement('div');
         facts.className = 'channel-consent-facts';
         [
-            ['hub', 'Independent hubs', 'Unless marked official, each hub is run and moderated by someone else. Content may be offensive, misleading, or illegal.'],
-            ['privacy', 'Hub-readable messages', 'The hub relays and can read channel messages. They do not have the same end-to-end privacy as direct messages.'],
-            ['controls', 'You stay in control', 'You can block people, report content, or leave at any time. Public channels are for adults 18 and older.']
+            ['hub', 'Independent operators', 'Unless marked official, a hub is run and moderated by someone else. Ratspeak may not be able to remove its content.'],
+            ['privacy', 'Different privacy', 'A hub can read and relay channel messages. Direct-message encryption does not apply.'],
+            ['controls', 'Your controls', 'You can block participants, report content, and leave a hub at any time.']
         ].forEach(function(fact) {
             var item = document.createElement('div');
             item.className = 'channel-consent-fact';
@@ -235,15 +235,31 @@ function _channelsShowPublicConsent() {
             return input;
         }
         var adult = acknowledgement('I am 18 or older.');
-        var independent = acknowledgement('I understand that independent hubs may contain unmoderated content.');
-        var policiesAccepted = acknowledgement('I agree to the Terms and Community Guidelines.');
+        var independent = acknowledgement('I understand that public channels may contain content from people Ratspeak does not control.');
         built.body.appendChild(acknowledgements);
+
+        var agreement = document.createElement('p');
+        agreement.className = 'channel-consent-agreement';
+        agreement.textContent = 'By continuing, you agree to the Terms and Community Guidelines.';
+        built.body.appendChild(agreement);
 
         var policies = document.createElement('div');
         policies.className = 'channel-consent-policies';
-        policies.appendChild(_channelsPublicConsentLink('Terms', 'terms'));
-        policies.appendChild(_channelsPublicConsentLink('Community Guidelines', 'guidelines'));
-        policies.appendChild(_channelsPublicConsentLink('Privacy', 'privacy'));
+        [
+            ['Privacy', 'privacy'],
+            ['Terms', 'terms'],
+            ['Guidelines', 'guidelines'],
+            ['Support', 'support']
+        ].forEach(function(policy, index) {
+            if (index > 0) {
+                var separator = document.createElement('span');
+                separator.className = 'channel-consent-policy-separator';
+                separator.setAttribute('aria-hidden', 'true');
+                separator.textContent = '·';
+                policies.appendChild(separator);
+            }
+            policies.appendChild(_channelsPublicConsentLink(policy[0], policy[1]));
+        });
         built.body.appendChild(policies);
 
         var error = document.createElement('div');
@@ -262,21 +278,20 @@ function _channelsShowPublicConsent() {
         continueButton.textContent = 'Continue';
         continueButton.disabled = true;
         function syncContinue() {
-            continueButton.disabled = !(adult.checked && independent.checked && policiesAccepted.checked);
+            continueButton.disabled = !(adult.checked && independent.checked);
             error.textContent = '';
         }
         adult.addEventListener('change', syncContinue);
         independent.addEventListener('change', syncContinue);
-        policiesAccepted.addEventListener('change', syncContinue);
         continueButton.addEventListener('click', function() {
-            if (!adult.checked || !independent.checked || !policiesAccepted.checked) return;
+            if (!adult.checked || !independent.checked) return;
             continueButton.disabled = true;
             continueButton.textContent = 'Saving\u2026';
             RS.invoke('accept_public_channel_consent', {
                 version: _channelsPublicConsent.requiredVersion,
                 adultConfirmed: adult.checked,
                 independentHubsUnderstood: independent.checked,
-                policiesAccepted: policiesAccepted.checked
+                policiesAccepted: true
             }).then(function(data) {
                 _channelsApplyPublicConsentSettings(data);
                 built.dismiss(true);
@@ -429,7 +444,7 @@ function _channelsInsertComposerText(value) {
     if (!fitted ||
             _channelsUtf8Length(_channelsMessageBody(before + fitted + after)) > limit) {
         if (typeof showToast === 'function') {
-            showToast('The channel message is already at its byte limit', 'toast-orange', 2400);
+            showToast('The channel message is already at its byte limit', 'toast-warning', 2400);
         }
         return false;
     }
@@ -610,15 +625,6 @@ function channelsConnectToHub(hub, options) {
         channelsActiveRoom = null;
         channelsHistorySelection = null;
         channelsApplySnapshot(snapshot);
-        if (typeof showToast === 'function') {
-            showToast(
-                options.switching
-                    ? 'Switching channel hub\u2026'
-                    : 'Connecting to channel hub\u2026',
-                'toast-blue',
-                2600
-            );
-        }
         return snapshot;
     });
 }
@@ -3856,39 +3862,6 @@ function _channelsUpdateComposer() {
     input.disabled = !room || room.phase !== 'joined' || channelsSnapshot.phase !== 'active';
 }
 
-function _channelsUsesNativeMobileTyping() {
-    if (typeof isTauriMobile === 'function' && isTauriMobile()) return true;
-    if (typeof isIOS === 'function' && isIOS()) return true;
-    return typeof isAndroid === 'function' && isAndroid();
-}
-
-function _channelsApplyComposerTypingPolicy(input, useMobileDefaults) {
-    if (!input) return;
-    var assistanceAttributes = [
-        'autocomplete',
-        'autocorrect',
-        'autocapitalize',
-        'spellcheck',
-        'writingsuggestions'
-    ];
-    if (useMobileDefaults) {
-        assistanceAttributes.forEach(function(attribute) {
-            input.removeAttribute(attribute);
-        });
-        return;
-    }
-    input.setAttribute('autocomplete', 'off');
-    input.setAttribute('autocorrect', 'off');
-    input.setAttribute('autocapitalize', 'off');
-    input.setAttribute('spellcheck', 'false');
-    input.setAttribute('writingsuggestions', 'false');
-}
-
-function _channelsHandleComposerBeforeInput(event, useMobileDefaults) {
-    if (useMobileDefaults || !event || event.inputType !== 'insertReplacementText') return;
-    event.preventDefault();
-}
-
 function channelsSelectRoom(roomName) {
     var room = _channelsRoomByName(roomName);
     if (!room) return;
@@ -4062,7 +4035,7 @@ function channelsOpenChannelShare(hubDestinationHash, roomName) {
                 if (typeof showToast === 'function') {
                     showToast(
                         ok ? 'Channel link copied' : 'Could not copy channel link',
-                        ok ? 'toast-green' : 'toast-orange',
+                        ok ? 'toast-success' : 'toast-error',
                         2200
                     );
                 }
@@ -4083,8 +4056,8 @@ function channelsOpenChannelShare(hubDestinationHash, roomName) {
             ).then(function(method) {
                 if (typeof showToast === 'function') {
                     showToast(
-                        method === 'share' ? 'QR handed to destination' : 'QR image saved',
-                        'toast-green',
+                        method === 'share' ? 'QR code shared' : 'QR image saved',
+                        'toast-success',
                         2400
                     );
                 }
@@ -4092,7 +4065,7 @@ function channelsOpenChannelShare(hubDestinationHash, roomName) {
                 if (typeof showToast === 'function') {
                     showToast(
                         (error && error.message) || 'Could not share channel QR',
-                        'toast-red',
+                        'toast-error',
                         3200
                     );
                 }
@@ -4119,7 +4092,7 @@ function channelsOpenChannelShare(hubDestinationHash, roomName) {
         if (typeof showToast === 'function') {
             showToast(
                 (error && error.message) || 'Could not build channel share',
-                'toast-red',
+                'toast-error',
                 3200
             );
         }
@@ -4241,7 +4214,7 @@ window.channelsOpenNativeSharedChannel = channelsOpenNativeSharedChannel;
 function channelsScanSharedChannel() {
     if (!RS.qr || typeof RS.qr.openScanner !== 'function') {
         if (typeof showToast === 'function') {
-            showToast('QR scanning is not available in this build', 'toast-orange', 2800);
+            showToast('QR scanning is not available in this build', 'toast-warning', 2800);
         }
         return;
     }
@@ -4432,7 +4405,7 @@ function channelsOpenHubSwitcher() {
     function retireStaleSwitcher() {
         built.dismiss();
         if (typeof showToast === 'function') {
-            showToast('Channels changed. Choose a hub again.', 'toast-orange', 2800);
+            showToast('Channels changed. Choose a hub again.', 'toast-warning', 2800);
         }
     }
 
@@ -4609,7 +4582,7 @@ function channelsOpenConnectSheet(prefill) {
             }));
         }).catch(function(err) {
             if (typeof showToast === 'function') {
-                showToast((err && err.message) || 'Could not load channel safety settings.', 'toast-red', 5000);
+                showToast((err && err.message) || 'Could not load channel safety settings.', 'toast-error', 5000);
             }
         });
         return;
@@ -4900,6 +4873,7 @@ function _channelsPresentSheet(built, initialFocus) {
     if (RS.gestures && typeof RS.gestures.attachDragDismiss === 'function') {
         RS.gestures.attachDragDismiss(built.sheet, {
             axis: 'y',
+            handleSelector: '.bottom-sheet-handle',
             blockIfScrolled: true,
             skipIf: function(event) {
                 return !!event.target.closest('button, input, textarea, select');
@@ -4923,7 +4897,7 @@ function channelsOpenJoinSheet(prefillRoom, options) {
             if (accepted) channelsOpenJoinSheet(prefillRoom, { public_consent_checked: true });
         }).catch(function(err) {
             if (typeof showToast === 'function') {
-                showToast((err && err.message) || 'Could not load channel safety settings.', 'toast-red', 5000);
+                showToast((err && err.message) || 'Could not load channel safety settings.', 'toast-error', 5000);
             }
         });
         return;
@@ -5149,14 +5123,11 @@ function _channelsDisconnectFromHub(control) {
         channelsActiveRoom = null;
         channelsHistorySelection = null;
         channelsApplySnapshot(snapshot);
-        if (typeof showToast === 'function') {
-            showToast('Channel session ended', 'toast-green', 2200);
-        }
         return snapshot;
     }).catch(function(err) {
         if (control) control.disabled = false;
         if (typeof showToast === 'function') {
-            showToast((err && err.message) || 'Could not disconnect', 'toast-red', 3200);
+            showToast((err && err.message) || 'Could not disconnect', 'toast-error', 3200);
         }
         return null;
     });
@@ -5193,7 +5164,7 @@ function channelsOpenHubOptions(eventOrTrigger) {
             onSelect: function() {
                 RS.copyText(hub.destination_hash).then(function(ok) {
                     if (typeof showToast === 'function') {
-                        showToast(ok ? 'Hub address copied' : 'Could not copy', ok ? 'toast-green' : 'toast-orange', 1800);
+                        showToast(ok ? 'Hub address copied' : 'Could not copy', ok ? 'toast-success' : 'toast-error', 1800);
                     }
                 });
             }
@@ -5438,7 +5409,7 @@ function channelsOpenHubDetails() {
     copyButton.textContent = 'Copy address';
     copyButton.addEventListener('click', function() {
         RS.copyText(hub.destination_hash).then(function(ok) {
-            if (typeof showToast === 'function') showToast(ok ? 'Hub address copied' : 'Could not copy', ok ? 'toast-green' : 'toast-orange', 1800);
+            if (typeof showToast === 'function') showToast(ok ? 'Hub address copied' : 'Could not copy', ok ? 'toast-success' : 'toast-error', 1800);
         });
     });
     var shareButton = document.createElement('button');
@@ -5552,7 +5523,7 @@ function channelsOpenRoomOptions(eventOrTrigger) {
                     if (!confirmed) return;
                     _channelsPartRoom(room.name).catch(function(err) {
                         if (typeof showToast === 'function') {
-                            showToast((err && err.message) || 'Could not leave channel', 'toast-red', 3200);
+                            showToast((err && err.message) || 'Could not leave channel', 'toast-error', 3200);
                         }
                     });
                 });
@@ -5641,15 +5612,11 @@ function channelsOpenRoomDetails() {
         }).then(function() {
             unread.notification_level = selected;
             return channelsRefreshUnread();
-        }).then(function() {
-            if (typeof showToast === 'function') {
-                showToast('Channel notifications updated', 'toast-green', 1800);
-            }
         }).catch(function(error) {
             notificationSelect.value = previous;
             renderPolicyNote();
             if (typeof showToast === 'function') {
-                showToast((error && error.message) || 'Could not update channel notifications', 'toast-red', 3200);
+                showToast((error && error.message) || 'Could not update channel notifications', 'toast-error', 3200);
             }
         }).then(function() {
             notificationSelect.disabled = false;
@@ -5729,7 +5696,7 @@ function channelsOpenRoomDetails() {
                 built.dismiss();
             }).catch(function(err) {
                 leave.disabled = false;
-                if (typeof showToast === 'function') showToast((err && err.message) || 'Could not leave channel', 'toast-red', 3200);
+                if (typeof showToast === 'function') showToast((err && err.message) || 'Could not leave channel', 'toast-error', 3200);
             });
         });
     });
@@ -5768,7 +5735,7 @@ function channelsDisconnect() {
         channelsApplySnapshot(snapshot);
         return snapshot;
     }).catch(function(error) {
-        if (typeof showToast === 'function') showToast((error && error.message) || 'Could not end channel session', 'toast-red', 3500);
+        if (typeof showToast === 'function') showToast((error && error.message) || 'Could not end channel session', 'toast-error', 3500);
     });
 }
 
@@ -5812,7 +5779,7 @@ function channelsSendMessage() {
     var limit = _channelsMessageLimit();
     if (!text.trim()) return;
     if (bodyBytes > limit) {
-        if (typeof showToast === 'function') showToast('Channel message exceeds the hub limit', 'toast-red', 3000);
+        if (typeof showToast === 'function') showToast('Channel message exceeds the hub limit', 'toast-warning', 3000);
         return;
     }
     var shouldRestoreComposerFocus = RS.composer
@@ -5854,7 +5821,7 @@ function channelsSendMessage() {
                 RS.chatScroll.pinToBottom(_channelsEl('channel-transcript'));
             }
         }
-        if (typeof showToast === 'function') showToast((error && error.message) || 'Could not send channel message', 'toast-red', 3500);
+        if (typeof showToast === 'function') showToast((error && error.message) || 'Could not send channel message', 'toast-error', 3500);
     }).then(function() {
         _channelsSendPending = false;
         _channelsUpdateComposer();
@@ -5883,7 +5850,7 @@ function _channelsBindUI() {
             actionEl.disabled = true;
             _channelsPartRoom(actionEl.dataset.room || '').catch(function(error) {
                 actionEl.disabled = false;
-                if (typeof showToast === 'function') showToast((error && error.message) || 'Could not leave channel', 'toast-red', 3200);
+                if (typeof showToast === 'function') showToast((error && error.message) || 'Could not leave channel', 'toast-error', 3200);
             });
         }
     });
@@ -5938,11 +5905,7 @@ function _channelsBindUI() {
     var input = _channelsEl('channel-message-input');
     if (input) {
         var channelGrowRaf = null;
-        var useMobileTypingDefaults = _channelsUsesNativeMobileTyping();
-        _channelsApplyComposerTypingPolicy(input, useMobileTypingDefaults);
-        input.addEventListener('beforeinput', function(event) {
-            _channelsHandleComposerBeforeInput(event, useMobileTypingDefaults);
-        });
+        RS.composer.bindTypingPolicy(input);
         input.addEventListener('input', function() {
             var previousHeight = input.style.height;
             if (typeof RS !== 'undefined' && RS.composer && typeof RS.composer.resize === 'function') RS.composer.resize(input);

@@ -7,6 +7,8 @@
 Ratspeak is a native desktop and mobile client for E2EE conversations over
 Reticulum, a new type of mesh networking. Ratspeak gives you messaging, file/image sharing, voice calls and voice messages (experimental), Channels, LoRa capability, WiFi, BLE, TCP, offline messaging, turn-based games, and more.
 
+[Click here for iOS TestFlight Public Beta!](https://testflight.apple.com/join/AzzW4Jg6)
+
 [Docs](https://docs.ratspeak.org/) |
 [Build from source](https://docs.ratspeak.org/docs/reference/building-from-source) |
 [rsReticulum](https://github.com/ratspeak/rsReticulum) |
@@ -15,7 +17,7 @@ Reticulum, a new type of mesh networking. Ratspeak gives you messaging, file/ima
 
 
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
-[![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust 1.87+](https://img.shields.io/badge/rust-1.87%2B-orange.svg)](https://www.rust-lang.org)
 [![Status](https://img.shields.io/badge/status-alpha-yellow.svg)](#current-state)
 
 <img src="docs/readme/ratspeak-showcase.png" alt="Ratspeak running on desktop and mobile" width="100%">
@@ -99,7 +101,16 @@ cd src-tauri
 cargo tauri dev
 ```
 
-For a release bundle, run `cargo tauri build` from `Ratspeak/src-tauri`.
+To reproduce a tagged Ratspeak release starting with `v1.0.29`, check out the
+Ratspeak `vX.Y.Z` tag and the matching annotated `ratspeak-vX.Y.Z` tag in each
+of `rsReticulum`, `rsLXMF`, `rsLXST`, and `lrgp-rs`. The exact commits in
+`Ratspeak/release/dependency-set.json` are authoritative; the coordinated tags
+are permanent readable aliases for that graph. From the sibling layout above,
+`node Ratspeak/scripts/release/source-integrity.mjs verify-tags` verifies every
+component version, annotated tag, and exact commit before a build.
+
+For a release bundle, run `cargo tauri build -- --locked` from
+`Ratspeak/src-tauri`.
 Desktop bundles land under `Ratspeak/src-tauri/target/release/bundle/`.
 
 To build without the experimental voice stack and skip the rsLXST sibling,
@@ -142,8 +153,10 @@ ringtones, and platform audio routing are all subject to change.
 
 ## Platform Notes
 
-- iOS does not support general USB serial. Local Network, multicast, notifications, and
-  background behavior depend on Apple permissions as well, and currently don't have support at this time.
+- iOS does not support general USB serial. Ratspeak's signed iOS builds support
+  Local Network and multicast discovery; users must still grant the normal iOS
+  Local Network permission. Notifications require user permission, and
+  background execution remains subject to iOS lifecycle limits.
 - Windows Bluetooth Peer advertiser support needs the future signed MSIX lane.
 - Linux Bluetooth Peer depends on BlueZ GATT server and LE advertising support.
 - Voice calls require microphone permission per platform; the prompt is

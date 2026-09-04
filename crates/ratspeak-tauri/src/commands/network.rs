@@ -91,9 +91,13 @@ pub async fn set_propagation_hosting(
         }
     }
 
-    if args.enabled {
-        crate::send_announce_from_origin(&state, activity_origin).await;
-    }
+    state.bump_announce_content_revision();
+    crate::send_typed_announce_from_origin(
+        &state,
+        crate::announce::AnnounceOrigin::PropagationChanged,
+        activity_origin,
+    )
+    .await;
     crate::propagation::emit_propagation_update(&state);
     Ok(crate::propagation::get_status_payload(&state))
 }
@@ -140,7 +144,13 @@ pub async fn set_stamp_settings(
         }
     }
 
-    crate::send_announce_from_origin(&state, activity_origin).await;
+    state.bump_announce_content_revision();
+    crate::send_typed_announce_from_origin(
+        &state,
+        crate::announce::AnnounceOrigin::ProfileChanged,
+        activity_origin,
+    )
+    .await;
     let payload = crate::propagation::get_status_payload(&state);
     state.emit_to_all("propagation_update", payload.clone());
     Ok(payload)
@@ -1076,50 +1086,6 @@ pub async fn get_propagation_status(state: State<'_, Arc<AppState>>) -> AppResul
     Ok(crate::propagation::get_status_payload(&state))
 }
 
-async fn live_interface_summary(state: &Arc<AppState>) -> Option<(bool, u64)> {
-    let handle = {
-        let rns = state.rns.read().ok()?;
-        rns.as_ref().map(|mgr| mgr.handle.clone())?
-    };
-    match handle
-        .query_control(rns_transport::messages::TransportQuery::GetInterfaceStats)
-        .await
-    {
-        Some(rns_transport::messages::TransportQueryResponse::InterfaceStats(stats)) => Some((
-            stats.iter().any(|iface| iface.online),
-            stats.iter().map(|iface| iface.tx_bytes).sum(),
-        )),
-        _ => None,
-    }
-}
-
-fn record_manual_announce_outcome(
-    state: &AppState,
-    fence: crate::state::ActivityRequestFence,
-    failure: Option<producer::AnnounceFailureReason>,
-) {
-    state.activity.record_event_fenced(
-        || state.is_current_activity_origin_fence(fence),
-        || {
-            let transition = match failure {
-                Some(reason) => producer::RnsAnnounceTransition::Failed {
-                    method: producer::AnnounceMethod::Manual,
-                    reason,
-                },
-                None => producer::RnsAnnounceTransition::Sent {
-                    method: producer::AnnounceMethod::Manual,
-                },
-            };
-            Ok(producer::rns_announce_activity(
-                producer::RnsAnnounceActivity {
-                    transition,
-                    interface: None,
-                },
-            ))
-        },
-    );
-}
-
 #[tauri::command]
 pub async fn trigger_announce(state: State<'_, Arc<AppState>>) -> AppResult<Value> {
     let activity_fence = state.activity_request_fence();
@@ -1129,106 +1095,39 @@ pub async fn trigger_announce(state: State<'_, Arc<AppState>>) -> AppResult<Valu
         .ok()
         .and_then(|r| r.as_ref().map(|_| ()))
         .is_some();
-    let lxmf_ready = rns_ready
-        && state
-            .lxmf
-            .lock()
-            .ok()
-            .and_then(|l| l.as_ref().map(|_| ()))
-            .is_some();
-    if !rns_ready || !lxmf_ready {
-        record_manual_announce_outcome(
-            &state,
-            activity_fence,
-            Some(if rns_ready {
-                producer::AnnounceFailureReason::NotReady
-            } else {
-                producer::AnnounceFailureReason::TransportUnavailable
-            }),
-        );
-        state.emit_to_all(
-            "announce_triggered",
-            json!({ "success": false, "error": "RNS or LXMF not initialized" }),
-        );
-        return Err(AppError::service_unavailable("RNS or LXMF not initialized"));
+    if !rns_ready {
+        return Ok(json!({
+            "success": false,
+            "error": "not_ready",
+            "message": "Ratspeak is still starting",
+        }));
     }
 
-    let before_summary = live_interface_summary(&state).await;
-    let online = before_summary
-        .map(|(online, _)| online)
-        .or_else(|| crate::any_interface_online_cached(&state));
+    let online = crate::any_interface_online_cached(&state);
     if matches!(online, Some(false)) {
         tracing::warn!("manual announce skipped: no interfaces online");
-        record_manual_announce_outcome(
-            &state,
-            activity_fence,
-            Some(producer::AnnounceFailureReason::NoInterfaceTransmission),
-        );
-        state.emit_to_all(
-            "announce_triggered",
-            json!({ "success": false, "error": "no_interfaces" }),
-        );
-        return Ok(json!(null));
+        return Ok(json!({ "success": false, "error": "no_interfaces" }));
     }
 
-    let before_tx = before_summary.map(|(_, tx)| tx);
-    let mut report = crate::send_manual_announce_from_origin(&state, activity_fence).await;
-    let mut retried = false;
-    let mut sent_bytes = None;
+    // This admits one intent; the presence coordinator is the sole async owner
+    // of packet construction, component queueing and semantic follow-ups.
+    let report = crate::send_manual_announce_from_origin(&state, activity_fence).await;
 
-    if let Some(start_tx) = before_tx {
-        tokio::time::sleep(std::time::Duration::from_millis(450)).await;
-        sent_bytes = live_interface_summary(&state)
-            .await
-            .map(|(_, tx)| tx.saturating_sub(start_tx));
-
-        if report.queued > 0 && sent_bytes == Some(0) {
-            retried = true;
-            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
-            report = crate::send_manual_announce_from_origin(&state, activity_fence).await;
-            tokio::time::sleep(std::time::Duration::from_millis(450)).await;
-            sent_bytes = live_interface_summary(&state)
-                .await
-                .map(|(_, tx)| tx.saturating_sub(start_tx));
+    let disposition = match report.disposition {
+        crate::AnnounceSendDisposition::Queued => "queued",
+        crate::AnnounceSendDisposition::AlreadyQueued => "already_queued",
+        crate::AnnounceSendDisposition::Deferred => "deferred",
+        crate::AnnounceSendDisposition::Failed => {
+            return Ok(json!({ "success": false, "error": "busy" }));
         }
-    }
-
-    if report.queued == 0 {
-        let failure = if report.packets == 0 {
-            producer::AnnounceFailureReason::NotReady
-        } else if report.failed > 0 {
-            producer::AnnounceFailureReason::QueueFailed
-        } else {
-            producer::AnnounceFailureReason::TransportUnavailable
-        };
-        record_manual_announce_outcome(&state, activity_fence, Some(failure));
-        state.emit_to_all(
-            "announce_triggered",
-            json!({ "success": false, "error": "not_ready" }),
-        );
-        return Ok(json!({ "success": false, "error": "not_ready" }));
-    }
-
-    if sent_bytes == Some(0) {
-        tracing::warn!("manual announce queued but no interface transmitted bytes");
-        record_manual_announce_outcome(
-            &state,
-            activity_fence,
-            Some(producer::AnnounceFailureReason::NoInterfaceTransmission),
-        );
-        state.emit_to_all(
-            "announce_triggered",
-            json!({ "success": false, "error": "not_sent", "retried": retried }),
-        );
-        return Ok(json!({ "success": false, "error": "not_sent", "retried": retried }));
-    }
-
-    record_manual_announce_outcome(&state, activity_fence, None);
-    state.emit_to_all(
-        "announce_triggered",
-        json!({ "success": true, "retried": retried, "sent_bytes": sent_bytes }),
-    );
-    Ok(json!({ "success": true, "retried": retried, "sent_bytes": sent_bytes }))
+    };
+    Ok(json!({
+        "success": true,
+        "queued": 0,
+        "packets": 0,
+        "disposition": disposition,
+        "correlation_id": report.correlation_id.to_string(),
+    }))
 }
 
 #[tauri::command]

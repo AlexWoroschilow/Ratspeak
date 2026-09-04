@@ -4,32 +4,33 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use serde_json::{Value, json};
 
 use lxmf_core::constants::{
-    DELIVERY_RETRY_WAIT, DeliveryMethod, DeliveryRepresentation, MAX_DELIVERY_ATTEMPTS,
-    MAX_PATHLESS_TRIES, PATH_REQUEST_WAIT, STRUCT_OVERHEAD, TIMESTAMP_SIZE,
+    DELIVERY_RETRY_WAIT, MAX_DELIVERY_ATTEMPTS, MAX_PATHLESS_TRIES, PATH_REQUEST_WAIT,
+    STRUCT_OVERHEAD, TIMESTAMP_SIZE,
 };
-use lxmf_core::delivery_ratchet::{DeliveryAnnounceKind, DeliveryRatchetState};
+use lxmf_core::delivery_ratchet::{
+    DeliveryAnnounceKind, DeliveryRatchetError, DeliveryRatchetState,
+};
 use lxmf_core::handlers::CompressionSupport;
 use lxmf_core::link_delivery::{
     BackchannelSendCommand, BackchannelSendError, BackchannelSendReceipt, DeliveryResult,
     DeliveryState, DirectLinkStartKind, LxmfDeliveryEvent, LxmfDeliveryEventKind,
     LxmfDeliveryEventMethod, is_retryable_link_delivery_failure,
 };
-use lxmf_core::message::LxMessage;
+use lxmf_core::message_api::{DeliveryMethod, DeliveryRepresentation, LxMessage};
 use lxmf_core::router::{
     DirectDeliveryPlan, DirectDeliveryPlanInput, DirectReusableLinkState, DirectRouteSnapshot,
-    LxmRouter, OutboundAction, RouterConfig, plan_direct_delivery,
+    LxmRouter, OutboundAction, RouterConfig, RouterStateSnapshot, plan_direct_delivery,
 };
 use rns_identity::destination::Destination;
 use rns_identity::identity::Identity;
-use rns_identity::ratchet::{
-    ReceivedRatchet, clean_received_ratchets_dir, purge_expired_ratchets_in_memory,
-};
+use rns_identity::ratchet::ReceivedRatchet;
 
 use rns_transport::messages::{PathTableRpcEntry, TransportMessage, TransportQuery};
 use tokio::sync::{mpsc, oneshot};
@@ -39,11 +40,20 @@ use crate::state::DbPool;
 use ratspeak_core::{LXMF_DELIVERY_APP_NAME as LXMF_APP_NAME, LXMF_PROPAGATION_APP_NAME};
 
 const MAX_LXMF_RESOURCE_BYTES: usize = rns_protocol::resource::MAX_RESOURCE_SIZE;
+pub const MAX_AUDIO_FIELD_BYTES: usize = 1_000_000;
+pub const AUDIO_MESSAGE_FILE_NAME: &str = "Voice message.opus";
+// A deferred PoW stamp can still be attached after semantic submission. Its
+// MessagePack bin8 representation is marker + u8 length + 32 stamp bytes; the
+// surrounding fixarray marker remains one byte when the payload grows 4 -> 5.
+const MAX_DEFERRED_STAMP_WIRE_BYTES: usize = 2 + lxmf_core::constants::STAMP_SIZE;
 const OPPORTUNISTIC_MAX_CONTENT_BYTES: usize = 295;
 const AUTO_PROPAGATION_CHECK_INTERVAL_SECS: f64 = 5.0 * 60.0;
 const BACKCHANNEL_COMMAND_BUFFER: usize = 64;
 const DIRECT_PATH_FAILURE_SUPPRESSION_SECS: f64 = 30.0;
 const DIRECT_BACKCHANNEL_IDENTIFY_GRACE: Duration = Duration::from_secs(3);
+type DirectInboundResourceAcceptHandler =
+    Arc<dyn Fn([u8; 16], &rns_protocol::resource_adv::ResourceAdvertisement) -> bool + Send + Sync>;
+type DirectInboundResourceConcludedHandler = Arc<dyn Fn([u8; 16], [u8; 32]) + Send + Sync>;
 // Wire tag for the original (v1) Ratspeak chat extension. Kept for inbound
 // decoding of messages from peers that haven't upgraded.
 pub const RATSPEAK_CHAT_CUSTOM_TYPE_V1: &[u8] = b"ratspeak.chat.v1";
@@ -69,6 +79,12 @@ pub const RATSPEAK_CAP_GAMES: u64 = 0x02;
 pub const RATSPEAK_CAP_CHAT: u64 = 0x04;
 pub const RATSPEAK_DEFAULT_CAPABILITIES: u64 =
     RATSPEAK_CAP_CLIENT | RATSPEAK_CAP_GAMES | RATSPEAK_CAP_CHAT;
+
+#[derive(Debug)]
+pub(crate) enum CoordinatedDeliveryAnnounceError {
+    Coalesced,
+    Failed(String),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RatspeakChatExtension {
@@ -721,6 +737,31 @@ fn validate_attachment_envelope_size(actual_bytes: usize) -> Result<(), LxmfSubm
     }
 }
 
+fn validate_outbound_audio(audio_bytes: &[u8]) -> Result<(), LxmfSubmissionFailure> {
+    #[cfg(feature = "lxst-voice")]
+    {
+        crate::voice_memo::inspect_voice_memo(audio_bytes)
+            .map(|_| ())
+            .map_err(|_| LxmfSubmissionFailure::PreparationFailed)
+    }
+    #[cfg(not(feature = "lxst-voice"))]
+    {
+        let _ = audio_bytes;
+        Err(LxmfSubmissionFailure::PreparationFailed)
+    }
+}
+
+fn validate_audio_message_size(actual_bytes: usize) -> Result<(), LxmfSubmissionFailure> {
+    let limit_bytes = rns_protocol::resource::MAX_EFFICIENT_SIZE;
+    if actual_bytes >= limit_bytes {
+        return Err(LxmfSubmissionFailure::ResourceLimitExceeded {
+            actual_bytes,
+            limit_bytes,
+        });
+    }
+    Ok(())
+}
+
 fn normalize_protocol_delivery_method(msg: &mut LxMessage) {
     if msg.method == DeliveryMethod::Opportunistic {
         if let Ok(packed) = msg.pack_payload() {
@@ -757,6 +798,22 @@ pub struct AttachmentMessageRequest<'a> {
     pub staged_path: Option<&'a Path>,
     pub is_image: bool,
     pub image_mime: &'a str,
+    pub db_pool: &'a DbPool,
+    pub identity_id: &'a str,
+    pub preference: DeliveryPreference,
+}
+
+/// Fully-specified first-class LXMF Ogg/Opus audio send request.
+///
+/// Staging-token ownership remains in the command layer. When `staged_path`
+/// is present, the runtime atomically adopts that already-validated private
+/// file into identity-scoped message storage before queueing the LXM.
+pub struct AudioMessageRequest<'a> {
+    pub dest_hash_hex: &'a str,
+    pub content: &'a str,
+    pub title: &'a str,
+    pub audio_bytes: &'a [u8],
+    pub staged_path: Option<&'a Path>,
     pub db_pool: &'a DbPool,
     pub identity_id: &'a str,
     pub preference: DeliveryPreference,
@@ -824,6 +881,14 @@ fn backchannel_error_from_runtime(
         }
         rns_runtime::link_manager::LinkSendError::NoSessionKeys => {
             BackchannelSendError::NoSessionKeys
+        }
+        rns_runtime::link_manager::LinkSendError::IdentityUnavailable
+        | rns_runtime::link_manager::LinkSendError::IdentificationUnavailable => {
+            // These commands are not expected for an already-identified LXMF
+            // backchannel. If the runtime reports either anyway, retire the
+            // cached Link and let core retry normal Direct discovery instead
+            // of terminally losing the message.
+            BackchannelSendError::LinkNotActive
         }
         rns_runtime::link_manager::LinkSendError::TransportUnavailable => {
             BackchannelSendError::TransportUnavailable
@@ -902,6 +967,23 @@ struct PendingOpportunisticDelivery {
     retry_at: f64,
 }
 
+/// Ordered terminal notifications emitted by the responder-side Reticulum
+/// LinkManager. Production derives this compact stream from the manager's
+/// lossless accounting channel so proof, Resource conclusion and Link closure
+/// retain actor order without cloning completed Resource payloads.
+#[derive(Debug, Clone)]
+pub(crate) enum BackchannelLinkEvent {
+    PacketProof(rns_runtime::link_manager::LinkPacketProof),
+    ResourceConclusion {
+        link_id: [u8; 16],
+        resource_hash: [u8; 32],
+        conclusion: rns_runtime::link_manager::LinkResourceConclusion,
+    },
+    LinkClosed {
+        link_id: [u8; 16],
+    },
+}
+
 pub struct LxmfManager {
     pub identity: Identity,
     /// True when `identity` is backed by a hardware token (PIV). Gates features
@@ -920,7 +1002,14 @@ pub struct LxmfManager {
     delivery_ratchets: DeliveryRatchetState,
     announce_cache_started: Instant,
     pub received_ratchets: HashMap<String, ReceivedRatchet>,
+    /// Remote ratchets whose current value has not yet been acknowledged by
+    /// the serialized persistence owner. Persistence failures leave entries
+    /// here so a later delta/periodic pass retries them without replaying the
+    /// complete received-ratchet store.
+    dirty_received_ratchets: HashSet<String>,
     pub known_identities: HashMap<String, [u8; 64]>,
+    known_identities_revision: u64,
+    known_identities_persisted_revision: u64,
     peer_lxmf_compression_support: HashMap<[u8; 16], CompressionSupport>,
     route_hops: HashMap<[u8; 16], u8>,
     route_entries: HashMap<[u8; 16], PathTableRpcEntry>,
@@ -930,13 +1019,16 @@ pub struct LxmfManager {
     pub link_delivery: Option<lxmf_core::link_delivery::LinkDeliveryManager>,
     lxmf_link_command_tx: Option<mpsc::Sender<rns_runtime::link_manager::LinkManagerCommand>>,
     lxmf_direct_link_packet_tx: Option<mpsc::UnboundedSender<(Vec<u8>, [u8; 16])>>,
+    direct_inbound_resource_accept_handler: Option<DirectInboundResourceAcceptHandler>,
+    direct_inbound_resource_concluded_handler: Option<DirectInboundResourceConcludedHandler>,
     pending_direct_link_identifications: HashMap<[u8; 16], PendingDirectLinkIdentification>,
     lxmf_backchannel_command_rx: Option<mpsc::Receiver<BackchannelSendCommand>>,
     lxmf_link_identified_rx: Option<mpsc::Receiver<([u8; 16], [u8; 16])>>,
-    lxmf_link_closed_rx: Option<mpsc::Receiver<[u8; 16]>>,
-    lxmf_link_packet_proof_rx: Option<mpsc::Receiver<rns_runtime::link_manager::LinkPacketProof>>,
-    lxmf_link_resource_proof_rx:
-        Option<mpsc::Receiver<rns_runtime::link_manager::LinkResourceProof>>,
+    lxmf_backchannel_event_rx: Option<mpsc::UnboundedReceiver<BackchannelLinkEvent>>,
+    pending_backchannel_resource_cancellations:
+        std::collections::VecDeque<lxmf_core::link_delivery::BackchannelResourceCancelRequest>,
+    opportunistic_proof_tx:
+        Option<mpsc::UnboundedSender<rns_transport::link_messages::DestinationEvent>>,
     opportunistic_in_flight: HashMap<[u8; 32], PendingOpportunisticDelivery>,
     pub propagation_sync: Option<lxmf_core::propagation_sync::PropagationSyncTask>,
     pub propagation_client: Option<lxmf_core::propagation_client::PropagationClient>,
@@ -948,6 +1040,7 @@ pub struct LxmfManager {
     last_ratchet_clean: f64,
     last_router_cull: f64,
     pub received_ratchets_dir: PathBuf,
+    pending_expired_received_ratchets: Vec<String>,
     /// Outbound message hashes routed via propagation. `LinkDeliveryManager`
     /// reports `Complete` for both propagation deposits and large-message
     /// direct sends; this map lets `tick()` map completion to the right state
@@ -966,6 +1059,85 @@ pub struct LxmfManager {
     /// Auto sends that began over a live LXMF method and may be retried once
     /// through the configured Offline Inbox after live delivery fails.
     auto_live_fallback: HashSet<[u8; 32]>,
+}
+
+/// Immutable known-identity artifact captured while the LXMF manager is
+/// locked and persisted only after that protocol lock has been released.
+pub struct KnownIdentitiesSnapshot {
+    identity_hash: String,
+    revision: u64,
+    path: PathBuf,
+    bytes: Vec<u8>,
+    pub count: usize,
+}
+
+impl KnownIdentitiesSnapshot {
+    pub fn persist(&self) -> std::io::Result<()> {
+        rns_identity::persistence::atomic_write(&self.path, &self.bytes)
+    }
+}
+
+/// Immutable periodic/shutdown checkpoint. Received ratchets are deliberately
+/// absent: each changed remote ratchet is persisted as a per-destination delta
+/// when learned, so a checkpoint never rewrites thousands of unchanged files.
+pub struct LxmfCheckpointSnapshot {
+    known_identities: KnownIdentitiesSnapshot,
+    router_state: RouterStateSnapshot,
+    router_state_dir: PathBuf,
+}
+
+impl LxmfCheckpointSnapshot {
+    pub fn persist(&self) -> std::io::Result<()> {
+        self.known_identities.persist()?;
+        self.router_state.save_state(&self.router_state_dir)
+    }
+
+    pub fn known_identities_count(&self) -> usize {
+        self.known_identities.count
+    }
+}
+
+/// Owned delta for state that changed during an LXMF tick or announce
+/// observation. All paths and values are resolved before the manager lock is
+/// released; persistence is then independent of live protocol ownership.
+pub struct LxmfPersistenceDelta {
+    identity_hash: String,
+    known_identities: Option<KnownIdentitiesSnapshot>,
+    received_ratchets: Vec<(String, PathBuf, ReceivedRatchet)>,
+    router_state: Option<(PathBuf, RouterStateSnapshot)>,
+}
+
+impl LxmfPersistenceDelta {
+    pub fn is_empty(&self) -> bool {
+        self.known_identities.is_none()
+            && self.received_ratchets.is_empty()
+            && self.router_state.is_none()
+    }
+
+    pub fn persist(&self) -> std::io::Result<()> {
+        for (_, path, ratchet) in &self.received_ratchets {
+            ratchet.save(path)?;
+        }
+        if let Some(snapshot) = self.known_identities.as_ref() {
+            snapshot.persist()?;
+        }
+        if let Some((path, snapshot)) = self.router_state.as_ref() {
+            snapshot.save_state(path)?;
+        }
+        Ok(())
+    }
+
+    pub fn artifact_count(&self) -> usize {
+        usize::from(self.known_identities.is_some())
+            + self.received_ratchets.len()
+            + usize::from(self.router_state.is_some())
+    }
+
+    fn persisted_ratchets(&self) -> impl Iterator<Item = (&str, ReceivedRatchet)> {
+        self.received_ratchets
+            .iter()
+            .map(|(hash, _, ratchet)| (hash.as_str(), *ratchet))
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1224,23 +1396,37 @@ impl LxmfManager {
             wall_now,
         )?;
 
-        // Sweep expired/corrupt files before load.
+        // Validate, expire and load each file exactly once. The former
+        // clean-then-load sequence decoded every ratchet twice at startup.
         let received_dir = ratchet_dir.join("received");
         std::fs::create_dir_all(&received_dir)?;
-        let removed = clean_received_ratchets_dir(&received_dir);
-        if removed > 0 {
-            tracing::info!(removed, "swept expired received-ratchet files at startup");
-        }
         let mut received_ratchets = HashMap::new();
+        let mut removed = 0usize;
         if let Ok(entries) = std::fs::read_dir(&received_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if let Some((name, rr)) =
-                    received_ratchet_hash_from_path(&path).zip(ReceivedRatchet::load(&path).ok())
+                if !path.is_file() {
+                    continue;
+                }
+                match received_ratchet_hash_from_path(&path)
+                    .zip(ReceivedRatchet::load(&path).ok())
+                    .filter(|(_, ratchet)| !ratchet.is_expired())
                 {
-                    received_ratchets.insert(name.to_string(), rr);
+                    Some((name, ratchet)) => {
+                        received_ratchets.insert(name.to_string(), ratchet);
+                    }
+                    None => match std::fs::remove_file(&path) {
+                        Ok(()) => removed += 1,
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "failed to remove expired or corrupt received ratchet"
+                        ),
+                    },
                 }
             }
+        }
+        if removed > 0 {
+            tracing::info!(removed, "swept expired received-ratchet files at startup");
         }
 
         // Binary: repeated [dest_hash:16][pubkey:64] records.
@@ -1285,7 +1471,10 @@ impl LxmfManager {
             delivery_ratchets,
             announce_cache_started: Instant::now(),
             received_ratchets,
+            dirty_received_ratchets: HashSet::new(),
             known_identities,
+            known_identities_revision: 0,
+            known_identities_persisted_revision: 0,
             peer_lxmf_compression_support: HashMap::new(),
             route_hops: HashMap::new(),
             route_entries: HashMap::new(),
@@ -1293,12 +1482,14 @@ impl LxmfManager {
             link_delivery: None,
             lxmf_link_command_tx: None,
             lxmf_direct_link_packet_tx: None,
+            direct_inbound_resource_accept_handler: None,
+            direct_inbound_resource_concluded_handler: None,
             pending_direct_link_identifications: HashMap::new(),
             lxmf_backchannel_command_rx: None,
             lxmf_link_identified_rx: None,
-            lxmf_link_closed_rx: None,
-            lxmf_link_packet_proof_rx: None,
-            lxmf_link_resource_proof_rx: None,
+            lxmf_backchannel_event_rx: None,
+            pending_backchannel_resource_cancellations: std::collections::VecDeque::new(),
+            opportunistic_proof_tx: None,
             opportunistic_in_flight: HashMap::new(),
             propagation_sync: None,
             propagation_client: None,
@@ -1313,6 +1504,7 @@ impl LxmfManager {
                 .unwrap_or_default()
                 .as_secs_f64(),
             received_ratchets_dir: received_dir,
+            pending_expired_received_ratchets: Vec::new(),
             in_flight_propagation: std::collections::HashMap::new(),
             completed_propagation_deposits: Vec::new(),
             failed_propagation_deposits: Vec::new(),
@@ -1356,24 +1548,41 @@ impl LxmfManager {
         Ok((hash_hex, lxmf_hex))
     }
 
-    pub fn set_lxmf_link_control(
+    pub(crate) fn set_lxmf_link_control(
         &mut self,
         command_tx: mpsc::Sender<rns_runtime::link_manager::LinkManagerCommand>,
         direct_link_packet_tx: mpsc::UnboundedSender<(Vec<u8>, [u8; 16])>,
         identified_rx: mpsc::Receiver<([u8; 16], [u8; 16])>,
-        closed_rx: mpsc::Receiver<[u8; 16]>,
-        packet_proof_rx: mpsc::Receiver<rns_runtime::link_manager::LinkPacketProof>,
-        resource_proof_rx: mpsc::Receiver<rns_runtime::link_manager::LinkResourceProof>,
+        backchannel_event_rx: mpsc::UnboundedReceiver<BackchannelLinkEvent>,
     ) {
         self.lxmf_link_command_tx = Some(command_tx);
         self.lxmf_direct_link_packet_tx = Some(direct_link_packet_tx);
         self.lxmf_link_identified_rx = Some(identified_rx);
-        self.lxmf_link_closed_rx = Some(closed_rx);
-        self.lxmf_link_packet_proof_rx = Some(packet_proof_rx);
-        self.lxmf_link_resource_proof_rx = Some(resource_proof_rx);
+        self.lxmf_backchannel_event_rx = Some(backchannel_event_rx);
         self.lxmf_backchannel_command_rx = None;
         self.ensure_link_delivery_backchannel_sender();
         self.ensure_link_delivery_inbound_sender();
+        self.ensure_link_delivery_resource_handlers();
+    }
+
+    pub(crate) fn set_direct_inbound_resource_handlers<A, C>(&mut self, accept: A, concluded: C)
+    where
+        A: Fn([u8; 16], &rns_protocol::resource_adv::ResourceAdvertisement) -> bool
+            + Send
+            + Sync
+            + 'static,
+        C: Fn([u8; 16], [u8; 32]) + Send + Sync + 'static,
+    {
+        self.direct_inbound_resource_accept_handler = Some(Arc::new(accept));
+        self.direct_inbound_resource_concluded_handler = Some(Arc::new(concluded));
+        self.ensure_link_delivery_resource_handlers();
+    }
+
+    pub fn set_opportunistic_proof_sender(
+        &mut self,
+        proof_tx: mpsc::UnboundedSender<rns_transport::link_messages::DestinationEvent>,
+    ) {
+        self.opportunistic_proof_tx = Some(proof_tx);
     }
 
     pub fn note_pending_direct_backchannel(&mut self, dest_hash: [u8; 16], link_id: [u8; 16]) {
@@ -2030,6 +2239,139 @@ impl LxmfManager {
         })
     }
 
+    /// Queue a standards-based LXMF voice message as
+    /// `FIELD_AUDIO = [AM_OPUS_OGG, ogg_bytes]`.
+    pub fn send_audio_message(&mut self, request: AudioMessageRequest<'_>) -> Option<String> {
+        self.send_audio_message_with_preference_report(request)
+            .ok()
+            .map(|queued| queued.message_id)
+    }
+
+    /// Fallible first-class audio submission surface for the app command
+    /// layer. This deliberately does not route through generic attachments.
+    pub fn send_audio_message_with_preference_report(
+        &mut self,
+        request: AudioMessageRequest<'_>,
+    ) -> Result<LxmfQueuedMessage, LxmfSubmissionFailure> {
+        let AudioMessageRequest {
+            dest_hash_hex,
+            content,
+            title,
+            audio_bytes,
+            staged_path,
+            db_pool,
+            identity_id,
+            preference,
+        } = request;
+
+        validate_outbound_audio(audio_bytes)?;
+        let content = if content.trim().is_empty() {
+            "Voice message"
+        } else {
+            content
+        };
+        let dest_bytes =
+            hex::decode(dest_hash_hex).map_err(|_| LxmfSubmissionFailure::PreparationFailed)?;
+        if dest_bytes.len() != 16 {
+            return Err(LxmfSubmissionFailure::PreparationFailed);
+        }
+        let mut dest = [0u8; 16];
+        dest.copy_from_slice(&dest_bytes);
+
+        let method = self.pick_delivery_method(
+            db_pool,
+            dest_hash_hex,
+            preference,
+            DeliveryProfile::Attachment,
+        );
+        let mut msg = LxMessage::new(dest, self.lxmf_dest_hash, title, content, method);
+        self.apply_peer_lxmf_compression_support(&mut msg, Some(db_pool), dest_hash_hex);
+        msg.set_audio_field(lxmf_core::constants::AM_OPUS_OGG, audio_bytes)
+            .map_err(|_| LxmfSubmissionFailure::PreparationFailed)?;
+        debug_assert!(
+            !msg.fields
+                .contains_key(&lxmf_core::constants::FIELD_FILE_ATTACHMENTS)
+        );
+
+        msg.include_ticket = true;
+        self.router
+            .prepare_outbound(&mut msg)
+            .map_err(|_| LxmfSubmissionFailure::PreparationFailed)?;
+        if let Some(prv_key) = self.identity.get_private_key() {
+            let mut ed_seed = [0u8; 32];
+            ed_seed.copy_from_slice(&prv_key[32..64]);
+            let signing_key = rns_crypto::ed25519::Ed25519PrivateKey::from_bytes(&ed_seed);
+            msg.sign(&signing_key)
+                .map_err(|_| LxmfSubmissionFailure::PreparationFailed)?;
+        }
+        normalize_protocol_delivery_method(&mut msg);
+        let packed_len = msg
+            .packed_len()
+            .map_err(|_| LxmfSubmissionFailure::PreparationFailed)?;
+        let packed_admission_len = packed_len
+            .checked_add(MAX_DEFERRED_STAMP_WIRE_BYTES)
+            .ok_or(LxmfSubmissionFailure::PreparationFailed)?;
+        validate_audio_message_size(packed_admission_len)?;
+
+        let msg_id = msg
+            .hash
+            .map(hex::encode)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let display_timestamp = db::next_conversation_observed_timestamp(
+            db_pool,
+            dest_hash_hex,
+            identity_id,
+            msg.timestamp,
+        );
+
+        self.preempt_opportunistic_path(&mut msg);
+        let auto_fallback = Self::auto_live_fallback_hash(&msg, preference);
+        let method = msg.method;
+        let stored_name = match staged_path {
+            Some(path) => self.adopt_staged_attachment(AUDIO_MESSAGE_FILE_NAME, path),
+            None => self.save_attachment(AUDIO_MESSAGE_FILE_NAME, audio_bytes),
+        }
+        .map_err(|_| LxmfSubmissionFailure::StorageFailed)?;
+
+        if db::try_save_message_with_audio(
+            db_pool,
+            &msg_id,
+            &self.lxmf_hash,
+            dest_hash_hex,
+            content,
+            title,
+            display_timestamp,
+            "sending",
+            "outbound",
+            identity_id,
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            Some(delivery_method_name(method)),
+            Some(lxmf_core::constants::AM_OPUS_OGG),
+            &stored_name,
+        )
+        .is_err()
+        {
+            let _ = std::fs::remove_file(self.files_dir().join(&stored_name));
+            return Err(LxmfSubmissionFailure::StorageFailed);
+        }
+
+        if self.router.try_send(msg).is_err() {
+            let _ = db::delete_message_for_identity(db_pool, &msg_id, identity_id);
+            let _ = std::fs::remove_file(self.files_dir().join(&stored_name));
+            return Err(LxmfSubmissionFailure::PreparationFailed);
+        }
+        self.auto_live_fallback.extend(auto_fallback);
+        Ok(LxmfQueuedMessage {
+            message_id: msg_id,
+            method,
+        })
+    }
+
     /// LRGP send. Auto starts `Direct` (real LXMF Link proof plus the core
     /// retry policy) and may use the same terminal Offline Inbox fallback as
     /// messages and attachments.
@@ -2321,7 +2663,14 @@ impl LxmfManager {
         let files_dir = self.files_dir();
         let path = files_dir.join(&stored_name);
         std::fs::rename(staged_path, &path)?;
-        if let Err(error) = std::fs::File::open(&path).and_then(|file| file.sync_all()) {
+        // Windows requires a writable handle for FlushFileBuffers. Opening the
+        // adopted file read-only makes the otherwise-successful atomic rename
+        // look like a storage failure on that platform.
+        if let Err(error) = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.sync_all())
+        {
             let _ = std::fs::remove_file(&path);
             return Err(error);
         }
@@ -2477,6 +2826,11 @@ impl LxmfManager {
 
     pub fn set_delivery_limit_kb(&mut self, limit_kb: usize) {
         self.delivery_limit_kb = limit_kb as f64;
+        if let Some(ref mut link_delivery) = self.link_delivery {
+            link_delivery.set_inbound_resource_limit_bytes(
+                limit_kb.saturating_mul(1_000).min(MAX_LXMF_RESOURCE_BYTES),
+            );
+        }
         if let Some(client) = self.propagation_client.as_mut() {
             client.set_delivery_limit(self.delivery_limit_kb);
         }
@@ -2574,8 +2928,24 @@ impl LxmfManager {
         true
     }
 
-    pub fn create_announce_packet(&mut self) -> Result<Vec<u8>, String> {
+    #[cfg(test)]
+    pub(crate) fn create_announce_packet(&mut self) -> Result<Vec<u8>, String> {
         self.build_delivery_announce_packet(DeliveryAnnounceKind::Broadcast)
+    }
+
+    pub(crate) fn create_coordinated_announce_packet(
+        &mut self,
+    ) -> Result<Vec<u8>, CoordinatedDeliveryAnnounceError> {
+        let wall_now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let cache_now = self.announce_cache_started.elapsed().as_secs_f64();
+        self.build_delivery_announce_packet_at_typed(
+            DeliveryAnnounceKind::Broadcast,
+            wall_now,
+            cache_now,
+        )
     }
 
     /// Path-response variant: an otherwise-identical delivery announce tagged
@@ -2609,6 +2979,21 @@ impl LxmfManager {
         wall_now: u64,
         cache_now: f64,
     ) -> Result<Vec<u8>, String> {
+        self.build_delivery_announce_packet_at_typed(kind, wall_now, cache_now)
+            .map_err(|error| match error {
+                CoordinatedDeliveryAnnounceError::Coalesced => {
+                    DeliveryRatchetError::Coalesced.to_string()
+                }
+                CoordinatedDeliveryAnnounceError::Failed(message) => message,
+            })
+    }
+
+    fn build_delivery_announce_packet_at_typed(
+        &mut self,
+        kind: DeliveryAnnounceKind<'_>,
+        wall_now: u64,
+        cache_now: f64,
+    ) -> Result<Vec<u8>, CoordinatedDeliveryAnnounceError> {
         // Pack as LXMF-compatible msgpack with a Ratspeak extension tail.
         // The first three fields match Python `LXMRouter.get_announce_app_data`.
         // Raw UTF-8 forces Python receivers onto a legacy path that skips
@@ -2634,13 +3019,16 @@ impl LxmfManager {
         let raw = self
             .delivery_ratchets
             .create_announce(&self.identity, &app_data_bytes, wall_now, cache_now, kind)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| match error {
+                DeliveryRatchetError::Coalesced => CoordinatedDeliveryAnnounceError::Coalesced,
+                error => CoordinatedDeliveryAnnounceError::Failed(error.to_string()),
+            })?;
         if raw.len() > rns_wire::constants::MTU {
-            return Err(format!(
+            return Err(CoordinatedDeliveryAnnounceError::Failed(format!(
                 "Announce packet exceeds Reticulum MTU ({} > {})",
                 raw.len(),
                 rns_wire::constants::MTU
-            ));
+            )));
         }
         Ok(raw)
     }
@@ -2676,22 +3064,6 @@ impl LxmfManager {
             ));
         }
         Ok(raw)
-    }
-
-    pub async fn send_announce(
-        &mut self,
-        transport_tx: &tokio::sync::mpsc::Sender<TransportMessage>,
-    ) -> Result<(), String> {
-        let raw = self.create_announce_packet()?;
-        transport_tx
-            .send(TransportMessage::Outbound(
-                rns_transport::messages::OutboundRequest {
-                    raw: Bytes::from(raw),
-                    destination_hash: self.lxmf_dest_hash,
-                },
-            ))
-            .await
-            .map_err(|e| format!("Failed to send announce: {e}"))
     }
 
     /// Memory-only; callers persist via `db::update_identity` outside the
@@ -2763,7 +3135,7 @@ impl LxmfManager {
             .join("ratchets")
     }
 
-    /// Binary: repeated [dest_hash:16][pubkey:64] records.
+    /// Binary: repeated `[dest_hash:16][pubkey:64]` records.
     pub fn known_identities_blob(&self) -> Vec<u8> {
         let mut data = Vec::with_capacity(self.known_identities.len() * 80);
         for (hash_hex, pk) in &self.known_identities {
@@ -2776,6 +3148,149 @@ impl LxmfManager {
             }
         }
         data
+    }
+
+    pub fn known_identities_snapshot(&self) -> KnownIdentitiesSnapshot {
+        KnownIdentitiesSnapshot {
+            identity_hash: self.identity_hash.clone(),
+            revision: self.known_identities_revision,
+            path: self.ratchets_dir().join("known_identities"),
+            bytes: self.known_identities_blob(),
+            count: self.known_identities.len(),
+        }
+    }
+
+    pub fn checkpoint_snapshot(&self) -> LxmfCheckpointSnapshot {
+        LxmfCheckpointSnapshot {
+            known_identities: self.known_identities_snapshot(),
+            router_state: self.router.state_snapshot(),
+            router_state_dir: self.lxmf_storage_dir.clone(),
+        }
+    }
+
+    pub fn persistence_delta_snapshot(
+        &self,
+        identities_changed: bool,
+        changed_ratchet_hashes: &[String],
+        router_changed: bool,
+    ) -> LxmfPersistenceDelta {
+        let received_dir = self.ratchets_dir().join("received");
+        let ratchet_hashes = self
+            .dirty_received_ratchets
+            .iter()
+            .chain(changed_ratchet_hashes.iter())
+            .collect::<HashSet<_>>();
+        let received_ratchets = ratchet_hashes
+            .into_iter()
+            .filter_map(|hash| {
+                self.received_ratchets.get(hash).copied().map(|ratchet| {
+                    (
+                        hash.clone(),
+                        received_dir.join(format!("{hash}.ratchet")),
+                        ratchet,
+                    )
+                })
+            })
+            .collect();
+        LxmfPersistenceDelta {
+            identity_hash: self.identity_hash.clone(),
+            known_identities: (identities_changed || self.known_identities_dirty())
+                .then(|| self.known_identities_snapshot()),
+            received_ratchets,
+            router_state: router_changed
+                .then(|| (self.lxmf_storage_dir.clone(), self.router.state_snapshot())),
+        }
+    }
+
+    pub fn dirty_received_ratchets_snapshot(&self) -> LxmfPersistenceDelta {
+        let received_dir = self.ratchets_dir().join("received");
+        let received_ratchets = self
+            .dirty_received_ratchets
+            .iter()
+            .filter_map(|hash| {
+                self.received_ratchets.get(hash).copied().map(|ratchet| {
+                    (
+                        hash.clone(),
+                        received_dir.join(format!("{hash}.ratchet")),
+                        ratchet,
+                    )
+                })
+            })
+            .collect();
+        LxmfPersistenceDelta {
+            identity_hash: self.identity_hash.clone(),
+            known_identities: None,
+            received_ratchets,
+            router_state: None,
+        }
+    }
+
+    /// Clear only ratchet versions that the persistence owner actually wrote.
+    /// If the live value changed while disk I/O was in flight, the dirty bit is
+    /// retained and the newer value is handled by the next serialized pass.
+    pub fn acknowledge_persistence_delta(&mut self, delta: &LxmfPersistenceDelta) {
+        if self.identity_hash != delta.identity_hash {
+            return;
+        }
+        if let Some(snapshot) = delta.known_identities.as_ref() {
+            self.acknowledge_known_identities_snapshot(snapshot);
+        }
+        for (hash, persisted) in delta.persisted_ratchets() {
+            if self.received_ratchets.get(hash).is_some_and(|current| {
+                current.ratchet_pub == persisted.ratchet_pub
+                    && current.received_at == persisted.received_at
+            }) {
+                self.dirty_received_ratchets.remove(hash);
+            }
+        }
+    }
+
+    pub fn acknowledge_known_identities_snapshot(&mut self, snapshot: &KnownIdentitiesSnapshot) {
+        if self.identity_hash == snapshot.identity_hash
+            && self.known_identities_revision == snapshot.revision
+        {
+            self.known_identities_persisted_revision = snapshot.revision;
+        }
+    }
+
+    pub fn acknowledge_checkpoint_snapshot(&mut self, snapshot: &LxmfCheckpointSnapshot) {
+        self.acknowledge_known_identities_snapshot(&snapshot.known_identities);
+    }
+
+    pub fn known_identities_dirty(&self) -> bool {
+        self.known_identities_revision != self.known_identities_persisted_revision
+    }
+
+    pub fn remove_known_identities(
+        &mut self,
+        hashes: &std::collections::HashSet<String>,
+    ) -> Vec<(String, [u8; 64])> {
+        let removed = hashes
+            .iter()
+            .filter_map(|hash| {
+                self.known_identities
+                    .remove(hash)
+                    .map(|public_key| (hash.clone(), public_key))
+            })
+            .collect::<Vec<_>>();
+        if !removed.is_empty() {
+            self.known_identities_revision = self.known_identities_revision.wrapping_add(1);
+        }
+        removed
+    }
+
+    pub fn restore_known_identities(&mut self, entries: &[(String, [u8; 64])]) -> usize {
+        let mut changed = false;
+        for (hash, public_key) in entries {
+            if self.known_identities.get(hash) != Some(public_key) {
+                self.known_identities.insert(hash.clone(), *public_key);
+                changed = true;
+            }
+        }
+        if changed {
+            self.known_identities_revision = self.known_identities_revision.wrapping_add(1);
+        }
+        self.known_identities.len()
     }
 
     pub fn save_router_state(&self) {
@@ -2827,6 +3342,7 @@ impl LxmfManager {
         let identity_changed = self.known_identities.get(dest_hash_hex) != Some(pk);
         if identity_changed {
             self.known_identities.insert(dest_hash_hex.to_string(), *pk);
+            self.known_identities_revision = self.known_identities_revision.wrapping_add(1);
         }
         let mut ratchet_changed = false;
         if let Some(r) = ratchet.filter(|ratchet| {
@@ -2836,6 +3352,8 @@ impl LxmfManager {
         }) {
             self.received_ratchets
                 .insert(dest_hash_hex.to_string(), ReceivedRatchet::new(*r));
+            self.dirty_received_ratchets
+                .insert(dest_hash_hex.to_string());
             ratchet_changed = true;
         }
         (identity_changed, ratchet_changed)
@@ -2979,10 +3497,32 @@ impl LxmfManager {
         }
     }
 
+    fn ensure_link_delivery_resource_handlers(&mut self) {
+        let Some(link_delivery) = self.link_delivery.as_mut() else {
+            return;
+        };
+        if let Some(handler) = self.direct_inbound_resource_accept_handler.clone() {
+            link_delivery.set_inbound_resource_accept_handler(move |link_id, advertisement| {
+                handler(link_id, advertisement)
+            });
+        }
+        if let Some(handler) = self.direct_inbound_resource_concluded_handler.clone() {
+            link_delivery.set_inbound_resource_concluded_handler(move |link_id, resource_id| {
+                handler(link_id, resource_id);
+            });
+        }
+    }
+
     fn ensure_link_delivery_manager(&mut self) -> bool {
         if self.link_delivery.is_some() {
+            if let Some(ref mut link_delivery) = self.link_delivery {
+                link_delivery.set_inbound_resource_limit_bytes(
+                    ((self.delivery_limit_kb * 1_000.0) as usize).min(MAX_LXMF_RESOURCE_BYTES),
+                );
+            }
             self.ensure_link_delivery_backchannel_sender();
             self.ensure_link_delivery_inbound_sender();
+            self.ensure_link_delivery_resource_handlers();
             return true;
         }
 
@@ -2995,8 +3535,14 @@ impl LxmfManager {
             Some(self.identity.get_public_key()),
             self.identity.get_signing_key(),
         ));
+        if let Some(ref mut link_delivery) = self.link_delivery {
+            link_delivery.set_inbound_resource_limit_bytes(
+                ((self.delivery_limit_kb * 1_000.0) as usize).min(MAX_LXMF_RESOURCE_BYTES),
+            );
+        }
         self.ensure_link_delivery_backchannel_sender();
         self.ensure_link_delivery_inbound_sender();
+        self.ensure_link_delivery_resource_handlers();
         true
     }
 
@@ -3519,6 +4065,18 @@ impl LxmfManager {
             .as_secs_f64();
     }
 
+    pub fn take_expired_received_ratchets(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_expired_received_ratchets)
+    }
+
+    pub fn requeue_expired_received_ratchets(&mut self, hashes: Vec<String>) {
+        for hash in hashes {
+            if !self.pending_expired_received_ratchets.contains(&hash) {
+                self.pending_expired_received_ratchets.push(hash);
+            }
+        }
+    }
+
     pub fn auto_propagation_check_due(&self, network_available: bool) -> bool {
         if !network_available || !self.client_propagation_enabled {
             return false;
@@ -3562,20 +4120,28 @@ impl LxmfManager {
     ) -> Vec<(String, &'static str)> {
         let mut results = Vec::new();
 
-        // 15-min ratchet cleanup cadence (matches reference).
+        // 15-min ratchet cleanup cadence (matches reference). Only inspect
+        // coherent in-memory metadata here. The serialized persistence owner
+        // revalidates and removes files after this manager lock is released.
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs_f64();
         if now - self.last_ratchet_clean > 900.0 {
-            let mem_dropped = purge_expired_ratchets_in_memory(&mut self.received_ratchets);
-            let disk_dropped = clean_received_ratchets_dir(&self.received_ratchets_dir);
-            if mem_dropped > 0 || disk_dropped > 0 {
-                tracing::debug!(
-                    mem_dropped,
-                    disk_dropped,
-                    "ratchet cleanup pass: removed expired entries"
-                );
+            let expired = self
+                .received_ratchets
+                .iter()
+                .filter(|(_, ratchet)| ratchet.is_expired())
+                .map(|(hash, _)| hash.clone())
+                .collect::<Vec<_>>();
+            for hash in &expired {
+                self.received_ratchets.remove(hash);
+                self.dirty_received_ratchets.remove(hash);
+            }
+            if !expired.is_empty() {
+                let removed = expired.len();
+                self.pending_expired_received_ratchets.extend(expired);
+                tracing::debug!(removed, "ratchet cleanup pass: expired in-memory entries");
             }
             self.last_ratchet_clean = now;
         }
@@ -3640,6 +4206,7 @@ impl LxmfManager {
             }
             self.drain_link_delivery_progress_updates();
         }
+        self.drain_core_backchannel_resource_cancellations();
 
         if let Some(ref mut ps) = self.propagation_sync {
             ps.drain_events(&self.known_identities);
@@ -3878,6 +4445,7 @@ impl LxmfManager {
         {
             cancelled = true;
         }
+        self.drain_core_backchannel_resource_cancellations();
         if self.router.cancel_outbound(&hash) {
             cancelled = true;
         }
@@ -4141,7 +4709,7 @@ impl LxmfManager {
                 |plaintext| {
                     self.encrypt_for_destination(&dest_hex, plaintext)
                         .ok_or_else(|| {
-                            lxmf_core::message::MessageError::PackFailed(format!(
+                            lxmf_core::message_api::MessageError::PackFailed(format!(
                                 "no identity key for destination {dest_hex}"
                             ))
                         })
@@ -4325,59 +4893,78 @@ impl LxmfManager {
             }
         }
 
-        if let Some(rx) = self.lxmf_link_closed_rx.as_mut() {
-            let mut closed = Vec::new();
-            while let Ok(link_id) = rx.try_recv() {
-                closed.push(link_id);
-            }
-            for link_id in closed {
-                self.pending_direct_link_identifications
-                    .retain(|_, pending| pending.link_id != link_id);
-                let closed_results = self
-                    .link_delivery
-                    .as_mut()
-                    .map(|ld| ld.fail_backchannel_link(link_id, "link closed"))
-                    .unwrap_or_default();
-                tracing::debug!(
-                    link_id = %crate::short_id(&hex::encode(link_id)),
-                    failed_deliveries = closed_results.len(),
-                    "LXMF inbound Link closed; removed core backchannel state"
-                );
-                for result in closed_results {
-                    self.handle_link_delivery_result(result, results);
-                }
+        let mut backchannel_events = Vec::new();
+        if let Some(rx) = self.lxmf_backchannel_event_rx.as_mut() {
+            while let Ok(event) = rx.try_recv() {
+                backchannel_events.push(event);
             }
         }
-
-        if let Some(rx) = self.lxmf_link_packet_proof_rx.as_mut() {
-            let mut proofs = Vec::new();
-            while let Ok(proof) = rx.try_recv() {
-                proofs.push(proof);
-            }
-            for proof in proofs {
-                if let Some(result) = self.link_delivery.as_mut().and_then(|ld| {
-                    ld.handle_backchannel_packet_proof(proof.link_id, proof.packet_hash)
-                }) {
-                    self.handle_link_delivery_result(result, results);
+        for event in backchannel_events {
+            match event {
+                BackchannelLinkEvent::PacketProof(proof) => {
+                    if let Some(result) = self.link_delivery.as_mut().and_then(|ld| {
+                        ld.handle_backchannel_packet_proof(proof.link_id, proof.packet_hash)
+                    }) {
+                        self.handle_link_delivery_result(result, results);
+                    }
                 }
-            }
-        }
-
-        if let Some(rx) = self.lxmf_link_resource_proof_rx.as_mut() {
-            let mut proofs = Vec::new();
-            while let Ok(proof) = rx.try_recv() {
-                proofs.push(proof);
-            }
-            for proof in proofs {
-                if let Some(result) = self.link_delivery.as_mut().and_then(|ld| {
-                    ld.handle_backchannel_resource_proof(proof.link_id, proof.resource_hash)
-                }) {
-                    self.handle_link_delivery_result(result, results);
+                BackchannelLinkEvent::ResourceConclusion {
+                    link_id,
+                    resource_hash,
+                    conclusion,
+                } => {
+                    let result = self.link_delivery.as_mut().and_then(|ld| match conclusion {
+                        rns_runtime::link_manager::LinkResourceConclusion::Complete => {
+                            ld.handle_backchannel_resource_proof(link_id, resource_hash)
+                        }
+                        rns_runtime::link_manager::LinkResourceConclusion::Rejected => ld
+                            .handle_backchannel_resource_conclusion(
+                                link_id,
+                                resource_hash,
+                                lxmf_core::link_delivery::BackchannelResourceConclusion::Rejected,
+                                "resource rejected",
+                            ),
+                        rns_runtime::link_manager::LinkResourceConclusion::Failed(reason) => ld
+                            .handle_backchannel_resource_conclusion(
+                                link_id,
+                                resource_hash,
+                                lxmf_core::link_delivery::BackchannelResourceConclusion::Failed,
+                                reason,
+                            ),
+                        rns_runtime::link_manager::LinkResourceConclusion::Cancelled => ld
+                            .handle_backchannel_resource_conclusion(
+                                link_id,
+                                resource_hash,
+                                lxmf_core::link_delivery::BackchannelResourceConclusion::Failed,
+                                "resource cancelled",
+                            ),
+                    });
+                    if let Some(result) = result {
+                        self.handle_link_delivery_result(result, results);
+                    }
+                }
+                BackchannelLinkEvent::LinkClosed { link_id } => {
+                    self.pending_direct_link_identifications
+                        .retain(|_, pending| pending.link_id != link_id);
+                    let closed_results = self
+                        .link_delivery
+                        .as_mut()
+                        .map(|ld| ld.fail_backchannel_link(link_id, "link closed"))
+                        .unwrap_or_default();
+                    tracing::debug!(
+                        link_id = %crate::short_id(&hex::encode(link_id)),
+                        failed_deliveries = closed_results.len(),
+                        "LXMF inbound Link closed; removed core backchannel state"
+                    );
+                    for result in closed_results {
+                        self.handle_link_delivery_result(result, results);
+                    }
                 }
             }
         }
 
         self.drain_core_backchannel_send_commands();
+        self.drain_core_backchannel_resource_cancellations();
         self.drain_link_delivery_progress_updates();
     }
 
@@ -4423,6 +5010,45 @@ impl LxmfManager {
                     let _ = command
                         .result_tx
                         .send(Err(BackchannelSendError::TransportUnavailable));
+                }
+            }
+        }
+    }
+
+    fn drain_core_backchannel_resource_cancellations(&mut self) {
+        if let Some(ref mut delivery) = self.link_delivery {
+            self.pending_backchannel_resource_cancellations
+                .extend(delivery.take_backchannel_resource_cancellations());
+        }
+
+        let Some(command_tx) = self.lxmf_link_command_tx.as_ref() else {
+            return;
+        };
+        while let Some(request) = self
+            .pending_backchannel_resource_cancellations
+            .front()
+            .copied()
+        {
+            match command_tx.try_reserve() {
+                Ok(permit) => {
+                    self.pending_backchannel_resource_cancellations.pop_front();
+                    permit.send(
+                        rns_runtime::link_manager::LinkManagerCommand::CancelLinkResource {
+                            link_id: request.link_id,
+                            resource_id: request.resource_hash,
+                            direction: rns_runtime::link_manager::LinkResourceDirection::Outbound,
+                            result_tx: None,
+                        },
+                    );
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => break,
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    tracing::warn!(
+                        pending = self.pending_backchannel_resource_cancellations.len(),
+                        "LXMF backchannel Resource cancellation channel closed"
+                    );
+                    self.pending_backchannel_resource_cancellations.clear();
+                    break;
                 }
             }
         }
@@ -4691,7 +5317,7 @@ impl LxmfManager {
                 self.encrypt_for_destination(&dest_hex, plaintext)
                     .ok_or_else(|| {
                         missing_identity = true;
-                        lxmf_core::message::MessageError::PackFailed(format!(
+                        lxmf_core::message_api::MessageError::PackFailed(format!(
                             "no identity key for destination {dest_hex}"
                         ))
                     })
@@ -4885,6 +5511,7 @@ impl LxmfManager {
             message.next_delivery_attempt = now + DELIVERY_RETRY_WAIT as f64;
 
             let dispatch_result = if let Some(hash) = msg_hash {
+                let opportunistic_proof_tx = self.opportunistic_proof_tx.clone();
                 // Receipt registration must precede packet dispatch, and both
                 // channel slots must be reserved before either message is
                 // visible. A fast proof can otherwise beat registration.
@@ -4902,14 +5529,30 @@ impl LxmfManager {
                             &raw,
                             rns_wire::flags::HeaderType::Header1,
                         );
-                        receipt_permit.send(TransportMessage::RegisterReceipt {
-                            truncated_hash,
-                            full_hash,
-                            destination_hash: dest_hash,
-                            destination_public_key,
-                            msg_id: hex::encode(hash),
-                            timeout: Some(std::time::Duration::from_secs(15)),
-                        });
+                        let msg_id = hex::encode(hash);
+                        if let Some(proof_tx) = opportunistic_proof_tx {
+                            receipt_permit.send(TransportMessage::RegisterReceiptWithProof {
+                                truncated_hash,
+                                full_hash,
+                                destination_hash: dest_hash,
+                                destination_public_key,
+                                msg_id,
+                                timeout: Some(std::time::Duration::from_secs(15)),
+                                proof_tx,
+                            });
+                        } else {
+                            // Non-runtime unit users can omit the dedicated
+                            // proof stream; production always installs it at
+                            // destination registration time.
+                            receipt_permit.send(TransportMessage::RegisterReceipt {
+                                truncated_hash,
+                                full_hash,
+                                destination_hash: dest_hash,
+                                destination_public_key,
+                                msg_id,
+                                timeout: Some(std::time::Duration::from_secs(15)),
+                            });
+                        }
                         outbound_permit.send(TransportMessage::Outbound(
                             rns_transport::messages::OutboundRequest {
                                 raw: Bytes::from(raw),
@@ -4989,6 +5632,38 @@ mod tests {
 
     static TEMP_LXMF_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    #[cfg(feature = "lxst-voice")]
+    fn valid_ogg_opus_fixture() -> Vec<u8> {
+        use ogg::writing::{PacketWriteEndInfo, PacketWriter};
+
+        let serial = 0x5253_4155;
+        let mut writer = PacketWriter::new(Vec::new());
+        let mut head = b"OpusHead".to_vec();
+        head.extend_from_slice(&[1, 1]);
+        head.extend_from_slice(&0u16.to_le_bytes());
+        head.extend_from_slice(&24_000u32.to_le_bytes());
+        head.extend_from_slice(&0i16.to_le_bytes());
+        head.push(0);
+        writer
+            .write_packet(head, serial, PacketWriteEndInfo::EndPage, 0)
+            .unwrap();
+        let mut tags = b"OpusTags".to_vec();
+        tags.extend_from_slice(&0u32.to_le_bytes());
+        tags.extend_from_slice(&0u32.to_le_bytes());
+        writer
+            .write_packet(tags, serial, PacketWriteEndInfo::EndPage, 0)
+            .unwrap();
+        writer
+            .write_packet(
+                vec![0xf8, 0xff, 0xfe],
+                serial,
+                PacketWriteEndInfo::EndStream,
+                960,
+            )
+            .unwrap();
+        writer.into_inner()
+    }
+
     fn test_pool() -> DbPool {
         let mgr = SqliteConnectionManager::memory();
         let pool = r2d2::Pool::builder().max_size(2).build(mgr).unwrap();
@@ -5032,16 +5707,16 @@ mod tests {
 
     #[test]
     fn lrgp_fields_are_native_lxmf_values_not_binary_wrappers() {
-        let envelope = lrgp::envelope::pack_envelope(
+        let envelope = lrgp::protocol::pack_envelope(
             "ttt",
             1,
-            lrgp::constants::CMD_CHALLENGE,
+            lrgp::protocol::CMD_CHALLENGE,
             "0123456789abcdef",
             None,
             None,
         )
         .unwrap();
-        let fields = lrgp::envelope::pack_lxmf_fields(&envelope).unwrap();
+        let fields = lrgp::protocol::pack_lxmf_fields(&envelope).unwrap();
         let mut message = LxMessage::new(
             [0x11; 16],
             [0x22; 16],
@@ -5054,12 +5729,12 @@ mod tests {
         assert!(
             message
                 .msgpack_field_ids
-                .contains(&lrgp::constants::FIELD_CUSTOM_TYPE)
+                .contains(&lrgp::protocol::FIELD_CUSTOM_TYPE)
         );
         assert!(
             message
                 .msgpack_field_ids
-                .contains(&lrgp::constants::FIELD_CUSTOM_META)
+                .contains(&lrgp::protocol::FIELD_CUSTOM_META)
         );
 
         // Decode the complete LXMF payload exactly as a Python client would:
@@ -5082,11 +5757,11 @@ mod tests {
             })
         };
         assert_eq!(
-            field(lrgp::constants::FIELD_CUSTOM_TYPE).and_then(rmpv::Value::as_str),
-            Some(lrgp::constants::PROTOCOL_TYPE)
+            field(lrgp::protocol::FIELD_CUSTOM_TYPE).and_then(rmpv::Value::as_str),
+            Some(lrgp::protocol::PROTOCOL_TYPE)
         );
         assert!(
-            field(lrgp::constants::FIELD_CUSTOM_META)
+            field(lrgp::protocol::FIELD_CUSTOM_META)
                 .and_then(rmpv::Value::as_map)
                 .is_some()
         );
@@ -5112,6 +5787,59 @@ mod tests {
             }
         }
         panic!("expected outbound transport message");
+    }
+
+    fn accept_initiator_endpoint_binding(
+        rx: &mut mpsc::Receiver<TransportMessage>,
+        expected_link_id: [u8; 16],
+        expected_interface_id: rns_transport::messages::InterfaceId,
+    ) {
+        let message = rx.try_recv().expect("expected endpoint binding");
+        let TransportMessage::BindLinkEndpoint {
+            binding,
+            lifecycle_tx,
+            result_tx,
+        } = message
+        else {
+            panic!("expected endpoint binding, got {message:?}");
+        };
+        assert_eq!(binding.link_id, expected_link_id);
+        assert_eq!(binding.interface_id, expected_interface_id);
+        assert_eq!(
+            binding.role,
+            rns_transport::messages::LinkEndpointRole::Initiator
+        );
+        result_tx
+            .send(rns_transport::messages::LinkEndpointBindResult::Bound)
+            .unwrap();
+        std::mem::forget(lifecycle_tx);
+    }
+
+    fn next_initiator_endpoint_outbound(rx: &mut mpsc::Receiver<TransportMessage>) -> Vec<u8> {
+        while let Ok(message) = rx.try_recv() {
+            match message {
+                TransportMessage::SendLinkEndpoint {
+                    role,
+                    request,
+                    result_tx,
+                    ..
+                }
+                | TransportMessage::SendLinkEndpointAndUnbind {
+                    role,
+                    request,
+                    result_tx,
+                    ..
+                } => {
+                    assert_eq!(role, rns_transport::messages::LinkEndpointRole::Initiator);
+                    result_tx
+                        .send(rns_transport::messages::LinkEndpointSendResult::Sent)
+                        .unwrap();
+                    return request.raw.to_vec();
+                }
+                _ => {}
+            }
+        }
+        panic!("expected initiator endpoint transport message");
     }
 
     #[test]
@@ -5264,6 +5992,17 @@ mod tests {
         let raw = mgr.create_announce_packet().expect("announce packet");
 
         assert!(raw.len() <= rns_wire::constants::MTU);
+    }
+
+    #[test]
+    fn coordinated_delivery_announce_preserves_typed_coalescing() {
+        let mut mgr = test_manager();
+        mgr.build_delivery_announce_packet_at_typed(DeliveryAnnounceKind::Broadcast, 100, 1.0)
+            .expect("first announce");
+        assert!(matches!(
+            mgr.build_delivery_announce_packet_at_typed(DeliveryAnnounceKind::Broadcast, 100, 1.5,),
+            Err(CoordinatedDeliveryAnnounceError::Coalesced)
+        ));
     }
 
     #[test]
@@ -6230,19 +6969,8 @@ mod tests {
             mpsc::channel::<rns_runtime::link_manager::LinkManagerCommand>(4);
         let (identified_tx, identified_rx) = mpsc::channel::<([u8; 16], [u8; 16])>(4);
         let (direct_tx, _direct_rx) = mpsc::unbounded_channel::<(Vec<u8>, [u8; 16])>();
-        let (_closed_tx, closed_rx) = mpsc::channel::<[u8; 16]>(4);
-        let (_packet_tx, packet_rx) =
-            mpsc::channel::<rns_runtime::link_manager::LinkPacketProof>(4);
-        let (_resource_tx, resource_rx) =
-            mpsc::channel::<rns_runtime::link_manager::LinkResourceProof>(4);
-        mgr.set_lxmf_link_control(
-            command_tx,
-            direct_tx,
-            identified_rx,
-            closed_rx,
-            packet_rx,
-            resource_rx,
-        );
+        let (_backchannel_event_tx, backchannel_event_rx) = mpsc::unbounded_channel();
+        mgr.set_lxmf_link_control(command_tx, direct_tx, identified_rx, backchannel_event_rx);
 
         let link_id = [0x11; 16];
         let identity_hash = [0x22; 16];
@@ -6263,6 +6991,19 @@ mod tests {
         assert!(results.is_empty());
     }
 
+    #[test]
+    fn unexpected_runtime_identity_failures_retire_cached_backchannels() {
+        for error in [
+            rns_runtime::link_manager::LinkSendError::IdentityUnavailable,
+            rns_runtime::link_manager::LinkSendError::IdentificationUnavailable,
+        ] {
+            assert_eq!(
+                backchannel_error_from_runtime(error),
+                BackchannelSendError::LinkNotActive
+            );
+        }
+    }
+
     #[tokio::test]
     async fn direct_delivery_prefers_registered_backchannel() {
         let mut mgr = test_manager();
@@ -6272,19 +7013,8 @@ mod tests {
             mpsc::channel::<rns_runtime::link_manager::LinkManagerCommand>(4);
         let (_identified_tx, identified_rx) = mpsc::channel::<([u8; 16], [u8; 16])>(4);
         let (direct_tx, _direct_rx) = mpsc::unbounded_channel::<(Vec<u8>, [u8; 16])>();
-        let (_closed_tx, closed_rx) = mpsc::channel::<[u8; 16]>(4);
-        let (_packet_tx, packet_rx) =
-            mpsc::channel::<rns_runtime::link_manager::LinkPacketProof>(4);
-        let (_resource_tx, resource_rx) =
-            mpsc::channel::<rns_runtime::link_manager::LinkResourceProof>(4);
-        mgr.set_lxmf_link_control(
-            command_tx,
-            direct_tx,
-            identified_rx,
-            closed_rx,
-            packet_rx,
-            resource_rx,
-        );
+        let (_backchannel_event_tx, backchannel_event_rx) = mpsc::unbounded_channel();
+        mgr.set_lxmf_link_control(command_tx, direct_tx, identified_rx, backchannel_event_rx);
 
         let dest = [0x33; 16];
         let link_id = [0x44; 16];
@@ -6352,19 +7082,8 @@ mod tests {
             mpsc::channel::<rns_runtime::link_manager::LinkManagerCommand>(4);
         let (_identified_tx, identified_rx) = mpsc::channel::<([u8; 16], [u8; 16])>(4);
         let (direct_tx, _direct_rx) = mpsc::unbounded_channel::<(Vec<u8>, [u8; 16])>();
-        let (_closed_tx, closed_rx) = mpsc::channel::<[u8; 16]>(4);
-        let (_packet_tx, packet_rx) =
-            mpsc::channel::<rns_runtime::link_manager::LinkPacketProof>(4);
-        let (_resource_tx, resource_rx) =
-            mpsc::channel::<rns_runtime::link_manager::LinkResourceProof>(4);
-        mgr.set_lxmf_link_control(
-            command_tx,
-            direct_tx,
-            identified_rx,
-            closed_rx,
-            packet_rx,
-            resource_rx,
-        );
+        let (_backchannel_event_tx, backchannel_event_rx) = mpsc::unbounded_channel();
+        mgr.set_lxmf_link_control(command_tx, direct_tx, identified_rx, backchannel_event_rx);
 
         let dest = [0x34; 16];
         let dest_hex = hex::encode(dest);
@@ -6460,19 +7179,8 @@ mod tests {
             mpsc::channel::<rns_runtime::link_manager::LinkManagerCommand>(4);
         let (identified_tx, identified_rx) = mpsc::channel::<([u8; 16], [u8; 16])>(4);
         let (direct_tx, _direct_rx) = mpsc::unbounded_channel::<(Vec<u8>, [u8; 16])>();
-        let (_closed_tx, closed_rx) = mpsc::channel::<[u8; 16]>(4);
-        let (_packet_tx, packet_rx) =
-            mpsc::channel::<rns_runtime::link_manager::LinkPacketProof>(4);
-        let (_resource_tx, resource_rx) =
-            mpsc::channel::<rns_runtime::link_manager::LinkResourceProof>(4);
-        mgr.set_lxmf_link_control(
-            command_tx,
-            direct_tx,
-            identified_rx,
-            closed_rx,
-            packet_rx,
-            resource_rx,
-        );
+        let (_backchannel_event_tx, backchannel_event_rx) = mpsc::unbounded_channel();
+        mgr.set_lxmf_link_control(command_tx, direct_tx, identified_rx, backchannel_event_rx);
 
         let identity_hash = [0x22; 16];
         let dest = Destination::hash_from_name_and_identity(LXMF_APP_NAME, Some(&identity_hash));
@@ -6532,19 +7240,8 @@ mod tests {
             mpsc::channel::<rns_runtime::link_manager::LinkManagerCommand>(4);
         let (_identified_tx, identified_rx) = mpsc::channel::<([u8; 16], [u8; 16])>(4);
         let (direct_tx, _direct_rx) = mpsc::unbounded_channel::<(Vec<u8>, [u8; 16])>();
-        let (closed_tx, closed_rx) = mpsc::channel::<[u8; 16]>(4);
-        let (_packet_tx, packet_rx) =
-            mpsc::channel::<rns_runtime::link_manager::LinkPacketProof>(4);
-        let (_resource_tx, resource_rx) =
-            mpsc::channel::<rns_runtime::link_manager::LinkResourceProof>(4);
-        mgr.set_lxmf_link_control(
-            command_tx,
-            direct_tx,
-            identified_rx,
-            closed_rx,
-            packet_rx,
-            resource_rx,
-        );
+        let (backchannel_event_tx, backchannel_event_rx) = mpsc::unbounded_channel();
+        mgr.set_lxmf_link_control(command_tx, direct_tx, identified_rx, backchannel_event_rx);
 
         let dest = [0x35; 16];
         let link_id = [0x45; 16];
@@ -6561,7 +7258,9 @@ mod tests {
                 .is_some()
         );
 
-        closed_tx.try_send(link_id).unwrap();
+        backchannel_event_tx
+            .send(BackchannelLinkEvent::LinkClosed { link_id })
+            .unwrap();
         let mut results = Vec::new();
         mgr.drain_backchannel_events(&mut results);
 
@@ -6584,19 +7283,8 @@ mod tests {
             mpsc::channel::<rns_runtime::link_manager::LinkManagerCommand>(4);
         let (_identified_tx, identified_rx) = mpsc::channel::<([u8; 16], [u8; 16])>(4);
         let (direct_tx, _direct_rx) = mpsc::unbounded_channel::<(Vec<u8>, [u8; 16])>();
-        let (_closed_tx, closed_rx) = mpsc::channel::<[u8; 16]>(4);
-        let (_packet_tx, packet_rx) =
-            mpsc::channel::<rns_runtime::link_manager::LinkPacketProof>(4);
-        let (_resource_tx, resource_rx) =
-            mpsc::channel::<rns_runtime::link_manager::LinkResourceProof>(4);
-        mgr.set_lxmf_link_control(
-            command_tx,
-            direct_tx,
-            identified_rx,
-            closed_rx,
-            packet_rx,
-            resource_rx,
-        );
+        let (_backchannel_event_tx, backchannel_event_rx) = mpsc::unbounded_channel();
+        mgr.set_lxmf_link_control(command_tx, direct_tx, identified_rx, backchannel_event_rx);
 
         let dest = [0x36; 16];
         let link_id = [0x46; 16];
@@ -6663,7 +7351,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backchannel_packet_proof_marks_delivery_delivered() {
+    async fn ordered_backchannel_proof_before_receipt_and_close_marks_delivered() {
         let mut mgr = test_manager();
         let (transport_tx, _transport_rx) = mpsc::channel::<TransportMessage>(8);
         mgr.router.set_transport(transport_tx);
@@ -6671,18 +7359,8 @@ mod tests {
             mpsc::channel::<rns_runtime::link_manager::LinkManagerCommand>(4);
         let (_identified_tx, identified_rx) = mpsc::channel::<([u8; 16], [u8; 16])>(4);
         let (direct_tx, _direct_rx) = mpsc::unbounded_channel::<(Vec<u8>, [u8; 16])>();
-        let (_closed_tx, closed_rx) = mpsc::channel::<[u8; 16]>(4);
-        let (packet_tx, packet_rx) = mpsc::channel::<rns_runtime::link_manager::LinkPacketProof>(4);
-        let (_resource_tx, resource_rx) =
-            mpsc::channel::<rns_runtime::link_manager::LinkResourceProof>(4);
-        mgr.set_lxmf_link_control(
-            command_tx,
-            direct_tx,
-            identified_rx,
-            closed_rx,
-            packet_rx,
-            resource_rx,
-        );
+        let (backchannel_event_tx, backchannel_event_rx) = mpsc::unbounded_channel();
+        mgr.set_lxmf_link_control(command_tx, direct_tx, identified_rx, backchannel_event_rx);
 
         let dest = [0x55; 16];
         let link_id = [0x66; 16];
@@ -6709,40 +7387,40 @@ mod tests {
             .unwrap();
         mgr.drain_core_backchannel_send_commands();
         let command = command_rx.try_recv().expect("backchannel send command");
-        match command {
+        let result_tx = match command {
             rns_runtime::link_manager::LinkManagerCommand::SendLinkPayload {
                 result_tx: Some(result_tx),
                 ..
-            } => {
-                result_tx
-                    .send(Ok(
-                        rns_runtime::link_manager::LinkPayloadSendReceipt::Packet(
-                            rns_runtime::link_manager::LinkPacketSendReceipt {
-                                link_id,
-                                packet_hash,
-                            },
-                        ),
-                    ))
-                    .unwrap();
-            }
+            } => result_tx,
             _ => panic!("expected SendLinkPayload command with result channel"),
-        }
-        tokio::task::yield_now().await;
-        let mut receipt_results = Vec::new();
-        let delivery_results = mgr.link_delivery.as_mut().unwrap().tick();
-        for result in delivery_results {
-            mgr.handle_link_delivery_result(result, &mut receipt_results);
-        }
-        assert!(receipt_results.is_empty());
+        };
 
-        packet_tx
-            .try_send(rns_runtime::link_manager::LinkPacketProof {
-                link_id,
-                packet_hash,
-            })
+        // Reticulum can validate and publish the remote proof before this
+        // asynchronous adapter observes the local send receipt. Preserve that
+        // exact order so the production tick must reconcile both events.
+        backchannel_event_tx
+            .send(BackchannelLinkEvent::PacketProof(
+                rns_runtime::link_manager::LinkPacketProof {
+                    link_id,
+                    packet_hash,
+                },
+            ))
             .unwrap();
-        let mut results = Vec::new();
-        mgr.drain_backchannel_events(&mut results);
+        backchannel_event_tx
+            .send(BackchannelLinkEvent::LinkClosed { link_id })
+            .unwrap();
+        result_tx
+            .send(Ok(
+                rns_runtime::link_manager::LinkPayloadSendReceipt::Packet(
+                    rns_runtime::link_manager::LinkPacketSendReceipt {
+                        link_id,
+                        packet_hash,
+                    },
+                ),
+            ))
+            .unwrap();
+        tokio::task::yield_now().await;
+        let results = mgr.tick();
 
         assert_eq!(results, vec![(hex::encode(msg_hash), "delivered")]);
         let progress = mgr.take_delivery_progress_updates();
@@ -6754,7 +7432,180 @@ mod tests {
         assert_eq!(delivered.progress, Some(1.0));
         assert_eq!(delivered.representation, "packet");
         assert_eq!(mgr.link_delivery.as_ref().unwrap().pending_count(), 0);
+        assert!(
+            mgr.link_delivery
+                .as_ref()
+                .unwrap()
+                .backchannel_link_snapshot(dest)
+                .is_none(),
+            "later Link closure must retire reuse without overriding its earlier proof"
+        );
         assert!(!mgr.auto_live_fallback.contains(&msg_hash));
+    }
+
+    #[tokio::test]
+    async fn outbound_backchannel_resource_rejection_settles_exact_owner() {
+        let mut mgr = test_manager();
+        let (transport_tx, _transport_rx) = mpsc::channel::<TransportMessage>(8);
+        mgr.router.set_transport(transport_tx);
+        let (command_tx, mut command_rx) =
+            mpsc::channel::<rns_runtime::link_manager::LinkManagerCommand>(4);
+        let (_identified_tx, identified_rx) = mpsc::channel::<([u8; 16], [u8; 16])>(4);
+        let (direct_tx, _direct_rx) = mpsc::unbounded_channel::<(Vec<u8>, [u8; 16])>();
+        let (backchannel_event_tx, backchannel_event_rx) = mpsc::unbounded_channel();
+        mgr.set_lxmf_link_control(command_tx, direct_tx, identified_rx, backchannel_event_rx);
+
+        let dest = [0x81; 16];
+        let link_id = [0x82; 16];
+        let resource_hash = [0x83; 32];
+        let mut msg = LxMessage::new(
+            dest,
+            mgr.lxmf_dest_hash,
+            "Resource rejection",
+            "rejected by receiver",
+            DeliveryMethod::Direct,
+        );
+        msg.sign(&mgr.identity.get_signing_key().unwrap()).unwrap();
+        let msg_hash = msg.hash.unwrap();
+        assert!(mgr.ensure_link_delivery_manager());
+        mgr.link_delivery
+            .as_mut()
+            .unwrap()
+            .register_backchannel(dest, link_id);
+        mgr.link_delivery
+            .as_mut()
+            .unwrap()
+            .start_backchannel_delivery(msg, dest)
+            .unwrap();
+        mgr.drain_core_backchannel_send_commands();
+
+        let result_tx = match command_rx.try_recv().expect("backchannel send command") {
+            rns_runtime::link_manager::LinkManagerCommand::SendLinkPayload {
+                result_tx: Some(result_tx),
+                ..
+            } => result_tx,
+            _ => panic!("expected SendLinkPayload command with result channel"),
+        };
+        result_tx
+            .send(Ok(
+                rns_runtime::link_manager::LinkPayloadSendReceipt::Resource(
+                    rns_runtime::link_manager::LinkResourceSendReceipt {
+                        link_id,
+                        resource_hash,
+                    },
+                ),
+            ))
+            .unwrap();
+        tokio::task::yield_now().await;
+        assert!(mgr.tick().is_empty());
+
+        backchannel_event_tx
+            .send(BackchannelLinkEvent::ResourceConclusion {
+                link_id,
+                resource_hash,
+                conclusion: rns_runtime::link_manager::LinkResourceConclusion::Rejected,
+            })
+            .unwrap();
+        assert_eq!(mgr.tick(), vec![(hex::encode(msg_hash), "rejected")]);
+        assert_eq!(mgr.link_delivery.as_ref().unwrap().pending_count(), 0);
+        assert!(
+            mgr.link_delivery
+                .as_ref()
+                .unwrap()
+                .backchannel_link_snapshot(dest)
+                .is_some(),
+            "receiver rejection is message-terminal, not Link-terminal"
+        );
+    }
+
+    #[tokio::test]
+    async fn backchannel_resource_cancel_survives_command_backpressure() {
+        let mut mgr = test_manager();
+        let (transport_tx, _transport_rx) = mpsc::channel::<TransportMessage>(8);
+        mgr.router.set_transport(transport_tx);
+        let (command_tx, mut command_rx) =
+            mpsc::channel::<rns_runtime::link_manager::LinkManagerCommand>(1);
+        let command_fill_tx = command_tx.clone();
+        let (_identified_tx, identified_rx) = mpsc::channel::<([u8; 16], [u8; 16])>(4);
+        let (direct_tx, _direct_rx) = mpsc::unbounded_channel::<(Vec<u8>, [u8; 16])>();
+        let (_backchannel_event_tx, backchannel_event_rx) = mpsc::unbounded_channel();
+        mgr.set_lxmf_link_control(command_tx, direct_tx, identified_rx, backchannel_event_rx);
+
+        let dest = [0x91; 16];
+        let link_id = [0x92; 16];
+        let resource_hash = [0x93; 32];
+        let mut msg = LxMessage::new(
+            dest,
+            mgr.lxmf_dest_hash,
+            "Resource cancel",
+            "cancel exact transfer",
+            DeliveryMethod::Direct,
+        );
+        msg.sign(&mgr.identity.get_signing_key().unwrap()).unwrap();
+        let msg_hash = msg.hash.unwrap();
+        assert!(mgr.ensure_link_delivery_manager());
+        mgr.link_delivery
+            .as_mut()
+            .unwrap()
+            .register_backchannel(dest, link_id);
+        mgr.link_delivery
+            .as_mut()
+            .unwrap()
+            .start_backchannel_delivery(msg, dest)
+            .unwrap();
+        mgr.drain_core_backchannel_send_commands();
+
+        let result_tx = match command_rx.try_recv().expect("backchannel send command") {
+            rns_runtime::link_manager::LinkManagerCommand::SendLinkPayload {
+                result_tx: Some(result_tx),
+                ..
+            } => result_tx,
+            _ => panic!("expected SendLinkPayload command with result channel"),
+        };
+        result_tx
+            .send(Ok(
+                rns_runtime::link_manager::LinkPayloadSendReceipt::Resource(
+                    rns_runtime::link_manager::LinkResourceSendReceipt {
+                        link_id,
+                        resource_hash,
+                    },
+                ),
+            ))
+            .unwrap();
+        tokio::task::yield_now().await;
+        assert!(mgr.tick().is_empty());
+
+        command_fill_tx
+            .try_send(rns_runtime::link_manager::LinkManagerCommand::Announce)
+            .unwrap();
+        assert!(mgr.cancel_outbound_message(&hex::encode(msg_hash)));
+        assert_eq!(mgr.pending_backchannel_resource_cancellations.len(), 1);
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(rns_runtime::link_manager::LinkManagerCommand::Announce)
+        ));
+
+        let _ = mgr.tick();
+        match command_rx
+            .try_recv()
+            .expect("retained Resource cancellation")
+        {
+            rns_runtime::link_manager::LinkManagerCommand::CancelLinkResource {
+                link_id: cancelled_link,
+                resource_id,
+                direction,
+                ..
+            } => {
+                assert_eq!(cancelled_link, link_id);
+                assert_eq!(resource_id, resource_hash);
+                assert_eq!(
+                    direction,
+                    rns_runtime::link_manager::LinkResourceDirection::Outbound
+                );
+            }
+            _ => panic!("expected exact CancelLinkResource command"),
+        }
+        assert!(mgr.pending_backchannel_resource_cancellations.is_empty());
     }
 
     #[test]
@@ -7484,9 +8335,12 @@ mod tests {
             &link_id,
             &proof_data,
             &responder_pub,
-            &responder_pub.to_bytes()
+            &responder_pub.to_bytes(),
+            1,
         ));
-        let _rtt_raw = next_outbound(&mut rx);
+        accept_initiator_endpoint_binding(&mut rx, link_id, 1);
+        let _ = mgr.tick();
+        let _rtt_raw = next_initiator_endpoint_outbound(&mut rx);
 
         let _ = mgr.tick();
         let snapshot = mgr
@@ -7602,9 +8456,12 @@ mod tests {
             &link_id,
             &proof_data,
             &responder_pub,
-            &responder_pub.to_bytes()
+            &responder_pub.to_bytes(),
+            1,
         ));
-        let _rtt_raw = next_outbound(&mut rx);
+        accept_initiator_endpoint_binding(&mut rx, link_id, 1);
+        let _ = mgr.tick();
+        let _rtt_raw = next_initiator_endpoint_outbound(&mut rx);
 
         let _ = mgr.tick();
         assert!(
@@ -8412,8 +9269,8 @@ mod tests {
 
         let mut lrgp_fields = HashMap::new();
         lrgp_fields.insert(
-            lrgp::constants::FIELD_CUSTOM_TYPE,
-            rmpv::Value::String(lrgp::constants::PROTOCOL_TYPE.into()),
+            lrgp::protocol::FIELD_CUSTOM_TYPE,
+            rmpv::Value::String(lrgp::protocol::PROTOCOL_TYPE.into()),
         );
         assert!(
             mgr.send_message_with_lrgp_fields_preference(
@@ -8510,6 +9367,72 @@ mod tests {
     }
 
     #[test]
+    fn audio_requires_full_lxmf_envelope_below_efficient_resource_size() {
+        let limit = rns_protocol::resource::MAX_EFFICIENT_SIZE;
+        assert_eq!(validate_audio_message_size(limit - 1), Ok(()));
+        assert_eq!(
+            validate_audio_message_size(limit),
+            Err(LxmfSubmissionFailure::ResourceLimitExceeded {
+                actual_bytes: limit,
+                limit_bytes: limit,
+            })
+        );
+    }
+
+    #[test]
+    fn deferred_stamp_reserve_matches_actual_packed_lxm_at_efficient_boundary() {
+        fn message_with_audio_len(audio_len: usize) -> LxMessage {
+            let mut message = LxMessage::new(
+                [0x11; 16],
+                [0x22; 16],
+                "",
+                "Voice message",
+                DeliveryMethod::Direct,
+            );
+            message
+                .set_audio_field(lxmf_core::constants::AM_OPUS_OGG, &vec![0; audio_len])
+                .unwrap();
+            message.signature = Some([0x33; 64]);
+            message
+        }
+
+        let limit = rns_protocol::resource::MAX_EFFICIENT_SIZE;
+        let mut audio_len = limit - 512;
+        let unstamped = loop {
+            let message = message_with_audio_len(audio_len);
+            let packed_len = message.packed_len().unwrap();
+            let predicted = packed_len + MAX_DEFERRED_STAMP_WIRE_BYTES;
+            match predicted.cmp(&limit) {
+                std::cmp::Ordering::Equal => break message,
+                std::cmp::Ordering::Less => audio_len += limit - predicted,
+                std::cmp::Ordering::Greater => audio_len -= predicted - limit,
+            }
+        };
+        let unstamped_len = unstamped.packed_len().unwrap();
+        assert_eq!(unstamped_len + MAX_DEFERRED_STAMP_WIRE_BYTES, limit);
+
+        let mut stamped = unstamped.clone();
+        stamped.stamp = Some(vec![0x44; lxmf_core::constants::STAMP_SIZE]);
+        assert_eq!(stamped.packed_len().unwrap(), limit);
+        assert_eq!(
+            validate_audio_message_size(unstamped_len + MAX_DEFERRED_STAMP_WIRE_BYTES),
+            Err(LxmfSubmissionFailure::ResourceLimitExceeded {
+                actual_bytes: limit,
+                limit_bytes: limit,
+            })
+        );
+
+        let mut below = message_with_audio_len(audio_len - 1);
+        let below_unstamped_len = below.packed_len().unwrap();
+        below.stamp = Some(vec![0x55; lxmf_core::constants::STAMP_SIZE]);
+        assert_eq!(below.packed_len().unwrap(), limit - 1);
+        assert_eq!(
+            validate_audio_message_size(below_unstamped_len + MAX_DEFERRED_STAMP_WIRE_BYTES),
+            Ok(())
+        );
+    }
+
+    #[test]
     fn propagated_submission_without_a_router_node_leaves_no_sending_history() {
         let pool = test_pool();
         let mut mgr = test_manager();
@@ -8541,6 +9464,8 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<TransportMessage>(8);
         mgr.router.set_transport(tx);
+        let (proof_tx, mut proof_rx) = tokio::sync::mpsc::unbounded_channel();
+        mgr.set_opportunistic_proof_sender(proof_tx);
 
         let mut message = mgr
             .create_message(&dest_hex, "needs stamp", "", DeliveryMethod::Opportunistic)
@@ -8552,17 +9477,21 @@ mod tests {
 
         assert_eq!(mgr.router.pending_deferred_stamps.len(), 1);
 
-        let mut states = Vec::new();
-        for _ in 0..100 {
-            states.extend(mgr.tick());
-            if states
-                .iter()
-                .any(|(id, state)| id == &msg_id && *state == "sent")
-            {
-                break;
+        let states = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let mut states = Vec::new();
+            loop {
+                states.extend(mgr.tick());
+                if states
+                    .iter()
+                    .any(|(id, state)| id == &msg_id && *state == "sent")
+                {
+                    break states;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        })
+        .await
+        .expect("deferred stamp should complete on a loaded release runner");
 
         assert!(mgr.router.pending_deferred_stamps.is_empty());
         assert!(
@@ -8571,10 +9500,25 @@ mod tests {
                 .any(|(id, state)| id == &msg_id && *state == "sent"),
             "tick should move deferred stamped messages into outbound processing"
         );
-        assert!(matches!(
-            rx.try_recv(),
-            Ok(TransportMessage::RegisterReceipt { .. })
-        ));
+        let registered_proof_tx = match rx.try_recv() {
+            Ok(TransportMessage::RegisterReceiptWithProof { proof_tx, .. }) => proof_tx,
+            _ => panic!("expected receipt with dedicated proof owner"),
+        };
+        registered_proof_tx
+            .send(
+                rns_transport::link_messages::DestinationEvent::DeliveryProof {
+                    msg_id: msg_id.clone(),
+                    rtt: Some(Duration::from_millis(4)),
+                },
+            )
+            .unwrap();
+        match proof_rx.try_recv().unwrap() {
+            rns_transport::link_messages::DestinationEvent::DeliveryProof {
+                msg_id: proof_msg_id,
+                ..
+            } => assert_eq!(proof_msg_id, msg_id),
+            _ => panic!("expected dedicated Opportunistic delivery proof"),
+        }
         assert!(matches!(rx.try_recv(), Ok(TransportMessage::Outbound(_))));
         assert_eq!(mgr.opportunistic_in_flight.len(), 1);
         let hash: [u8; 32] = hex::decode(&msg_id).unwrap().try_into().unwrap();
@@ -8995,6 +9939,108 @@ mod tests {
 
         assert_eq!(attachment[0].as_str(), Some("note.txt"));
         assert_eq!(attachment[1].as_slice(), Some(&b"hello"[..]));
+    }
+
+    #[cfg(feature = "lxst-voice")]
+    #[test]
+    fn semantic_audio_send_uses_only_field_audio_and_first_class_storage() {
+        let pool = test_pool();
+        let mut mgr = test_manager();
+        let dest = "da".repeat(16);
+        let audio_bytes = valid_ogg_opus_fixture();
+
+        let queued = mgr
+            .send_audio_message_with_preference_report(AudioMessageRequest {
+                dest_hash_hex: &dest,
+                content: "",
+                title: "",
+                audio_bytes: &audio_bytes,
+                staged_path: None,
+                db_pool: &pool,
+                identity_id: "me",
+                preference: DeliveryPreference::Direct,
+            })
+            .expect("audio message queued");
+        assert_eq!(queued.method, DeliveryMethod::Direct);
+
+        let message = mgr.router.pending_outbound.first().unwrap();
+        let audio = message.audio_field().unwrap().unwrap();
+        assert_eq!(audio.mode, lxmf_core::constants::AM_OPUS_OGG);
+        assert_eq!(audio.bytes, audio_bytes);
+        assert!(
+            !message
+                .fields
+                .contains_key(&lxmf_core::constants::FIELD_FILE_ATTACHMENTS)
+        );
+
+        let conversation = db::get_conversation(&pool, &dest, "me", 10);
+        let row = conversation
+            .iter()
+            .find(|message| message["id"] == queued.message_id)
+            .unwrap();
+        assert_eq!(row["audio"]["mode"], lxmf_core::constants::AM_OPUS_OGG);
+        assert_eq!(row["audio"]["supported"], true);
+        assert_eq!(row["content"], "Voice message");
+        assert!(row["attachments"].is_null());
+        let stored = row["audio"]["stored_name"].as_str().unwrap();
+        assert_eq!(
+            std::fs::read(mgr.get_received_file(stored).unwrap()).unwrap(),
+            audio_bytes
+        );
+    }
+
+    #[cfg(feature = "lxst-voice")]
+    #[test]
+    fn invalid_audio_is_rejected_before_storage_or_router_admission() {
+        let pool = test_pool();
+        let mut mgr = test_manager();
+        let dest = "db".repeat(16);
+
+        let result = mgr.send_audio_message_with_preference_report(AudioMessageRequest {
+            dest_hash_hex: &dest,
+            content: "Voice message",
+            title: "",
+            audio_bytes: b"not an Ogg stream",
+            staged_path: None,
+            db_pool: &pool,
+            identity_id: "me",
+            preference: DeliveryPreference::Direct,
+        });
+
+        assert_eq!(result, Err(LxmfSubmissionFailure::PreparationFailed));
+        assert!(mgr.router.pending_outbound.is_empty());
+        assert!(db::get_conversation(&pool, &dest, "me", 10).is_empty());
+        assert_eq!(std::fs::read_dir(mgr.files_dir()).unwrap().count(), 0);
+    }
+
+    #[cfg(feature = "lxst-voice")]
+    #[test]
+    fn staged_audio_is_adopted_and_queue_failure_rolls_back_database_and_file() {
+        let pool = test_pool();
+        let mut mgr = test_manager();
+        let dest = "dc".repeat(16);
+        let audio_bytes = valid_ogg_opus_fixture();
+        let staging = mgr.data_dir.join("private-audio-staging-test");
+        std::fs::write(&staging, &audio_bytes).unwrap();
+
+        let result = mgr.send_audio_message_with_preference_report(AudioMessageRequest {
+            dest_hash_hex: &dest,
+            content: "Voice message",
+            title: "",
+            audio_bytes: &audio_bytes,
+            staged_path: Some(&staging),
+            db_pool: &pool,
+            identity_id: "me",
+            preference: DeliveryPreference::Propagated,
+        });
+
+        assert_eq!(result, Err(LxmfSubmissionFailure::PreparationFailed));
+        assert!(
+            !staging.exists(),
+            "runtime must consume the adopted staging file"
+        );
+        assert!(db::get_conversation(&pool, &dest, "me", 10).is_empty());
+        assert_eq!(std::fs::read_dir(mgr.files_dir()).unwrap().count(), 0);
     }
 
     #[test]

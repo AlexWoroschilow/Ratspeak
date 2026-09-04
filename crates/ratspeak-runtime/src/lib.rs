@@ -7,6 +7,7 @@
 #![warn(clippy::await_holding_lock)]
 
 pub mod activity;
+pub mod announce;
 pub mod announce_handlers;
 pub mod blackhole;
 pub mod channel_hub;
@@ -15,7 +16,9 @@ pub mod channels;
 pub mod hardware;
 pub mod helpers;
 pub mod identity_prune;
+pub mod image_attachment;
 pub mod lxmf;
+pub mod lxmf_persistence;
 pub mod messaging;
 pub mod mobile_platform;
 pub mod propagation;
@@ -51,6 +54,7 @@ use serde_json::{Value, json};
 
 use activity::ActivityRecorderError;
 use activity::producer::{self, ProducerEvent};
+use announce::{AnnounceAdmission, AnnounceIntent, AnnounceLeadership, AnnounceOrigin};
 #[cfg(all(feature = "ble", target_os = "android"))]
 use mobile_platform::{NativeBleRnodeDisconnect, NativeBleRnodeRequest};
 use state::{ActivityRequestFence, AppState};
@@ -66,6 +70,13 @@ const CHANNEL_BUFFER_SIZE: usize = 64;
 const ANNOUNCE_HISTORY_CAP: usize = 5_000;
 const AUTO_INBOX_READY_RETRY_SECS: f64 = 30.0;
 const OPPORTUNISTIC_ANNOUNCE_COOLDOWN: Duration = Duration::from_secs(60);
+// Presence construction no longer runs on the requesting IPC future. A queued
+// lifecycle may wait cooperatively for a busy LXMF tick, but it never holds the
+// manager lock while waiting and still has one bounded terminal deadline.
+const ANNOUNCE_LXMF_BUILD_RETRY_WINDOW: Duration = Duration::from_secs(30);
+const ANNOUNCE_LXMF_BUILD_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+const ANNOUNCE_QUEUE_ADMISSION_WAIT: Duration = Duration::from_secs(1);
+const ANNOUNCE_INTERFACE_DISPATCH_WAIT: Duration = Duration::from_secs(5);
 
 #[cfg(all(feature = "ble", target_os = "android"))]
 fn interface_mode_name(mode: rns_interface::traits::InterfaceMode) -> &'static str {
@@ -165,6 +176,74 @@ fn inbound_resource_admission_bytes(
         return None;
     }
     Some(limit_bytes.max(rns_protocol::resource::MAX_EFFICIENT_SIZE + 1))
+}
+
+fn admit_inbound_lxmf_resource(
+    state: &Arc<AppState>,
+    link_id: [u8; 16],
+    advertisement: &rns_protocol::resource_adv::ResourceAdvertisement,
+) -> bool {
+    let limit = state.lxmf_delivery_limit_bytes();
+    if let Some(admission_bytes) = inbound_resource_admission_bytes(
+        advertisement.data_size,
+        advertisement.total_segments,
+        limit,
+    ) {
+        match state.admit_inbound_attachment_resource(
+            link_id,
+            advertisement.resource_hash,
+            advertisement.original_hash,
+            admission_bytes,
+        ) {
+            Ok(()) => return true,
+            Err(error) => {
+                let activity_origin = state.activity_request_fence();
+                let reason = match error {
+                    state::AttachmentTransferAdmissionError::MemoryPressure => {
+                        producer::LxmfInboundRejectionReason::AttachmentMemoryPressure
+                    }
+                    _ => producer::LxmfInboundRejectionReason::AttachmentBusy,
+                };
+                record_activity_if_current(state, activity_origin, || {
+                    Ok(producer::lxmf_inbound_rejected(
+                        producer::LxmfInboundRejected {
+                            link: producer::LinkId::new(link_id),
+                            encoded_bytes: advertisement.data_size as u64,
+                            max_message_bytes: limit as u64,
+                            reason,
+                        },
+                    ))
+                });
+                tracing::warn!(
+                    link = %short_id(&hex::encode(link_id)),
+                    encoded_bytes = advertisement.data_size,
+                    reason = ?error,
+                    "rejected inbound LXMF Resource for bounded memory admission"
+                );
+                return false;
+            }
+        }
+    }
+
+    let activity_origin = state.activity_request_fence();
+    record_activity_if_current(state, activity_origin, || {
+        Ok(producer::lxmf_inbound_rejected(
+            producer::LxmfInboundRejected {
+                link: producer::LinkId::new(link_id),
+                encoded_bytes: advertisement.data_size as u64,
+                max_message_bytes: limit as u64,
+                reason: producer::LxmfInboundRejectionReason::SizeLimit,
+            },
+        ))
+    });
+    tracing::warn!(
+        link = %short_id(&hex::encode(link_id)),
+        encoded_bytes = advertisement.data_size,
+        max_message_bytes = limit,
+        reason = "size_limit",
+        "rejected inbound LXMF Resource advertisement"
+    );
+    false
 }
 
 #[cfg(test)]
@@ -535,11 +614,7 @@ fn notification_body(content: &str, has_attachment: bool) -> String {
     let trimmed = content.trim();
     let lower = trimmed.to_ascii_lowercase();
     if has_attachment && lower.starts_with("[file:") && trimmed.ends_with(']') {
-        return if lower.contains(".lxvm") {
-            "Voice message".to_string()
-        } else {
-            "New attachment".to_string()
-        };
+        return "New attachment".to_string();
     }
     let without_fallback = trimmed
         .rfind("\n[File:")
@@ -563,7 +638,7 @@ async fn notify_inbound_message_if_background(
     content: &str,
     has_attachment: bool,
 ) {
-    if state.is_foreground() || !state.native_notifications_enabled() {
+    if !state.should_surface_native_notification() {
         return;
     }
 
@@ -600,7 +675,7 @@ fn notify_game_if_background(
     command: &str,
     is_new_session: bool,
 ) {
-    if state.is_foreground() || !state.native_notifications_enabled() {
+    if !state.should_surface_native_notification() {
         return;
     }
 
@@ -885,7 +960,7 @@ pub async fn shutdown_rns_lxmf(state: &Arc<AppState>) -> Result<(), ActivityReco
     #[cfg(feature = "lxst-voice")]
     voice_memo::cancel_recording(state).await.ok();
     #[cfg(feature = "lxst-voice")]
-    voice::shutdown_voice_service(state).await;
+    voice::shutdown_voice_service_for_runtime_teardown(state).await;
     if let Some(channels) = state.take_channels() {
         channels.shutdown().await;
     }
@@ -922,11 +997,12 @@ pub async fn shutdown_rns_lxmf(state: &Arc<AppState>) -> Result<(), ActivityReco
         teardown_rns_runtime_interfaces(&mgr.handle).await;
         mgr.shutdown().await;
     }
-    // Persist ratchet + peer-key state before dropping the manager.
-    if let Ok(lxmf) = state.lxmf.lock() {
-        if let Some(ref mgr) = *lxmf {
-            mgr.save_crypto_state();
-        }
+    // Drain serialized delta writes and persist one final immutable
+    // identity/router snapshot before dropping the manager. Received ratchets
+    // and the delivery ring are already durable at their mutation seams.
+    if let Err(error) = crate::lxmf_persistence::persist_current_checkpoint(state, "shutdown").await
+    {
+        tracing::warn!(%error, "shutdown LXMF checkpoint failed");
     }
     if let Ok(mut lxmf) = state.lxmf.lock() {
         *lxmf = None;
@@ -1440,13 +1516,13 @@ pub async fn init_rns_lxmf(state: Arc<AppState>, data_dir: std::path::PathBuf) {
         state.config.rns_config_dir.clone()
     };
     if state.config.uses_app_private_rns_config_dir() {
-        match rns_config::ensure_app_private_shared_instance_ports(&config_dir) {
+        match rns_config::ensure_app_private_shared_instance(&config_dir) {
             Ok(rns_config::RatspeakRnsPortConfigChange::Created) => {
                 tracing::info!(
                     shared_instance_port = ratspeak_core::config::RATSPEAK_RNS_SHARED_INSTANCE_PORT,
                     instance_control_port =
                         ratspeak_core::config::RATSPEAK_RNS_INSTANCE_CONTROL_PORT,
-                    "created Ratspeak app-private Reticulum config"
+                    "created isolated Ratspeak app-private Reticulum config"
                 );
             }
             Ok(rns_config::RatspeakRnsPortConfigChange::Updated) => {
@@ -1454,7 +1530,7 @@ pub async fn init_rns_lxmf(state: Arc<AppState>, data_dir: std::path::PathBuf) {
                     shared_instance_port = ratspeak_core::config::RATSPEAK_RNS_SHARED_INSTANCE_PORT,
                     instance_control_port =
                         ratspeak_core::config::RATSPEAK_RNS_INSTANCE_CONTROL_PORT,
-                    "updated Ratspeak app-private Reticulum shared-instance ports"
+                    "updated Ratspeak app-private Reticulum shared-instance isolation"
                 );
             }
             Ok(rns_config::RatspeakRnsPortConfigChange::Unchanged) => {}
@@ -1525,9 +1601,12 @@ pub async fn init_rns_lxmf(state: Arc<AppState>, data_dir: std::path::PathBuf) {
                         );
                     }
                 }
+                let (opportunistic_proof_tx, opportunistic_proof_rx) =
+                    tokio::sync::mpsc::unbounded_channel();
                 if let Ok(mut lxmf) = state.lxmf.lock() {
                     if let Some(mgr) = lxmf.as_mut() {
                         mgr.delivery_tx = Some(delivery_tx);
+                        mgr.set_opportunistic_proof_sender(opportunistic_proof_tx);
                     }
                 }
 
@@ -1539,6 +1618,11 @@ pub async fn init_rns_lxmf(state: Arc<AppState>, data_dir: std::path::PathBuf) {
                     .read()
                     .unwrap_or_else(|e| e.into_inner())
                     .clone();
+                tokio::spawn(handle_lxmf_delivery_proofs(
+                    state.clone(),
+                    opportunistic_proof_rx,
+                    dispatch_shutdown.clone(),
+                ));
                 tokio::spawn(async move {
                     loop {
                         let event = tokio::select! {
@@ -1803,7 +1887,7 @@ pub async fn init_rns_lxmf(state: Arc<AppState>, data_dir: std::path::PathBuf) {
                                 break;
                             };
                             let Ok((_timebase, entries)) =
-                                lxmf_core::message::LxMessage::unpack_propagation_wrapper_bounded(
+                                lxmf_core::message_api::LxMessage::unpack_propagation_wrapper_bounded(
                                     &data,
                                     max_transfer_bytes,
                                 )
@@ -1907,72 +1991,7 @@ pub async fn init_rns_lxmf(state: Arc<AppState>, data_dir: std::path::PathBuf) {
                     lxmf_link_mgr
                         .set_resource_strategy(rns_runtime::prelude::ResourceStrategy::AcceptApp);
                     lxmf_link_mgr.set_resource_accept_handler(move |link_id, advertisement| {
-                        let limit = admission_state.lxmf_delivery_limit_bytes();
-                        if let Some(admission_bytes) = inbound_resource_admission_bytes(
-                            advertisement.data_size,
-                            advertisement.total_segments,
-                            limit,
-                        ) {
-                            match admission_state.admit_inbound_attachment_resource(
-                                link_id,
-                                advertisement.resource_hash,
-                                advertisement.original_hash,
-                                admission_bytes,
-                            ) {
-                                Ok(()) => return true,
-                                Err(error) => {
-                                    let activity_origin =
-                                        admission_state.activity_request_fence();
-                                    let reason = match error {
-                                        state::AttachmentTransferAdmissionError::MemoryPressure => {
-                                            producer::LxmfInboundRejectionReason::AttachmentMemoryPressure
-                                        }
-                                        _ => producer::LxmfInboundRejectionReason::AttachmentBusy,
-                                    };
-                                    record_activity_if_current(
-                                        &admission_state,
-                                        activity_origin,
-                                        || {
-                                            Ok(producer::lxmf_inbound_rejected(
-                                                producer::LxmfInboundRejected {
-                                                    link: producer::LinkId::new(link_id),
-                                                    encoded_bytes: advertisement.data_size as u64,
-                                                    max_message_bytes: limit as u64,
-                                                    reason,
-                                                },
-                                            ))
-                                        },
-                                    );
-                                    tracing::warn!(
-                                        link = %short_id(&hex::encode(link_id)),
-                                        encoded_bytes = advertisement.data_size,
-                                        reason = ?error,
-                                        "rejected inbound LXMF Resource for bounded memory admission"
-                                    );
-                                    return false;
-                                }
-                            }
-                        }
-
-                        let activity_origin = admission_state.activity_request_fence();
-                        record_activity_if_current(&admission_state, activity_origin, || {
-                            Ok(producer::lxmf_inbound_rejected(
-                                producer::LxmfInboundRejected {
-                                    link: producer::LinkId::new(link_id),
-                                    encoded_bytes: advertisement.data_size as u64,
-                                    max_message_bytes: limit as u64,
-                                    reason: producer::LxmfInboundRejectionReason::SizeLimit,
-                                },
-                            ))
-                        });
-                        tracing::warn!(
-                            link = %short_id(&hex::encode(link_id)),
-                            encoded_bytes = advertisement.data_size,
-                            max_message_bytes = limit,
-                            reason = "size_limit",
-                            "rejected inbound LXMF Resource advertisement"
-                        );
-                        false
+                        admit_inbound_lxmf_resource(&admission_state, link_id, advertisement)
                     });
                     let lxmf_link_identities = lxmf_link_mgr.link_identities_handle();
 
@@ -1991,35 +2010,37 @@ pub async fn init_rns_lxmf(state: Arc<AppState>, data_dir: std::path::PathBuf) {
                     );
                     let (link_identified_tx, link_identified_rx) =
                         tokio::sync::mpsc::channel::<([u8; 16], [u8; 16])>(CHANNEL_BUFFER_SIZE);
-                    let (link_closed_tx, link_closed_rx) =
-                        tokio::sync::mpsc::channel::<[u8; 16]>(CHANNEL_BUFFER_SIZE);
-                    let (link_packet_proof_tx, link_packet_proof_rx) =
-                        tokio::sync::mpsc::channel::<rns_runtime::link_manager::LinkPacketProof>(
-                            CHANNEL_BUFFER_SIZE,
-                        );
-                    let (link_resource_proof_tx, link_resource_proof_rx) =
-                        tokio::sync::mpsc::channel::<rns_runtime::link_manager::LinkResourceProof>(
-                            CHANNEL_BUFFER_SIZE,
-                        );
+                    let (backchannel_event_tx, backchannel_event_rx) =
+                        tokio::sync::mpsc::unbounded_channel::<lxmf::BackchannelLinkEvent>();
                     lxmf_link_mgr.set_link_packet_channel(link_pkt_tx.clone());
                     // Use the single-owner accounting stream instead of also
                     // installing the legacy completion channel. Installing
                     // both would clone every completed Resource Vec.
                     lxmf_link_mgr.set_accounting_event_channel(link_accounting_tx);
                     lxmf_link_mgr.set_link_identified_channel(link_identified_tx);
-                    lxmf_link_mgr.set_link_closed_channel(link_closed_tx);
-                    lxmf_link_mgr.set_link_packet_proof_channel(link_packet_proof_tx);
-                    lxmf_link_mgr.set_outbound_resource_proof_channel(link_resource_proof_tx);
 
+                    let direct_admission_state = state.clone();
+                    let direct_conclusion_state = state.clone();
                     if let Ok(mut lxmf) = state.lxmf.lock() {
                         if let Some(mgr) = lxmf.as_mut() {
+                            mgr.set_direct_inbound_resource_handlers(
+                                move |link_id, advertisement| {
+                                    admit_inbound_lxmf_resource(
+                                        &direct_admission_state,
+                                        link_id,
+                                        advertisement,
+                                    )
+                                },
+                                move |_link_id, resource_id| {
+                                    direct_conclusion_state
+                                        .complete_inbound_attachment_resource(resource_id);
+                                },
+                            );
                             mgr.set_lxmf_link_control(
                                 link_command_tx,
                                 link_pkt_tx.clone(),
                                 link_identified_rx,
-                                link_closed_rx,
-                                link_packet_proof_rx,
-                                link_resource_proof_rx,
+                                backchannel_event_rx,
                             );
                         }
                     }
@@ -2045,6 +2066,10 @@ pub async fn init_rns_lxmf(state: Arc<AppState>, data_dir: std::path::PathBuf) {
                                 },
                             };
                             match event {
+                                LinkManagerAccountingEvent::LinkPacketProof(proof) => {
+                                    let _ = backchannel_event_tx
+                                        .send(lxmf::BackchannelLinkEvent::PacketProof(proof));
+                                }
                                 LinkManagerAccountingEvent::ResourceCompletion(completion) => {
                                     accounting_state.complete_inbound_attachment_resource(
                                         completion.resource_hash,
@@ -2068,8 +2093,26 @@ pub async fn init_rns_lxmf(state: Arc<AppState>, data_dir: std::path::PathBuf) {
                                     accounting_state
                                         .complete_inbound_attachment_resource(resource_id);
                                 }
+                                LinkManagerAccountingEvent::ResourceEvent(
+                                    LinkResourceEvent::Concluded {
+                                        link_id,
+                                        resource_id,
+                                        direction: LinkResourceDirection::Outbound,
+                                        conclusion,
+                                    },
+                                ) => {
+                                    let _ = backchannel_event_tx.send(
+                                        lxmf::BackchannelLinkEvent::ResourceConclusion {
+                                            link_id,
+                                            resource_hash: resource_id,
+                                            conclusion,
+                                        },
+                                    );
+                                }
                                 LinkManagerAccountingEvent::LinkClosed { link_id } => {
                                     accounting_state.release_inbound_attachment_link(link_id);
+                                    let _ = backchannel_event_tx
+                                        .send(lxmf::BackchannelLinkEvent::LinkClosed { link_id });
                                 }
                                 _ => {}
                             }
@@ -2145,9 +2188,10 @@ pub async fn init_rns_lxmf(state: Arc<AppState>, data_dir: std::path::PathBuf) {
                 }
             }
 
-            // Clone the transport handle before moving rns_mgr into state;
-            // the announce handler below still needs it.
-            let transport_tx_for_handler = rns_mgr.handle.transport_tx.clone();
+            // Retain one runtime handle clone before moving the manager into
+            // state; exact announce subscriptions below are created through
+            // this handle and own their registrations until shutdown.
+            let announce_handle = rns_mgr.handle.clone();
             let channels_identity = state
                 .lxmf
                 .lock()
@@ -2165,6 +2209,9 @@ pub async fn init_rns_lxmf(state: Arc<AppState>, data_dir: std::path::PathBuf) {
             let rnode_activity_origin = state.set_rns(rns_mgr);
             if let Some(origin) = rnode_activity_origin {
                 for runtime in startup_rnode_activity {
+                    if !state.cover_rnode_activity_interface(runtime.interface_id, origin) {
+                        continue;
+                    }
                     rnode_activity::spawn_startup_rnode_activity_monitor(
                         state.clone(),
                         runtime.observer,
@@ -2281,11 +2328,12 @@ pub async fn init_rns_lxmf(state: Arc<AppState>, data_dir: std::path::PathBuf) {
                             false
                         };
                     save_counter = save_counter.wrapping_add(1);
-                    let should_save_crypto_state = save_counter % 600 == 0;
+                    let should_save_crypto_state = save_counter.is_multiple_of(600);
                     let tick_state_for_lxmf = tick_state.clone();
                     let tick_result = tokio::task::spawn_blocking(move || {
                         let empty_result = || {
                             (
+                                Vec::new(),
                                 Vec::new(),
                                 Vec::new(),
                                 Vec::new(),
@@ -2325,10 +2373,7 @@ pub async fn init_rns_lxmf(state: Arc<AppState>, data_dir: std::path::PathBuf) {
                         let downloaded = mgr.take_downloaded_propagation_messages();
                         let (completed_deposits, failed_deposits, completed_syncs, failed_syncs) =
                             mgr.take_propagation_health();
-                        // Persist crypto state every ~5 min (600 × 500ms).
-                        if should_save_crypto_state {
-                            mgr.save_crypto_state();
-                        }
+                        let expired_received_ratchets = mgr.take_expired_received_ratchets();
                         (
                             results,
                             delivery_progress,
@@ -2338,6 +2383,7 @@ pub async fn init_rns_lxmf(state: Arc<AppState>, data_dir: std::path::PathBuf) {
                             failed_deposits,
                             completed_syncs,
                             failed_syncs,
+                            expired_received_ratchets,
                         )
                     })
                     .await;
@@ -2350,6 +2396,7 @@ pub async fn init_rns_lxmf(state: Arc<AppState>, data_dir: std::path::PathBuf) {
                         failed_propagation_deposits,
                         completed_propagation_syncs,
                         failed_propagation_syncs,
+                        expired_received_ratchets,
                     ) = match tick_result {
                         Ok(result) => result,
                         Err(_) => {
@@ -2366,9 +2413,44 @@ pub async fn init_rns_lxmf(state: Arc<AppState>, data_dir: std::path::PathBuf) {
                                 Vec::new(),
                                 Vec::new(),
                                 Vec::new(),
+                                Vec::new(),
                             )
                         }
                     };
+                    if !expired_received_ratchets.is_empty() {
+                        let cleanup_state = tick_state.clone();
+                        tokio::spawn(async move {
+                            if let Err(error) =
+                                crate::lxmf_persistence::delete_expired_received_ratchets(
+                                    &cleanup_state,
+                                    &expired_received_ratchets,
+                                )
+                                .await
+                            {
+                                tracing::warn!(%error, "received-ratchet cleanup failed");
+                            }
+                        });
+                    }
+                    // Capture and persist the current identity/router checkpoint
+                    // outside the protocol-manager lock. Changed received
+                    // ratchets are already write-through deltas, so the
+                    // periodic pass never replays thousands of unchanged files.
+                    if should_save_crypto_state {
+                        let checkpoint_state = tick_state.clone();
+                        tokio::spawn(async move {
+                            if let Err(error) = crate::lxmf_persistence::persist_current_checkpoint(
+                                &checkpoint_state,
+                                "periodic",
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    %error,
+                                    "periodic LXMF checkpoint failed"
+                                );
+                            }
+                        });
+                    }
                     // Hosted propagation node maintenance on the crypto-save
                     // cadence (~5 min): age-cull, weight cap, orphan cleanup.
                     // Previously never ran — the store only hard-rejected at
@@ -2467,20 +2549,31 @@ pub async fn init_rns_lxmf(state: Arc<AppState>, data_dir: std::path::PathBuf) {
                                     method,
                                 );
                             }
-                            db::update_message_state(
+                            let updated = db::update_message_state(
                                 &p,
                                 &msg_id_for_db,
                                 &identity_for_db,
                                 &new_state_for_db,
                                 None,
                             );
-                            db::get_message_delivery_method(&p, &msg_id_for_db, &identity_for_db)
+                            let method = db::get_message_delivery_method(
+                                &p,
+                                &msg_id_for_db,
+                                &identity_for_db,
+                            );
+                            (updated, method)
                         })
                         .await
                         {
-                            Ok(method) => {
+                            Ok((true, method)) => {
                                 persisted.push((msg_id.clone(), *new_state, method, failure))
                             }
+                            Ok((false, _)) => tracing::debug!(
+                                msg_id = %short_id(msg_id),
+                                new_state = %new_state,
+                                reason = "terminal_state_preserved",
+                                "lxmf_tick: suppressed a late state regression"
+                            ),
                             Err(_) => tracing::error!(
                                 msg_id = %short_id(msg_id),
                                 new_state = %new_state,
@@ -2565,19 +2658,7 @@ pub async fn init_rns_lxmf(state: Arc<AppState>, data_dir: std::path::PathBuf) {
                                 ))
                             });
                         }
-                        if *new_state == "sent" {
-                            let now = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs_f64();
-                            if let Ok(mut times) = tick_state.message_send_times.lock() {
-                                times.insert(msg_id.clone(), now);
-                            }
-                        } else if *new_state == "failed" {
-                            if let Ok(mut times) = tick_state.message_send_times.lock() {
-                                times.remove(msg_id);
-                            }
-                        }
+                        update_message_delivery_timeout(&tick_state, msg_id, new_state);
 
                         // Route delivery-state to originating LRGP session.
                         let lrgp_meta = tick_state
@@ -2606,6 +2687,12 @@ pub async fn init_rns_lxmf(state: Arc<AppState>, data_dir: std::path::PathBuf) {
                     }
 
                     for update in delivery_progress {
+                        // Progress can be the only observable output when a
+                        // recovered/reused Link already owns the delivery.
+                        // Start the same bounded clock as ordinary state
+                        // updates so a stalled Resource can never remain
+                        // pending indefinitely.
+                        update_message_delivery_timeout(&tick_state, &update.msg_id, update.step);
                         let client_msg_id = tick_state
                             .msg_id_map
                             .lock()
@@ -2641,12 +2728,18 @@ pub async fn init_rns_lxmf(state: Arc<AppState>, data_dir: std::path::PathBuf) {
                         .await;
                     }
 
-                    // Every ~30s: timeout sweep + evict >1h tracking entries.
+                    // Check delivery deadlines every ~5s. Resource progress can
+                    // otherwise cross its three-minute deadline just after a
+                    // coarse maintenance pass and remain apparently pending
+                    // for another 30 seconds.
                     timeout_check_counter += 1;
-                    if timeout_check_counter % 60 == 0 {
+                    if timeout_check_counter.is_multiple_of(10) {
+                        check_message_timeouts(&tick_state, tick_activity_origin).await;
+                    }
+                    // Every ~30s: slower discovery maintenance and retention.
+                    if timeout_check_counter.is_multiple_of(60) {
                         propagation::reconcile_active_auto_node(&tick_state).await;
                         propagation::probe_static_nodes_background(&tick_state).await;
-                        check_message_timeouts(&tick_state, tick_activity_origin).await;
                         sweep_stale_game_deliveries(&tick_state).await;
                         let cleanup_now = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
@@ -2707,8 +2800,9 @@ pub async fn init_rns_lxmf(state: Arc<AppState>, data_dir: std::path::PathBuf) {
                                 if periodic_shutdown.is_triggered() {
                                     break;
                                 }
-                                send_announce_from_origin(
+                                send_typed_announce_from_origin(
                                     &periodic_state,
+                                    AnnounceOrigin::Periodic,
                                     activity_origin,
                                 )
                                 .await;
@@ -2747,19 +2841,19 @@ pub async fn init_rns_lxmf(state: Arc<AppState>, data_dir: std::path::PathBuf) {
                     .clone();
                 announce_handlers::spawn_lxmf_delivery_handler(
                     state.clone(),
-                    transport_tx_for_handler.clone(),
+                    &announce_handle,
                     shutdown.clone(),
                 )
                 .await;
                 announce_handlers::spawn_lxmf_propagation_handler(
                     state.clone(),
-                    transport_tx_for_handler.clone(),
+                    &announce_handle,
                     shutdown.clone(),
                 )
                 .await;
                 announce_handlers::spawn_lxst_telephony_handler(
                     state.clone(),
-                    transport_tx_for_handler,
+                    &announce_handle,
                     shutdown,
                 )
                 .await;
@@ -2895,6 +2989,63 @@ async fn migrate_android_usb_selectors_for_startup(state: &AppState, config_dir:
     }
 }
 
+fn interface_stats_have_online_egress(interfaces: &[Value]) -> bool {
+    interfaces.iter().any(|interface| {
+        if !interface
+            .get("online")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return false;
+        }
+
+        // The app-private shared-instance listener and its accepted local
+        // clients are process plumbing, not paths to another Reticulum node.
+        // A SharedInstancePeer is different: it reaches an external daemon
+        // and therefore is a valid egress path.
+        !matches!(
+            interface.get("role").and_then(Value::as_str),
+            Some("shared_server" | "local_client")
+        )
+    })
+}
+
+#[cfg(test)]
+mod interface_availability_tests {
+    use super::interface_stats_have_online_egress;
+    use serde_json::json;
+
+    #[test]
+    fn internal_shared_listener_is_not_network_egress() {
+        let interfaces = vec![
+            json!({"online": true, "role": "shared_server"}),
+            json!({"online": true, "role": "local_client"}),
+            json!({"online": false, "role": "normal"}),
+        ];
+
+        assert!(!interface_stats_have_online_egress(&interfaces));
+    }
+
+    #[test]
+    fn physical_and_shared_instance_peer_interfaces_are_network_egress() {
+        assert!(interface_stats_have_online_egress(&[json!({
+            "online": true,
+            "role": "normal",
+        })]));
+        assert!(interface_stats_have_online_egress(&[json!({
+            "online": true,
+            "role": "shared_instance_peer",
+        })]));
+    }
+
+    #[test]
+    fn missing_legacy_role_remains_eligible() {
+        assert!(interface_stats_have_online_egress(&[json!({
+            "online": true,
+        })]));
+    }
+}
+
 /// `None` until the first poll completes; callers should allow the attempt.
 pub fn any_interface_online_cached(state: &AppState) -> Option<bool> {
     let guard = state.last_stats.read().ok()?;
@@ -2903,10 +3054,16 @@ pub fn any_interface_online_cached(state: &AppState) -> Option<bool> {
         .get("interface_stats")?
         .get("interfaces")?
         .as_array()?;
-    Some(
-        arr.iter()
-            .any(|i| i.get("online").and_then(|o| o.as_bool()).unwrap_or(false)),
-    )
+    Some(interface_stats_have_online_egress(arr))
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AnnounceSendDisposition {
+    Queued,
+    AlreadyQueued,
+    #[default]
+    Deferred,
+    Failed,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -2914,34 +3071,52 @@ pub struct AnnounceSendReport {
     pub packets: usize,
     pub queued: usize,
     pub failed: usize,
+    pub disposition: AnnounceSendDisposition,
+    pub correlation_id: u64,
+    lxmf_delivery_queued: bool,
+    propagation_queued: bool,
+    lxst_queued: bool,
 }
 
-pub async fn send_announce_from_state(state: &AppState) -> AnnounceSendReport {
-    let activity_origin = state.activity_request_fence();
-    send_announce_from_state_inner(state, true, activity_origin).await
+struct AnnounceBurstExecution {
+    report: AnnounceSendReport,
+    activity_recorded: bool,
 }
 
-pub async fn send_manual_announce_from_state(state: &AppState) -> AnnounceSendReport {
+pub async fn send_announce_from_state(state: &Arc<AppState>) -> AnnounceSendReport {
     let activity_origin = state.activity_request_fence();
-    send_announce_from_state_inner(state, false, activity_origin).await
+    submit_announce_intent(state, AnnounceOrigin::Periodic, true, activity_origin).await
+}
+
+pub async fn send_manual_announce_from_state(state: &Arc<AppState>) -> AnnounceSendReport {
+    let activity_origin = state.activity_request_fence();
+    submit_announce_intent(state, AnnounceOrigin::Manual, false, activity_origin).await
 }
 
 pub async fn send_manual_announce_from_origin(
-    state: &AppState,
+    state: &Arc<AppState>,
     activity_origin: ActivityRequestFence,
 ) -> AnnounceSendReport {
-    send_announce_from_state_inner(state, false, activity_origin).await
+    submit_announce_intent(state, AnnounceOrigin::Manual, false, activity_origin).await
 }
 
 pub async fn send_announce_from_origin(
-    state: &AppState,
+    state: &Arc<AppState>,
     activity_origin: ActivityRequestFence,
 ) -> AnnounceSendReport {
-    send_announce_from_state_inner(state, true, activity_origin).await
+    submit_announce_intent(state, AnnounceOrigin::Periodic, true, activity_origin).await
+}
+
+pub async fn send_typed_announce_from_origin(
+    state: &Arc<AppState>,
+    origin: AnnounceOrigin,
+    activity_origin: ActivityRequestFence,
+) -> AnnounceSendReport {
+    submit_announce_intent(state, origin, true, activity_origin).await
 }
 
 pub async fn maybe_opportunistic_announce_before_user_send(
-    state: &AppState,
+    state: &Arc<AppState>,
     dest_hash: &str,
 ) -> AnnounceSendReport {
     let activity_origin = state.activity_request_fence();
@@ -2950,7 +3125,7 @@ pub async fn maybe_opportunistic_announce_before_user_send(
 }
 
 pub async fn maybe_opportunistic_announce_before_user_send_from_origin(
-    state: &AppState,
+    state: &Arc<AppState>,
     dest_hash: &str,
     activity_origin: ActivityRequestFence,
 ) -> AnnounceSendReport {
@@ -2978,16 +3153,6 @@ pub async fn maybe_opportunistic_announce_before_user_send_from_origin(
     if !rns_ready {
         return report;
     }
-    let lxmf_ready = state
-        .lxmf
-        .lock()
-        .ok()
-        .and_then(|lxmf| lxmf.as_ref().map(|_| ()))
-        .is_some();
-    if !lxmf_ready {
-        return report;
-    }
-
     let hash_for_db = dest_hash.to_string();
     let first_seen = db::spawn_db(state.db.clone(), move |p| {
         db::get_identity_activity_first_seen(&p, &hash_for_db)
@@ -3008,7 +3173,9 @@ pub async fn maybe_opportunistic_announce_before_user_send_from_origin(
     if !claim_opportunistic_announce(state, dest_hash) {
         return report;
     }
-    let announce_report = send_announce_from_origin(state, activity_origin).await;
+    let announce_report =
+        send_typed_announce_from_origin(state, AnnounceOrigin::Opportunistic, activity_origin)
+            .await;
     release_opportunistic_announce(state, dest_hash);
     announce_report
 }
@@ -3075,23 +3242,17 @@ fn schedule_startup_auto_announce(state: Arc<AppState>) {
             }
 
             if matches!(any_interface_online_cached(&state), Some(true)) {
-                let report = send_announce_from_origin(&state, activity_origin).await;
-                if report.queued > 0 {
-                    record_activity_if_current(&state, activity_origin, || {
-                        Ok(producer::rns_announce_activity(
-                            producer::RnsAnnounceActivity {
-                                transition: producer::RnsAnnounceTransition::Sent {
-                                    method: producer::AnnounceMethod::Startup,
-                                },
-                                interface: None,
-                            },
-                        ))
-                    });
+                let report = send_typed_announce_from_origin(
+                    &state,
+                    AnnounceOrigin::Startup,
+                    activity_origin,
+                )
+                .await;
+                if !matches!(report.disposition, AnnounceSendDisposition::Failed) {
                     tracing::info!(
-                        packets = report.packets,
-                        queued = report.queued,
-                        failed = report.failed,
-                        "startup auto-announce queued"
+                        correlation_id = report.correlation_id,
+                        disposition = ?report.disposition,
+                        "startup auto-announce admitted"
                     );
                 }
                 return;
@@ -3107,166 +3268,638 @@ fn schedule_startup_auto_announce(state: Arc<AppState>) {
     });
 }
 
-async fn send_announce_from_state_inner(
-    state: &AppState,
+async fn submit_announce_intent(
+    state: &Arc<AppState>,
+    origin: AnnounceOrigin,
     require_cached_online: bool,
     activity_origin: ActivityRequestFence,
 ) -> AnnounceSendReport {
-    let mut report = AnnounceSendReport::default();
-    if require_cached_online && matches!(any_interface_online_cached(state), Some(false)) {
-        tracing::warn!("announce skipped: no interfaces online");
-        return report;
+    let intent = AnnounceIntent {
+        origin,
+        revisions: state.announce_semantic_revision(),
+    };
+    let admission = match state.announce_coordinator.lock() {
+        Ok(mut coordinator) => coordinator.admit(intent, Instant::now()),
+        Err(_) => {
+            return AnnounceSendReport {
+                failed: 1,
+                disposition: AnnounceSendDisposition::Failed,
+                ..AnnounceSendReport::default()
+            };
+        }
+    };
+
+    let correlation_id = match admission {
+        AnnounceAdmission::AlreadyQueued { correlation_id } => {
+            tracing::info!(
+                correlation_id,
+                origin = origin.as_str(),
+                "presence announce request already covered"
+            );
+            return AnnounceSendReport {
+                disposition: AnnounceSendDisposition::AlreadyQueued,
+                correlation_id,
+                ..AnnounceSendReport::default()
+            };
+        }
+        AnnounceAdmission::Deferred { correlation_id } => {
+            tracing::info!(
+                correlation_id,
+                origin = origin.as_str(),
+                "presence announce request deferred to semantic follow-up"
+            );
+            return AnnounceSendReport {
+                disposition: AnnounceSendDisposition::Deferred,
+                correlation_id,
+                ..AnnounceSendReport::default()
+            };
+        }
+        AnnounceAdmission::Lead { correlation_id } => correlation_id,
+    };
+
+    // Admission is the synchronous boundary. Packet construction, transport
+    // queueing, semantic follow-ups and Activity all belong to this one
+    // background lifecycle owner; an IPC caller must never wait for LXMF.
+    let lifecycle_state = Arc::clone(state);
+    tokio::spawn(async move {
+        run_announce_lifecycle(
+            lifecycle_state,
+            correlation_id,
+            require_cached_online,
+            activity_origin,
+        )
+        .await;
+    });
+
+    AnnounceSendReport {
+        disposition: AnnounceSendDisposition::Queued,
+        correlation_id,
+        ..AnnounceSendReport::default()
     }
-    let (packets, transport_tx) = {
-        let mut packets: Vec<([u8; 16], Vec<u8>, bool)> = Vec::new();
-        let lock_wait_started = std::time::Instant::now();
-        if let Ok(mut lxmf) = state.lxmf.lock() {
-            if let Some(mgr) = lxmf.as_mut() {
-                let waited = lock_wait_started.elapsed();
-                if waited > Duration::from_secs(1) {
+}
+
+async fn run_announce_lifecycle(
+    state: Arc<AppState>,
+    correlation_id: u64,
+    require_cached_online: bool,
+    activity_origin: ActivityRequestFence,
+) {
+    let mut current_correlation_id = correlation_id;
+    let mut current_activity_origin = activity_origin;
+    loop {
+        let leadership = state
+            .announce_coordinator
+            .lock()
+            .ok()
+            .and_then(|coordinator| coordinator.leadership(current_correlation_id));
+        let Some(leadership) = leadership else {
+            tracing::warn!(
+                correlation_id = current_correlation_id,
+                "presence announce lifecycle lost coordinator leadership"
+            );
+            return;
+        };
+
+        let execution = if state.is_current_activity_origin_fence(current_activity_origin)
+            && leadership.revisions.identity == state.current_identity_session_generation()
+        {
+            execute_announce_burst(
+                &state,
+                require_cached_online,
+                current_activity_origin,
+                &leadership,
+            )
+            .await
+        } else {
+            tracing::info!(
+                correlation_id = leadership.correlation_id,
+                "stale presence announce suppressed"
+            );
+            AnnounceBurstExecution {
+                report: AnnounceSendReport {
+                    disposition: AnnounceSendDisposition::Failed,
+                    correlation_id: leadership.correlation_id,
+                    ..AnnounceSendReport::default()
+                },
+                activity_recorded: false,
+            }
+        };
+        let report = execution.report;
+        // Capture origins merged while the builder/transport work was in
+        // progress before recording the lifecycle's single public entry.
+        let completed_leadership = state
+            .announce_coordinator
+            .lock()
+            .ok()
+            .and_then(|coordinator| coordinator.leadership(leadership.correlation_id))
+            .unwrap_or(leadership);
+        if !execution.activity_recorded {
+            record_presence_lifecycle_activity(
+                &state,
+                current_activity_origin,
+                &completed_leadership,
+                &report,
+            );
+        }
+
+        let success = matches!(report.disposition, AnnounceSendDisposition::Queued);
+        let follow_up = state
+            .announce_coordinator
+            .lock()
+            .ok()
+            .and_then(|mut coordinator| {
+                coordinator.finish(completed_leadership.correlation_id, success, Instant::now())
+            });
+        let Some(follow_up) = follow_up else {
+            break;
+        };
+
+        // Delivery ratchets intentionally coalesce identical wall-clock
+        // announce material. A semantic follow-up must cross that boundary
+        // before building its new complete presence bundle.
+        tokio::time::sleep(Duration::from_millis(1_050)).await;
+        current_correlation_id = follow_up.correlation_id;
+        current_activity_origin = state.activity_request_fence();
+    }
+}
+
+fn announce_activity_method(origins: &[AnnounceOrigin]) -> producer::AnnounceMethod {
+    if origins.len() != 1 {
+        return producer::AnnounceMethod::Coordinated;
+    }
+    match origins[0] {
+        AnnounceOrigin::Manual => producer::AnnounceMethod::Manual,
+        AnnounceOrigin::Startup => producer::AnnounceMethod::Startup,
+        AnnounceOrigin::Periodic => producer::AnnounceMethod::Periodic,
+        AnnounceOrigin::InterfaceOnline => producer::AnnounceMethod::InterfaceOnline,
+        AnnounceOrigin::Opportunistic => producer::AnnounceMethod::Opportunistic,
+        AnnounceOrigin::IdentityChanged => producer::AnnounceMethod::IdentityChanged,
+        AnnounceOrigin::ProfileChanged => producer::AnnounceMethod::ProfileChanged,
+        AnnounceOrigin::PropagationChanged => producer::AnnounceMethod::PropagationChanged,
+    }
+}
+
+fn announce_activity_components(report: &AnnounceSendReport) -> producer::AnnounceComponents {
+    match (report.propagation_queued, report.lxst_queued) {
+        (false, false) => producer::AnnounceComponents::LxmfDelivery,
+        (false, true) => producer::AnnounceComponents::LxmfDeliveryAndLxst,
+        (true, false) => producer::AnnounceComponents::LxmfDeliveryAndPropagation,
+        (true, true) => producer::AnnounceComponents::LxmfDeliveryPropagationAndLxst,
+    }
+}
+
+fn record_presence_lifecycle_activity(
+    state: &AppState,
+    activity_origin: ActivityRequestFence,
+    leadership: &AnnounceLeadership,
+    report: &AnnounceSendReport,
+) {
+    let Some(event) = presence_lifecycle_activity_event(leadership, report) else {
+        return;
+    };
+    record_activity_if_current(state, activity_origin, || Ok(event));
+}
+
+/// Record while `identity_switch_lock` is held. This is the final wire-send
+/// ownership seam: the same fence that authorizes transport admission also
+/// authorizes the one correlated Activity result before the lock is released.
+fn record_presence_lifecycle_activity_after_identity_lock(
+    state: &AppState,
+    activity_origin: ActivityRequestFence,
+    leadership: &AnnounceLeadership,
+    report: &AnnounceSendReport,
+) {
+    let Some(event) = presence_lifecycle_activity_event(leadership, report) else {
+        return;
+    };
+    let _ = state.activity.record_event_fenced(
+        || state.is_current_activity_request_fence_after_identity_lock(activity_origin),
+        || Ok(event),
+    );
+}
+
+fn record_current_presence_lifecycle_activity_after_identity_lock(
+    state: &AppState,
+    activity_origin: ActivityRequestFence,
+    leadership: &AnnounceLeadership,
+    report: &AnnounceSendReport,
+) {
+    let completed_leadership = state
+        .announce_coordinator
+        .lock()
+        .ok()
+        .and_then(|coordinator| coordinator.leadership(leadership.correlation_id))
+        .unwrap_or_else(|| leadership.clone());
+    record_presence_lifecycle_activity_after_identity_lock(
+        state,
+        activity_origin,
+        &completed_leadership,
+        report,
+    );
+}
+
+fn presence_lifecycle_activity_event(
+    leadership: &AnnounceLeadership,
+    report: &AnnounceSendReport,
+) -> Option<ProducerEvent> {
+    if report.disposition == AnnounceSendDisposition::AlreadyQueued {
+        return None;
+    }
+    let transition = if report.disposition == AnnounceSendDisposition::Queued
+        && report.lxmf_delivery_queued
+        && report.failed == 0
+    {
+        producer::RnsAnnounceTransition::Queued {
+            method: announce_activity_method(&leadership.origins),
+            components: announce_activity_components(report),
+            count: report.queued as u64,
+            correlation_id: leadership.activity_correlation_id,
+        }
+    } else {
+        producer::RnsAnnounceTransition::Failed {
+            method: announce_activity_method(&leadership.origins),
+            reason: if report.failed > 0 {
+                producer::AnnounceFailureReason::QueueFailed
+            } else {
+                producer::AnnounceFailureReason::NotReady
+            },
+        }
+    };
+    Some(producer::rns_announce_activity(
+        producer::RnsAnnounceActivity {
+            transition,
+            interface: None,
+        },
+    ))
+}
+
+type PresenceAnnouncePacket = ([u8; 16], Vec<u8>, bool);
+
+enum PresencePacketBuildAttempt {
+    Built {
+        packets: Vec<PresenceAnnouncePacket>,
+        delivery_coalesced: bool,
+        delivery_failed: bool,
+    },
+    Busy,
+    Poisoned,
+}
+
+fn try_build_presence_announce_packets(
+    state: &AppState,
+    correlation_id: u64,
+) -> PresencePacketBuildAttempt {
+    let mut lxmf = match state.lxmf.try_lock() {
+        Ok(lxmf) => lxmf,
+        Err(std::sync::TryLockError::WouldBlock) => return PresencePacketBuildAttempt::Busy,
+        Err(std::sync::TryLockError::Poisoned(_)) => {
+            return PresencePacketBuildAttempt::Poisoned;
+        }
+    };
+    let mut packets = Vec::new();
+    let mut delivery_coalesced = false;
+    let mut delivery_failed = false;
+    if let Some(mgr) = lxmf.as_mut() {
+        let propagation_packet = if state
+            .propagation_node_hosting_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            match mgr.create_propagation_announce_packet() {
+                Ok(raw) => Some((mgr.propagation_dest_hash, raw, false)),
+                Err(error) => {
+                    delivery_failed = true;
                     tracing::warn!(
-                        waited_ms = waited.as_millis() as u64,
-                        "announce waited on lxmf manager lock"
+                        correlation_id,
+                        %error,
+                        "propagation announce component build failed"
                     );
+                    None
                 }
-                if let Ok(raw) = mgr.create_announce_packet() {
+            }
+        } else {
+            None
+        };
+        // Build the delivery component last because its ratchet owns
+        // wall-clock coalescing state. A failed sibling build must not consume
+        // that ratchet when no bundle can be admitted.
+        if !delivery_failed {
+            match mgr.create_coordinated_announce_packet() {
+                Ok(raw) => {
                     packets.push((mgr.lxmf_dest_hash, raw, true));
+                    packets.extend(propagation_packet);
                 }
-                if state
-                    .propagation_node_hosting_enabled
-                    .load(std::sync::atomic::Ordering::Relaxed)
-                {
-                    if let Ok(raw) = mgr.create_propagation_announce_packet() {
-                        packets.push((mgr.propagation_dest_hash, raw, false));
-                    }
+                Err(lxmf::CoordinatedDeliveryAnnounceError::Coalesced) => {
+                    delivery_coalesced = true;
+                }
+                Err(lxmf::CoordinatedDeliveryAnnounceError::Failed(error)) => {
+                    delivery_failed = true;
+                    tracing::warn!(
+                        correlation_id,
+                        %error,
+                        "LXMF delivery announce component build failed"
+                    );
                 }
             }
         }
-        let tx = state
-            .rns
-            .read()
-            .ok()
-            .and_then(|r| r.as_ref().map(|mgr| mgr.handle.transport_tx.clone()));
-        (packets, tx)
+    }
+    PresencePacketBuildAttempt::Built {
+        packets,
+        delivery_coalesced,
+        delivery_failed,
+    }
+}
+
+async fn execute_announce_burst(
+    state: &AppState,
+    require_cached_online: bool,
+    activity_origin: ActivityRequestFence,
+    leadership: &AnnounceLeadership,
+) -> AnnounceBurstExecution {
+    let mut report = AnnounceSendReport {
+        correlation_id: leadership.correlation_id,
+        ..AnnounceSendReport::default()
+    };
+    let origin_set = leadership
+        .origins
+        .iter()
+        .map(|origin| origin.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    tracing::info!(
+        correlation_id = leadership.correlation_id,
+        origins = %origin_set,
+        identity_revision = leadership.revisions.identity,
+        content_revision = leadership.revisions.content,
+        interface_revision = leadership.revisions.interface,
+        "presence announce burst started"
+    );
+    if require_cached_online && matches!(any_interface_online_cached(state), Some(false)) {
+        tracing::warn!("announce skipped: no interfaces online");
+        report.failed = 1;
+        report.disposition = AnnounceSendDisposition::Failed;
+        return AnnounceBurstExecution {
+            report,
+            activity_recorded: false,
+        };
+    }
+    let lock_deadline = std::time::Instant::now() + ANNOUNCE_LXMF_BUILD_RETRY_WINDOW;
+    let (packets, delivery_failed) = loop {
+        if !state.is_current_activity_origin_fence(activity_origin) {
+            tracing::info!(
+                correlation_id = leadership.correlation_id,
+                "stale presence announce suppressed while waiting for LXMF"
+            );
+            break (Vec::new(), true);
+        }
+        match try_build_presence_announce_packets(state, leadership.correlation_id) {
+            PresencePacketBuildAttempt::Built {
+                packets,
+                delivery_coalesced: false,
+                delivery_failed,
+            } => break (packets, delivery_failed),
+            PresencePacketBuildAttempt::Built {
+                delivery_coalesced: true,
+                ..
+            } if std::time::Instant::now() < lock_deadline => {
+                // The delivery ratchet commits before returning packet bytes.
+                // Coalescing therefore proves only a same-second build, never
+                // prior transport acceptance. Retry into the next wall-clock
+                // interval instead of promoting it to false success.
+                tokio::time::sleep(ANNOUNCE_LXMF_BUILD_RETRY_INTERVAL).await;
+            }
+            PresencePacketBuildAttempt::Built {
+                delivery_coalesced: true,
+                ..
+            } => {
+                tracing::warn!(
+                    correlation_id = leadership.correlation_id,
+                    "presence announce retry window expired on delivery ratchet coalescing"
+                );
+                break (Vec::new(), true);
+            }
+            PresencePacketBuildAttempt::Busy if std::time::Instant::now() < lock_deadline => {
+                tokio::time::sleep(ANNOUNCE_LXMF_BUILD_RETRY_INTERVAL).await;
+            }
+            PresencePacketBuildAttempt::Busy => {
+                tracing::warn!(
+                    correlation_id = leadership.correlation_id,
+                    "presence announce retry window expired while the LXMF manager was busy"
+                );
+                break (Vec::new(), true);
+            }
+            PresencePacketBuildAttempt::Poisoned => {
+                tracing::warn!(
+                    correlation_id = leadership.correlation_id,
+                    "presence announce failed because the LXMF manager lock is unavailable"
+                );
+                break (Vec::new(), true);
+            }
+        }
     };
     report.packets = packets.len();
 
+    if delivery_failed || !packets.iter().any(|(_, _, is_delivery)| *is_delivery) {
+        report.failed = 1;
+        report.disposition = AnnounceSendDisposition::Failed;
+        return AnnounceBurstExecution {
+            report,
+            activity_recorded: false,
+        };
+    }
+
+    // Bind the prepared bytes and their final transport admission to the same
+    // exact identity/runtime lifecycle span. This covers same-identity RNS
+    // replacement as well as identity switches, and the guard remains held
+    // through the bounded channel admissions and correlated Activity record.
+    let _identity_lifecycle = state.identity_switch_lock.lock().await;
+    if !state.is_current_activity_request_fence_after_identity_lock(activity_origin) {
+        tracing::info!(
+            correlation_id = leadership.correlation_id,
+            "stale presence announce suppressed before transport admission"
+        );
+        report.failed = 1;
+        report.disposition = AnnounceSendDisposition::Failed;
+        return AnnounceBurstExecution {
+            report,
+            activity_recorded: false,
+        };
+    }
+    if matches!(any_interface_online_cached(state), Some(false)) {
+        tracing::warn!(
+            correlation_id = leadership.correlation_id,
+            "announce skipped after retry because no interface remains online"
+        );
+        report.failed = 1;
+        report.disposition = AnnounceSendDisposition::Failed;
+        record_current_presence_lifecycle_activity_after_identity_lock(
+            state,
+            activity_origin,
+            leadership,
+            &report,
+        );
+        return AnnounceBurstExecution {
+            report,
+            activity_recorded: true,
+        };
+    }
+    let transport_tx = state
+        .rns
+        .read()
+        .ok()
+        .and_then(|r| r.as_ref().map(|mgr| mgr.handle.transport_tx.clone()));
     let Some(tx) = transport_tx else {
-        record_activity_if_current(state, activity_origin, || {
-            Ok(producer::rns_announce_activity(
-                producer::RnsAnnounceActivity {
-                    transition: producer::RnsAnnounceTransition::Failed {
-                        method: producer::AnnounceMethod::Transport,
-                        reason: producer::AnnounceFailureReason::TransportUnavailable,
-                    },
-                    interface: None,
-                },
-            ))
-        });
-        return report;
+        report.failed = 1;
+        report.disposition = AnnounceSendDisposition::Failed;
+        record_current_presence_lifecycle_activity_after_identity_lock(
+            state,
+            activity_origin,
+            leadership,
+            &report,
+        );
+        return AnnounceBurstExecution {
+            report,
+            activity_recorded: true,
+        };
     };
 
     for (destination_hash, raw, is_lxmf_delivery) in packets {
-        match tx
-            .send(rns_transport::messages::TransportMessage::Outbound(
-                rns_transport::messages::OutboundRequest {
+        let packet_len = raw.len();
+        let fingerprint = hex::encode(&rns_crypto::sha::sha256(&raw)[..6]);
+        let (dispatch_tx, dispatch_rx) = tokio::sync::oneshot::channel();
+        let admitted = tokio::time::timeout(
+            ANNOUNCE_QUEUE_ADMISSION_WAIT,
+            tx.send(rns_transport::messages::TransportMessage::SendPacket {
+                request: rns_transport::messages::OutboundRequest {
                     raw: Bytes::from(raw),
                     destination_hash,
                 },
-            ))
-            .await
-        {
-            Ok(_) => {
+                attached_interface: None,
+                receipt: None,
+                result_tx: dispatch_tx,
+            }),
+        )
+        .await;
+        let dispatch = if matches!(admitted, Ok(Ok(()))) {
+            tokio::time::timeout(ANNOUNCE_INTERFACE_DISPATCH_WAIT, dispatch_rx)
+                .await
+                .ok()
+                .and_then(Result::ok)
+        } else {
+            None
+        };
+        match dispatch {
+            Some(rns_transport::messages::OutboundDispatchResult::Sent) => {
                 report.queued += 1;
                 if is_lxmf_delivery {
+                    report.lxmf_delivery_queued = true;
                     state
                         .last_lxmf_delivery_announce_at_ms
                         .store(unix_now_ms(), Ordering::Relaxed);
+                } else {
+                    report.propagation_queued = true;
                 }
-                tracing::info!(dest = %short_id(&hex::encode(destination_hash)), "announce sent");
-                record_activity_if_current(state, activity_origin, || {
-                    Ok(producer::rns_announce_activity(
-                        producer::RnsAnnounceActivity {
-                            transition: producer::RnsAnnounceTransition::Sent {
-                                method: if is_lxmf_delivery {
-                                    producer::AnnounceMethod::LxmfDelivery
-                                } else {
-                                    producer::AnnounceMethod::Transport
-                                },
-                            },
-                            interface: None,
-                        },
-                    ))
-                });
+                tracing::info!(
+                    correlation_id = leadership.correlation_id,
+                    dest = %short_id(&hex::encode(destination_hash)),
+                    packet_len,
+                    packet_fingerprint = %fingerprint,
+                    "announce accepted by Reticulum interface layer"
+                );
             }
-            Err(_) => {
+            Some(rns_transport::messages::OutboundDispatchResult::NoInterface) => {
                 report.failed += 1;
-                tracing::warn!(reason = "send_failed", "Failed to send announce");
-                record_activity_if_current(state, activity_origin, || {
-                    Ok(producer::rns_announce_activity(
-                        producer::RnsAnnounceActivity {
-                            transition: producer::RnsAnnounceTransition::Failed {
-                                method: if is_lxmf_delivery {
-                                    producer::AnnounceMethod::LxmfDelivery
-                                } else {
-                                    producer::AnnounceMethod::Transport
-                                },
-                                reason: producer::AnnounceFailureReason::QueueFailed,
-                            },
-                            interface: None,
-                        },
-                    ))
-                });
+                tracing::warn!(
+                    correlation_id = leadership.correlation_id,
+                    reason = "no_interface",
+                    dest = %short_id(&hex::encode(destination_hash)),
+                    packet_len,
+                    packet_fingerprint = %fingerprint,
+                    "No Reticulum interface accepted announce"
+                );
+                if is_lxmf_delivery {
+                    break;
+                }
+            }
+            Some(rns_transport::messages::OutboundDispatchResult::ReceiptCollision) | None => {
+                report.failed += 1;
+                tracing::warn!(
+                    correlation_id = leadership.correlation_id,
+                    reason = "dispatch_failed",
+                    dest = %short_id(&hex::encode(destination_hash)),
+                    packet_len,
+                    packet_fingerprint = %fingerprint,
+                    "Failed to dispatch announce to Reticulum interface layer"
+                );
+                if is_lxmf_delivery {
+                    // No sibling presence component may be admitted without
+                    // the delivery component that binds it to this identity.
+                    break;
+                }
             }
         }
     }
 
     #[cfg(feature = "lxst-voice")]
-    match voice::announce_if_running(state).await {
-        Ok(true) => {
-            report.packets += 1;
-            report.queued += 1;
-            tracing::info!("LXST telephony announce queued");
-            record_activity_if_current(state, activity_origin, || {
-                Ok(producer::rns_announce_activity(
-                    producer::RnsAnnounceActivity {
-                        transition: producer::RnsAnnounceTransition::Sent {
-                            method: producer::AnnounceMethod::LxstService,
-                        },
-                        interface: None,
-                    },
-                ))
-            });
+    if report.lxmf_delivery_queued {
+        match tokio::time::timeout(
+            ANNOUNCE_QUEUE_ADMISSION_WAIT,
+            voice::announce_if_running(state),
+        )
+        .await
+        {
+            Ok(Ok(true)) => {
+                report.packets += 1;
+                report.queued += 1;
+                report.lxst_queued = true;
+                tracing::info!("LXST telephony announce queued");
+            }
+            Ok(Ok(false)) => {
+                tracing::debug!("LXST telephony announce skipped: voice service is not running");
+            }
+            Ok(Err(_)) | Err(_) => {
+                report.packets += 1;
+                report.failed += 1;
+                tracing::warn!(
+                    reason = "queue_failed",
+                    "Failed to queue LXST telephony announce"
+                );
+            }
         }
-        Ok(false) => {
-            tracing::debug!("LXST telephony announce skipped: voice service is not running");
-        }
-        Err(_) => {
-            report.packets += 1;
-            report.failed += 1;
-            tracing::warn!(
-                reason = "queue_failed",
-                "Failed to queue LXST telephony announce"
-            );
-            record_activity_if_current(state, activity_origin, || {
-                Ok(producer::rns_announce_activity(
-                    producer::RnsAnnounceActivity {
-                        transition: producer::RnsAnnounceTransition::Failed {
-                            method: producer::AnnounceMethod::LxstService,
-                            reason: producer::AnnounceFailureReason::QueueFailed,
-                        },
-                        interface: None,
-                    },
-                ))
-            });
-        }
+    } else {
+        tracing::debug!(
+            correlation_id = leadership.correlation_id,
+            "LXST telephony announce suppressed because delivery was not admitted"
+        );
     }
 
-    report
+    report.disposition = if report.queued > 0 && report.failed == 0 {
+        AnnounceSendDisposition::Queued
+    } else {
+        AnnounceSendDisposition::Failed
+    };
+    tracing::info!(
+        correlation_id = leadership.correlation_id,
+        packets = report.packets,
+        queued = report.queued,
+        failed = report.failed,
+        disposition = ?report.disposition,
+        "presence announce burst completed"
+    );
+    record_current_presence_lifecycle_activity_after_identity_lock(
+        state,
+        activity_origin,
+        leadership,
+        &report,
+    );
+    AnnounceBurstExecution {
+        report,
+        activity_recorded: true,
+    }
 }
 
 // FIELD_FILE_ATTACHMENTS 0x05 = msgpack `[[filename, bytes], …]`.
 // FIELD_IMAGE            0x06 = msgpack `[format, bytes]` (`png`, `webp`, ...).
+// FIELD_AUDIO            0x07 = msgpack `[mode, bytes]`.
 struct ExtractedAttachment {
     file_name: String,
     stored_name: String,
@@ -3275,7 +3908,7 @@ struct ExtractedAttachment {
 
 fn extract_and_save_attachment(
     state: &AppState,
-    msg: &lxmf_core::message::LxMessage,
+    msg: &lxmf_core::message_api::LxMessage,
 ) -> Option<ExtractedAttachment> {
     if let Ok(Some((file_name, file_data))) = msg.first_file_attachment() {
         if let Ok(mut lxmf) = state.lxmf.lock() {
@@ -3346,6 +3979,128 @@ fn extract_and_save_attachment(
     }
 
     None
+}
+
+#[derive(Debug, Clone)]
+struct ExtractedAudio {
+    mode: u8,
+    stored_name: String,
+    supported: bool,
+}
+
+fn extracted_audio_json(audio: &ExtractedAudio) -> Value {
+    if audio.stored_name == db::ATTACHMENT_UNAVAILABLE_STORED_NAME {
+        json!({
+            "mode": audio.mode,
+            "supported": false,
+            "unavailable": true,
+        })
+    } else {
+        json!({
+            "mode": audio.mode,
+            "stored_name": audio.stored_name,
+            "supported": audio.supported,
+        })
+    }
+}
+
+/// Extract a structurally valid native LXMF audio field after the shared
+/// authentication, policy and deduplication gates. Media errors are local to
+/// this optional field: they never reject the enclosing message or its proof.
+fn extract_and_save_audio(
+    state: &AppState,
+    msg: &lxmf_core::message_api::LxMessage,
+) -> Option<ExtractedAudio> {
+    let audio = match msg.audio_field() {
+        Ok(audio) => audio?,
+        Err(error) => {
+            tracing::warn!(%error, "ignoring malformed inbound LXMF audio field");
+            return None;
+        }
+    };
+    let mode = audio.mode;
+    let unavailable = || ExtractedAudio {
+        mode,
+        stored_name: db::ATTACHMENT_UNAVAILABLE_STORED_NAME.to_string(),
+        supported: false,
+    };
+    if audio.bytes.len() > lxmf::MAX_AUDIO_FIELD_BYTES {
+        tracing::warn!(
+            mode,
+            size = audio.bytes.len(),
+            max_size = lxmf::MAX_AUDIO_FIELD_BYTES,
+            "inbound LXMF audio exceeds persistence limit"
+        );
+        return Some(unavailable());
+    }
+
+    let is_ogg_opus = mode == lxmf_core::constants::AM_OPUS_OGG;
+    #[cfg(feature = "lxst-voice")]
+    if is_ogg_opus {
+        if let Err(error) = voice_memo::inspect_voice_memo(audio.bytes) {
+            tracing::warn!(%error, size = audio.bytes.len(), "inbound Ogg/Opus audio is invalid");
+            return Some(unavailable());
+        }
+    }
+
+    let file_name = if is_ogg_opus {
+        lxmf::AUDIO_MESSAGE_FILE_NAME.to_string()
+    } else {
+        format!("Audio message {mode:02x}.bin")
+    };
+    let stored_name = state.lxmf.lock().ok().and_then(|mut lxmf| {
+        lxmf.as_mut()
+            .and_then(|mgr| mgr.save_attachment(&file_name, audio.bytes).ok())
+    });
+    match stored_name {
+        Some(stored_name) => {
+            tracing::info!(
+                mode,
+                size = audio.bytes.len(),
+                "extracted inbound LXMF audio"
+            );
+            Some(ExtractedAudio {
+                mode,
+                stored_name,
+                supported: is_ogg_opus && cfg!(feature = "lxst-voice"),
+            })
+        }
+        None => {
+            tracing::warn!(
+                mode,
+                size = audio.bytes.len(),
+                "failed to persist inbound LXMF audio"
+            );
+            Some(unavailable())
+        }
+    }
+}
+
+fn remove_inbound_media_after_persistence_failure(
+    state: &AppState,
+    attachment: Option<&ExtractedAttachment>,
+    audio: Option<&ExtractedAudio>,
+) {
+    let files_dir = state
+        .lxmf
+        .lock()
+        .ok()
+        .and_then(|lxmf| lxmf.as_ref().map(lxmf::LxmfManager::files_dir));
+    let Some(files_dir) = files_dir else {
+        return;
+    };
+    let stored_names = attachment
+        .map(|attachment| attachment.stored_name.as_str())
+        .into_iter()
+        .chain(audio.map(|audio| audio.stored_name.as_str()));
+    for stored_name in stored_names {
+        if stored_name == db::ATTACHMENT_UNAVAILABLE_STORED_NAME {
+            continue;
+        }
+        if let Some(sanitized) = lxmf::sanitize_stored_file_name(stored_name) {
+            let _ = std::fs::remove_file(files_dir.join(sanitized));
+        }
+    }
 }
 
 fn clamp_chat_field(value: &str, max_chars: usize) -> String {
@@ -3503,6 +4258,147 @@ async fn answer_lxmf_path_request(
     }
 }
 
+/// Handle authenticated Opportunistic proofs on their dedicated per-session
+/// channel. They bypass ordinary bounded destination ingress entirely, while
+/// sharing the same terminal completion path as legacy destination events.
+async fn handle_lxmf_delivery_proofs(
+    state: Arc<AppState>,
+    mut proof_rx: tokio::sync::mpsc::UnboundedReceiver<
+        rns_transport::link_messages::DestinationEvent,
+    >,
+    shutdown: rns_runtime::lifecycle::ShutdownSignal,
+) {
+    use rns_transport::link_messages::DestinationEvent;
+
+    loop {
+        let event = tokio::select! {
+            biased;
+            _ = shutdown.wait() => break,
+            event = proof_rx.recv() => match event {
+                Some(event) => event,
+                None => break,
+            },
+        };
+        let activity_origin = state.activity_request_fence();
+        if shutdown.is_triggered() {
+            break;
+        }
+        if let DestinationEvent::DeliveryProof { msg_id, rtt } = event {
+            complete_authenticated_lxmf_delivery_proof(&state, &msg_id, rtt, activity_origin).await;
+        } else {
+            tracing::warn!(
+                reason = "unexpected_event",
+                "ignored non-proof event on dedicated LXMF proof channel"
+            );
+        }
+    }
+}
+
+async fn complete_authenticated_lxmf_delivery_proof(
+    state: &Arc<AppState>,
+    msg_id: &str,
+    rtt: Option<Duration>,
+    activity_origin: ActivityRequestFence,
+) {
+    // Reticulum has already authenticated this proof. Rejoin it with the
+    // retained Opportunistic LXMF message so callbacks and ticket
+    // last-delivery accounting advance only on actual delivery.
+    let completed = state
+        .lxmf
+        .lock()
+        .ok()
+        .and_then(|mut lxmf| {
+            lxmf.as_mut()
+                .map(|manager| manager.complete_opportunistic_delivery(msg_id))
+        })
+        .unwrap_or(false);
+    if !completed {
+        tracing::debug!(
+            msg_id = %short_id(msg_id),
+            "ignored delivery proof without a matching in-flight Opportunistic message"
+        );
+        return;
+    }
+    let rtt_ms = rtt.map(|d| d.as_secs_f64() * 1000.0);
+    let msg_id_for_db = msg_id.to_string();
+    let identity_for_db = helpers::active_identity_id(state);
+    // One hop: flip the state and read the method back for the emit.
+    let (updated, method) = db::spawn_db(state.db.clone(), move |p| {
+        let updated =
+            db::update_message_state(&p, &msg_id_for_db, &identity_for_db, "delivered", rtt_ms);
+        let method = db::get_message_delivery_method(&p, &msg_id_for_db, &identity_for_db);
+        (updated, method)
+    })
+    .await
+    .expect("db task panicked");
+    if !updated {
+        tracing::debug!(
+            msg_id = %short_id(msg_id),
+            reason = "terminal_state_preserved",
+            "suppressed a late delivery proof state regression"
+        );
+        return;
+    }
+    if let Ok(mut times) = state.message_send_times.lock() {
+        times.remove(msg_id);
+    }
+    let client_msg_id = state
+        .msg_id_map
+        .lock()
+        .ok()
+        .and_then(|mut map| map.remove(msg_id));
+    state.emit_to_all(
+        "lxmf_step",
+        json!({
+            "step": "delivered",
+            "msg_id": msg_id,
+            "client_msg_id": client_msg_id,
+            "rtt_ms": rtt_ms,
+            "method": method,
+        }),
+    );
+    tracing::info!(msg_id = %short_id(msg_id), rtt_ms = ?rtt_ms, "message delivery confirmed");
+    record_activity_if_current(state, activity_origin, || {
+        let message = producer::MessageId::from_hex(msg_id)?;
+        let method = method
+            .as_deref()
+            .and_then(producer::LxmfDeliveryMethod::from_code);
+        let rtt_ms = rtt_ms.map(|value| {
+            value
+                .round()
+                .clamp(0.0, u64::MAX as f64)
+                .min(u64::MAX as f64) as u64
+        });
+        Ok(producer::lxmf_delivery_state_changed(
+            producer::LxmfDeliveryStateChanged {
+                message,
+                state: producer::LxmfDeliveryState::Delivered,
+                method,
+                rtt_ms,
+                failure_reason: None,
+            },
+        ))
+    });
+    // Proofs do not necessarily reappear in the LXMF manager's polled state
+    // changes. Complete the originating game action here as well, so its UI
+    // cannot remain stuck on "Sending" after a valid proof.
+    let lrgp_meta = state
+        .lrgp_msg_to_session
+        .lock()
+        .ok()
+        .and_then(|mut map| map.remove(msg_id));
+    if let Some(meta) = lrgp_meta {
+        update_game_session_delivery_state(
+            state,
+            &meta.session_id,
+            &meta.identity_id,
+            &meta.contact_hash,
+            "delivered",
+        )
+        .await;
+    }
+}
+
 /// Handle inbound LXMF messages delivered by the transport actor.
 async fn handle_inbound_lxmf(
     state: Arc<AppState>,
@@ -3528,99 +4424,8 @@ async fn handle_inbound_lxmf(
         if shutdown.is_triggered() {
             break;
         }
-        if let DestinationEvent::DeliveryProof {
-            ref msg_id,
-            ref rtt,
-        } = event
-        {
-            // Reticulum has already authenticated this proof. Rejoin it with
-            // the retained Opportunistic LXMF message so callbacks and ticket
-            // last-delivery accounting advance only on actual delivery.
-            let completed = state
-                .lxmf
-                .lock()
-                .ok()
-                .and_then(|mut lxmf| {
-                    lxmf.as_mut()
-                        .map(|manager| manager.complete_opportunistic_delivery(msg_id))
-                })
-                .unwrap_or(false);
-            if !completed {
-                tracing::debug!(
-                    msg_id = %short_id(msg_id),
-                    "ignored delivery proof without a matching in-flight Opportunistic message"
-                );
-                continue;
-            }
-            let rtt_ms = rtt.map(|d| d.as_secs_f64() * 1000.0);
-            let msg_id_for_db = msg_id.clone();
-            let identity_for_db = helpers::active_identity_id(&state);
-            // One hop: flip the state and read the method back for the emit.
-            let method = db::spawn_db(state.db.clone(), move |p| {
-                db::update_message_state(&p, &msg_id_for_db, &identity_for_db, "delivered", rtt_ms);
-                db::get_message_delivery_method(&p, &msg_id_for_db, &identity_for_db)
-            })
-            .await
-            .expect("db task panicked");
-            if let Ok(mut times) = state.message_send_times.lock() {
-                times.remove(msg_id);
-            }
-            let client_msg_id = state
-                .msg_id_map
-                .lock()
-                .ok()
-                .and_then(|mut map| map.remove(msg_id));
-            state.emit_to_all(
-                "lxmf_step",
-                json!({
-                    "step": "delivered",
-                    "msg_id": msg_id,
-                    "client_msg_id": client_msg_id,
-                    "rtt_ms": rtt_ms,
-                    "method": method,
-                }),
-            );
-            tracing::info!(msg_id = %short_id(msg_id), rtt_ms = ?rtt_ms, "message delivery confirmed");
-            record_activity_if_current(&state, activity_origin, || {
-                let message = producer::MessageId::from_hex(msg_id)?;
-                let method = method
-                    .as_deref()
-                    .and_then(producer::LxmfDeliveryMethod::from_code);
-                let rtt_ms = rtt_ms.map(|value| {
-                    value
-                        .round()
-                        .clamp(0.0, u64::MAX as f64)
-                        .min(u64::MAX as f64) as u64
-                });
-                Ok(producer::lxmf_delivery_state_changed(
-                    producer::LxmfDeliveryStateChanged {
-                        message,
-                        state: producer::LxmfDeliveryState::Delivered,
-                        method,
-                        rtt_ms,
-                        failure_reason: None,
-                    },
-                ))
-            });
-            // Delivery proofs arrive on the destination event stream and do
-            // not necessarily reappear in the LXMF manager's polled state
-            // changes. Complete the originating game action here as well, so
-            // its UI cannot remain stuck on "Sending" after a valid proof.
-            let lrgp_meta = state
-                .lrgp_msg_to_session
-                .lock()
-                .ok()
-                .and_then(|mut map| map.remove(msg_id));
-            if let Some(meta) = lrgp_meta {
-                update_game_session_delivery_state(
-                    &state,
-                    &meta.session_id,
-                    &meta.identity_id,
-                    &meta.contact_hash,
-                    "delivered",
-                )
-                .await;
-            }
+        if let DestinationEvent::DeliveryProof { msg_id, rtt } = &event {
+            complete_authenticated_lxmf_delivery_proof(&state, msg_id, *rtt, activity_origin).await;
             continue;
         }
 
@@ -3680,7 +4485,7 @@ async fn handle_inbound_lxmf(
         let mut lxmf_data = Vec::with_capacity(16 + body.len());
         lxmf_data.extend_from_slice(&dest_hash);
         lxmf_data.extend_from_slice(body);
-        let msg = match lxmf_core::message::LxMessage::unpack(&lxmf_data) {
+        let msg = match lxmf_core::message_api::LxMessage::unpack(&lxmf_data) {
             Ok(m) => m,
             Err(_) => {
                 tracing::warn!(
@@ -3773,7 +4578,7 @@ fn lrgp_sender_authenticated(
 /// Stamp PoW gate (T1-9): applies to every inbound source. Runs after
 /// signature validation and before the delivery-proof ACK; ticket-store
 /// entries bypass via `validate_stamp_with_tickets`.
-fn inbound_stamp_allowed(state: &AppState, msg: &lxmf_core::message::LxMessage) -> bool {
+fn inbound_stamp_allowed(state: &AppState, msg: &lxmf_core::message_api::LxMessage) -> bool {
     if !state
         .enforce_stamps
         .load(std::sync::atomic::Ordering::Relaxed)
@@ -3846,6 +4651,22 @@ async fn inbound_source_blackholed(
     )
 }
 
+async fn enqueue_lxmf_delivery_proof(
+    transport_tx: &tokio::sync::mpsc::Sender<rns_transport::messages::TransportMessage>,
+    proof_raw: Vec<u8>,
+    destination_hash: [u8; 16],
+) -> bool {
+    transport_tx
+        .send(rns_transport::messages::TransportMessage::Outbound(
+            rns_transport::messages::OutboundRequest {
+                raw: Bytes::from(proof_raw),
+                destination_hash,
+            },
+        ))
+        .await
+        .is_ok()
+}
+
 /// Pre-decrypted inbound entry: `data` = [dest:16][src:16][sig:64][msgpack].
 async fn handle_decrypted_lxmf_from_origin(
     state: &Arc<AppState>,
@@ -3877,7 +4698,7 @@ async fn handle_decrypted_lxmf_from_origin(
             return;
         }
     }
-    let msg = match lxmf_core::message::LxMessage::unpack(&data) {
+    let msg = match lxmf_core::message_api::LxMessage::unpack(&data) {
         Ok(m) => m,
         Err(_) => {
             tracing::warn!(
@@ -3904,7 +4725,7 @@ async fn handle_decrypted_lxmf(state: &Arc<AppState>, data: Vec<u8>, source: Inb
 /// made every retry look new).
 async fn process_inbound_lxmf(
     state: &Arc<AppState>,
-    mut msg: lxmf_core::message::LxMessage,
+    mut msg: lxmf_core::message_api::LxMessage,
     fallback_id_material: &[u8],
     source: InboundLxmfSource,
     activity_origin: ActivityRequestFence,
@@ -3981,13 +4802,14 @@ async fn process_inbound_lxmf(
                 .ok()
                 .map(|(proof_hdr, _)| (proof_raw, tx, proof_hdr))
         }) {
-            let _ = tx.try_send(rns_transport::messages::TransportMessage::Outbound(
-                rns_transport::messages::OutboundRequest {
-                    raw: Bytes::from(proof_raw),
-                    destination_hash: proof_hdr.destination_hash,
-                },
-            ));
-            tracing::debug!("sent delivery proof for inbound message");
+            if enqueue_lxmf_delivery_proof(&tx, proof_raw, proof_hdr.destination_hash).await {
+                tracing::debug!("sent delivery proof for inbound message");
+            } else {
+                tracing::warn!(
+                    reason = "transport_closed",
+                    "could not enqueue delivery proof for inbound message"
+                );
+            }
         }
     }
 
@@ -4099,6 +4921,7 @@ async fn process_inbound_lxmf(
 
     let received_at = next_chat_observed_timestamp(state, &source_hash, &identity_id).await;
     let attachment_file = extract_and_save_attachment(state, &msg);
+    let audio_file = extract_and_save_audio(state, &msg);
     let (reply_to_id, reply_to_preview) = inbound_reply_fields(chat_extension.as_ref());
     {
         let msg_id_for_save = msg_id.clone();
@@ -4110,6 +4933,7 @@ async fn process_inbound_lxmf(
         let identity_id_for_save = identity_id.clone();
         let reply_to_id_for_save = reply_to_id.clone();
         let reply_to_preview_for_save = reply_to_preview.clone();
+        let audio_for_save = audio_file.clone();
         let (att_name, att_stored, img_name, img_stored) = match attachment_file.as_ref() {
             Some(a) if a.is_image => (
                 String::new(),
@@ -4125,8 +4949,8 @@ async fn process_inbound_lxmf(
             ),
             None => (String::new(), String::new(), String::new(), String::new()),
         };
-        db::spawn_db(state.db.clone(), move |p| {
-            db::save_message(
+        let save_result = db::spawn_db(state.db.clone(), move |p| {
+            db::try_save_message_with_audio(
                 &p,
                 &msg_id_for_save,
                 &source_hash_for_save,
@@ -4144,10 +4968,24 @@ async fn process_inbound_lxmf(
                 &reply_to_id_for_save,
                 &reply_to_preview_for_save,
                 None,
-            );
+                audio_for_save.as_ref().map(|audio| audio.mode),
+                audio_for_save
+                    .as_ref()
+                    .map(|audio| audio.stored_name.as_str())
+                    .unwrap_or(""),
+            )
         })
         .await
         .expect("db task panicked");
+        if let Err(error) = save_result {
+            tracing::warn!(%error, "failed to persist inbound LXMF message");
+            remove_inbound_media_after_persistence_failure(
+                state,
+                attachment_file.as_ref(),
+                audio_file.as_ref(),
+            );
+            return;
+        }
     }
     {
         // Inbound message un-hides the conversation.
@@ -4177,7 +5015,7 @@ async fn process_inbound_lxmf(
         &source_hash,
         &identity_id,
         &msg.content,
-        attachment_file.is_some(),
+        attachment_file.is_some() || audio_file.is_some(),
     )
     .await;
 
@@ -4210,6 +5048,12 @@ async fn process_inbound_lxmf(
                 json!([{ "filename": att.file_name, "stored_name": att.stored_name }]),
             );
         }
+    }
+    if let Some(ref audio) = audio_file {
+        event_data
+            .as_object_mut()
+            .unwrap()
+            .insert("audio".to_string(), extracted_audio_json(audio));
     }
     state.emit_to_all("lxmf_message", event_data);
     messaging::broadcast_conversations(Arc::clone(state));
@@ -4285,33 +5129,7 @@ async fn push_stats_once(state: &AppState) {
 
     let iface_stats = match iface_result {
         Some(rns_transport::messages::TransportQueryResponse::InterfaceStats(s)) => {
-            let interfaces: Vec<serde_json::Value> = s
-                .iter()
-                .map(|e| {
-                    json!({
-                        "name": e.name, "rxb": e.rx_bytes, "txb": e.tx_bytes,
-                        "online": e.online, "bitrate": e.bitrate, "mtu": e.mtu, "mode": e.mode,
-                        "role": e.role,
-                        "announce_queue": e.announce_queue,
-                        "held_announces": e.held_announces,
-                        "incoming_announce_frequency": e.incoming_announce_frequency,
-                        "outgoing_announce_frequency": e.outgoing_announce_frequency,
-                        "incoming_pr_frequency": e.incoming_pr_frequency,
-                        "outgoing_pr_frequency": e.outgoing_pr_frequency,
-                        "burst_active": e.burst_active,
-                        "burst_activated": e.burst_activated,
-                        "pr_burst_active": e.pr_burst_active,
-                        "pr_burst_activated": e.pr_burst_activated,
-                        "announce_rate_target": e.announce_rate_target,
-                        "announce_rate_grace": e.announce_rate_grace,
-                        "announce_rate_penalty": e.announce_rate_penalty,
-                        "announce_cap": e.announce_cap,
-                        "ifac_size": e.ifac_size,
-                        "tx_drops": e.tx_drops,
-                    })
-                })
-                .collect();
-            json!({ "interfaces": interfaces })
+            state.interface_stats_payload(&s)
         }
         _ => json!({ "interfaces": [] }),
     };
@@ -4598,15 +5416,17 @@ async fn poll_stats_loop(
                 Some(rns_transport::messages::TransportQueryResponse::InterfaceStats(s)) => {
                     for iface in &s {
                         let name = iface.name.as_str();
-                        let online = iface.online;
+                        let online = state.effective_interface_online(iface.id, iface.online);
                         let burst_active = iface.burst_active;
                         let held_announces = iface.held_announces;
                         let key = iface.id;
+                        let rnode_activity_covered =
+                            state.is_rnode_activity_interface_covered(iface.id);
                         let (state_changed, emit_generic_state) = observe_polled_interface_state(
                             &mut prev_online,
                             key,
                             online,
-                            state.is_rnode_activity_interface_covered(iface.id),
+                            rnode_activity_covered,
                         );
                         if state_changed {
                             if emit_generic_state {
@@ -4632,31 +5452,23 @@ async fn poll_stats_loop(
                                 last_interface_announce.elapsed() >= Duration::from_secs(30),
                             ) {
                                 last_interface_announce = std::time::Instant::now();
+                                // RNode readiness advances this revision at its
+                                // exact Ready boundary before publishing stats.
+                                // Generic interfaces have no narrower signal,
+                                // so their first online observation owns it.
+                                if !rnode_activity_covered {
+                                    state.bump_announce_interface_revision();
+                                }
                                 let announce_state = state.clone();
                                 let announce_activity_origin = poll_activity_origin;
                                 tokio::spawn(async move {
                                     tokio::time::sleep(Duration::from_secs(2)).await;
-                                    let report = send_announce_from_origin(
+                                    let _ = send_typed_announce_from_origin(
                                         &announce_state,
+                                        AnnounceOrigin::InterfaceOnline,
                                         announce_activity_origin,
                                     )
                                     .await;
-                                    if report.queued > 0 {
-                                        record_activity_if_current(
-                                            &announce_state,
-                                            announce_activity_origin,
-                                            || {
-                                                Ok(producer::rns_announce_activity(
-                                                    producer::RnsAnnounceActivity {
-                                                        transition: producer::RnsAnnounceTransition::Sent {
-                                                            method: producer::AnnounceMethod::InterfaceOnline,
-                                                        },
-                                                        interface: None,
-                                                    },
-                                                ))
-                                            },
-                                        );
-                                    }
                                 });
                             }
                         }
@@ -4678,30 +5490,7 @@ async fn poll_stats_loop(
                         prev_held_announces.insert(key, held_announces);
                     }
 
-                    let interfaces: Vec<serde_json::Value> = s.iter().map(|e| {
-                        json!({
-                            "name": e.name, "rxb": e.rx_bytes, "txb": e.tx_bytes,
-                            "online": e.online, "bitrate": e.bitrate, "mtu": e.mtu, "mode": e.mode,
-                            "role": e.role,
-                            "announce_queue": e.announce_queue,
-                            "held_announces": e.held_announces,
-                            "incoming_announce_frequency": e.incoming_announce_frequency,
-                            "outgoing_announce_frequency": e.outgoing_announce_frequency,
-                            "incoming_pr_frequency": e.incoming_pr_frequency,
-                            "outgoing_pr_frequency": e.outgoing_pr_frequency,
-                            "burst_active": e.burst_active,
-                            "burst_activated": e.burst_activated,
-                            "pr_burst_active": e.pr_burst_active,
-                            "pr_burst_activated": e.pr_burst_activated,
-                            "announce_rate_target": e.announce_rate_target,
-                            "announce_rate_grace": e.announce_rate_grace,
-                            "announce_rate_penalty": e.announce_rate_penalty,
-                            "announce_cap": e.announce_cap,
-                            "ifac_size": e.ifac_size,
-                            "tx_drops": e.tx_drops,
-                        })
-                    }).collect();
-                    json!({ "interfaces": interfaces })
+                    state.interface_stats_payload(&s)
                 }
                 _ => json!({ "interfaces": [] }),
             };
@@ -4772,15 +5561,12 @@ async fn poll_stats_loop(
                 let mut peer_activity_updates: Vec<db::IdentityActivityUpdate> = Vec::new();
                 let mut peer_activity_hashes: Vec<String> = Vec::new();
                 let mut delivery_trigger_hashes: Vec<[u8; 16]> = Vec::new();
+                let mut identities_changed = false;
+                let mut router_changed = false;
+                let mut changed_ratchet_hashes = Vec::new();
                 // Aspect-agnostic: crypto cache, announce_history, contact-name refresh.
                 if let Ok(mut lxmf) = state.lxmf.lock() {
                     if let Some(mgr) = lxmf.as_mut() {
-                        let mut identities_changed = false;
-                        let mut router_changed = false;
-                        let mut changed_ratchets: Vec<(
-                            String,
-                            rns_identity::ratchet::ReceivedRatchet,
-                        )> = Vec::new();
                         for a in &announces {
                             let dest_hex = hex::encode(a.dest_hash);
                             tracing::debug!(
@@ -4795,12 +5581,8 @@ async fn poll_stats_loop(
                                 let (id_changed, ratchet_changed) =
                                     mgr.update_remote_crypto(&dest_hex, pk, a.ratchet.as_ref());
                                 identities_changed |= id_changed;
-                                if let Some(rr) = mgr
-                                    .received_ratchets
-                                    .get(&dest_hex)
-                                    .filter(|_| ratchet_changed)
-                                {
-                                    changed_ratchets.push((dest_hex.clone(), *rr));
+                                if ratchet_changed {
+                                    changed_ratchet_hashes.push(dest_hex.clone());
                                 }
                                 if is_new {
                                     tracing::debug!(
@@ -4816,48 +5598,26 @@ async fn poll_stats_loop(
                                 a.app_data.as_deref(),
                             );
                         }
-                        // Persist only announce-derived deltas, off the poll
-                        // loop; the ring and full rewrites stay on the
-                        // rotation/periodic/shutdown saves. Stamp costs persist
-                        // per batch like Python's delivery announce handler.
-                        if router_changed {
-                            mgr.save_router_state();
-                        }
-                        if identities_changed || !changed_ratchets.is_empty() {
-                            let ratchet_dir = mgr.ratchets_dir();
-                            let ki_blob = identities_changed.then(|| mgr.known_identities_blob());
-                            tracing::debug!(
-                                known_identities = mgr.known_identities.len(),
-                                changed_ratchets = changed_ratchets.len(),
-                                router_state_changed = router_changed,
-                                "announce-derived crypto state persisted"
-                            );
-                            tokio::task::spawn_blocking(move || {
-                                let received_dir = ratchet_dir.join("received");
-                                std::fs::create_dir_all(&received_dir).ok();
-                                for (hash_hex, rr) in &changed_ratchets {
-                                    let path = received_dir.join(format!("{hash_hex}.ratchet"));
-                                    if rr.save(&path).is_err() {
-                                        tracing::warn!(
-                                            reason = "write_failed",
-                                            "Failed to persist received ratchet"
-                                        );
-                                    }
-                                }
-                                if let Some(blob) = ki_blob {
-                                    let ki_path = ratchet_dir.join("known_identities");
-                                    if rns_identity::persistence::atomic_write(&ki_path, &blob)
-                                        .is_err()
-                                    {
-                                        tracing::warn!(
-                                            reason = "write_failed",
-                                            "Failed to save known identities"
-                                        );
-                                    }
-                                }
-                            });
-                        }
                     }
+                }
+                if identities_changed || !changed_ratchet_hashes.is_empty() || router_changed {
+                    let persistence_state = state.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = crate::lxmf_persistence::persist_current_delta(
+                            &persistence_state,
+                            identities_changed,
+                            &changed_ratchet_hashes,
+                            router_changed,
+                            "announce_ingress",
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                %error,
+                                "announce-derived LXMF persistence failed"
+                            );
+                        }
+                    });
                 }
 
                 if let Ok(mut history) = state.announce_history.write() {
@@ -5164,6 +5924,111 @@ async fn poll_stats_loop(
 // LXMF send → "failed" if no delivery proof within this window.
 const MESSAGE_TIMEOUT_SECS: f64 = 180.0;
 
+fn lxmf_step_starts_delivery_timeout(step: &str) -> bool {
+    matches!(
+        step,
+        "sent"
+            | "routing"
+            | "propagating"
+            | "resolving"
+            | "link_establishing"
+            | "sending_via_link"
+            | "resource_link_ready"
+            | "resource_advertised"
+            | "resource_transferring"
+            | "resource_waiting_for_proof"
+            | "reusing_direct_link"
+            | "reusing_backchannel"
+    )
+}
+
+fn lxmf_step_ends_delivery_timeout(step: &str) -> bool {
+    matches!(
+        step,
+        "delivered" | "propagated" | "failed" | "cancelled" | "rejected" | "timeout"
+    )
+}
+
+fn update_message_delivery_timeout(state: &AppState, msg_id: &str, step: &str) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    if let Ok(mut times) = state.message_send_times.lock() {
+        update_message_delivery_timeout_at(&mut times, msg_id, step, now);
+    }
+}
+
+fn update_message_delivery_timeout_at(
+    times: &mut std::collections::HashMap<String, f64>,
+    msg_id: &str,
+    step: &str,
+    now: f64,
+) {
+    if lxmf_step_starts_delivery_timeout(step) {
+        times.entry(msg_id.to_string()).or_insert(now);
+    } else if lxmf_step_ends_delivery_timeout(step) {
+        times.remove(msg_id);
+    }
+}
+
+#[cfg(test)]
+mod delivery_timeout_policy_tests {
+    use super::{
+        lxmf_step_ends_delivery_timeout, lxmf_step_starts_delivery_timeout,
+        update_message_delivery_timeout_at,
+    };
+
+    #[test]
+    fn direct_link_setup_starts_the_bounded_delivery_clock() {
+        for step in [
+            "routing",
+            "link_establishing",
+            "sending_via_link",
+            "resource_waiting_for_proof",
+            "sent",
+        ] {
+            assert!(lxmf_step_starts_delivery_timeout(step), "{step}");
+        }
+    }
+
+    #[test]
+    fn every_terminal_outcome_retires_the_delivery_clock() {
+        for step in [
+            "delivered",
+            "propagated",
+            "failed",
+            "cancelled",
+            "rejected",
+            "timeout",
+        ] {
+            assert!(lxmf_step_ends_delivery_timeout(step), "{step}");
+        }
+    }
+
+    #[test]
+    fn progress_only_resource_transfer_owns_one_bounded_clock() {
+        let mut times = std::collections::HashMap::new();
+
+        update_message_delivery_timeout_at(
+            &mut times,
+            "resource-message",
+            "resource_advertised",
+            10.0,
+        );
+        update_message_delivery_timeout_at(
+            &mut times,
+            "resource-message",
+            "resource_transferring",
+            20.0,
+        );
+        assert_eq!(times.get("resource-message"), Some(&10.0));
+
+        update_message_delivery_timeout_at(&mut times, "resource-message", "delivered", 30.0);
+        assert!(!times.contains_key("resource-message"));
+    }
+}
+
 // The process-local LRGP message-to-session map is intentionally ephemeral.
 // After a restart, use the same proof timeout as ordinary Direct messages to
 // recover a durable action left in flight and expose its preserved envelope
@@ -5193,40 +6058,58 @@ async fn check_message_timeouts(state: &AppState, activity_origin: ActivityReque
         return;
     }
 
-    // One blocking-pool hop for the whole sweep: state flips + method reads.
+    // One blocking-pool hop for the whole sweep. Only rows that win the
+    // one-way terminal-state race may emit timeout or cancel live owners.
     let identity_id = helpers::active_identity_id(state);
     let ids_for_db = timed_out.clone();
-    let methods = db::spawn_db(state.db.clone(), move |p| {
+    let transitioned = db::spawn_db(state.db.clone(), move |p| {
         ids_for_db
             .iter()
-            .map(|msg_id| {
-                db::update_message_state(&p, msg_id, &identity_id, "failed", None);
-                db::get_message_delivery_method(&p, msg_id, &identity_id)
+            .filter_map(|msg_id| {
+                if db::update_message_state(&p, msg_id, &identity_id, "timeout", None) {
+                    Some((
+                        msg_id.clone(),
+                        db::get_message_delivery_method(&p, msg_id, &identity_id),
+                    ))
+                } else {
+                    None
+                }
             })
-            .collect::<Vec<Option<String>>>()
+            .collect::<Vec<(String, Option<String>)>>()
     })
     .await
     .unwrap_or_default();
 
-    for (msg_id, method) in timed_out.iter().zip(methods) {
+    // Stop every remaining local retry/Link/Resource owner after timeout is
+    // durable. This cannot recall a packet already handed to the network.
+    if let Ok(mut lxmf) = state.lxmf.lock() {
+        if let Some(manager) = lxmf.as_mut() {
+            for (msg_id, _) in &transitioned {
+                let _ = manager.cancel_outbound_message(msg_id);
+            }
+        }
+    }
+
+    for (msg_id, method) in transitioned {
+        state.release_attachment_delivery_lease(&msg_id);
         let client_msg_id = state
             .msg_id_map
             .lock()
             .ok()
-            .and_then(|mut map| map.remove(msg_id));
+            .and_then(|mut map| map.remove(&msg_id));
         state.emit_to_all(
             "lxmf_step",
             json!({
-                "step": "failed",
+                "step": "timeout",
                 "msg_id": msg_id,
                 "client_msg_id": client_msg_id,
                 "reason": "timeout",
                 "method": method,
             }),
         );
-        tracing::debug!(msg_id = %short_id(msg_id), timeout_secs = MESSAGE_TIMEOUT_SECS, "Message timed out");
+        tracing::debug!(msg_id = %short_id(&msg_id), timeout_secs = MESSAGE_TIMEOUT_SECS, "Message timed out");
         record_activity_if_current(state, activity_origin, || {
-            let message = producer::MessageId::from_hex(msg_id)?;
+            let message = producer::MessageId::from_hex(&msg_id)?;
             let method = method
                 .as_deref()
                 .and_then(producer::LxmfDeliveryMethod::from_code);
@@ -5248,7 +6131,7 @@ async fn check_message_timeouts(state: &AppState, activity_origin: ActivityReque
             .lrgp_msg_to_session
             .lock()
             .ok()
-            .and_then(|mut map| map.remove(msg_id));
+            .and_then(|mut map| map.remove(&msg_id));
         if let Some(meta) = lrgp_meta {
             update_game_session_delivery_state(
                 state,
@@ -5556,8 +6439,7 @@ fn send_lrgp_error_best_effort(state: &AppState, reply: LrgpErrorReply<'_>) {
         code,
         message,
     } = reply;
-    if rejected_command == lrgp::constants::CMD_ERROR || app_id.is_empty() || session_id.is_empty()
-    {
+    if rejected_command == lrgp::protocol::CMD_ERROR || app_id.is_empty() || session_id.is_empty() {
         return;
     }
 
@@ -5575,20 +6457,20 @@ fn send_lrgp_error_best_effort(state: &AppState, reply: LrgpErrorReply<'_>) {
             rmpv::Value::String(rejected_command.to_string().into()),
         ),
     ]);
-    let Ok(envelope) = lrgp::envelope::pack_envelope(
+    let Ok(envelope) = lrgp::protocol::pack_envelope(
         app_id,
         app_version,
-        lrgp::constants::CMD_ERROR,
+        lrgp::protocol::CMD_ERROR,
         session_id,
         Some(payload),
         None,
     ) else {
         return;
     };
-    if lrgp::envelope::validate_envelope_size(&envelope).is_err() {
+    if lrgp::protocol::validate_envelope_size(&envelope).is_err() {
         return;
     }
-    let Ok(fields) = lrgp::envelope::pack_lxmf_fields(&envelope) else {
+    let Ok(fields) = lrgp::protocol::pack_lxmf_fields(&envelope) else {
         return;
     };
     let fallback = format!("[LRGP] Action rejected: {message}");
@@ -5617,7 +6499,7 @@ fn send_lrgp_error_best_effort(state: &AppState, reply: LrgpErrorReply<'_>) {
 // Returns true if the envelope was LRGP (dispatched); false → fall through.
 async fn try_handle_inbound_lrgp(
     state: &AppState,
-    msg: &lxmf_core::message::LxMessage,
+    msg: &lxmf_core::message_api::LxMessage,
     sender_hash: &str,
     identity_id: &str,
     sender_authenticated: bool,
@@ -5639,9 +6521,9 @@ async fn try_handle_inbound_lrgp(
     }
 
     let has_lrgp_marker = matches!(
-        rmpv_fields.get(&lrgp::constants::FIELD_CUSTOM_TYPE),
+        rmpv_fields.get(&lrgp::protocol::FIELD_CUSTOM_TYPE),
         Some(rmpv::Value::String(value))
-            if value.as_str() == Some(lrgp::constants::PROTOCOL_TYPE)
+            if value.as_str() == Some(lrgp::protocol::PROTOCOL_TYPE)
     );
     if !has_lrgp_marker {
         return false;
@@ -5657,7 +6539,7 @@ async fn try_handle_inbound_lrgp(
         return true;
     }
 
-    let envelope = match lrgp::envelope::unpack_envelope(&rmpv_fields) {
+    let envelope = match lrgp::protocol::unpack_envelope(&rmpv_fields) {
         Ok(Some(env)) => env,
         Ok(None) => return false,
         Err(_) => {
@@ -5675,27 +6557,27 @@ async fn try_handle_inbound_lrgp(
     tracing::info!(from = %short_id(sender_hash), "Inbound LRGP game message received");
 
     let session_id = envelope
-        .get(lrgp::constants::KEY_SESSION)
-        .and_then(lrgp::envelope::value_as_str)
+        .get(lrgp::protocol::KEY_SESSION)
+        .and_then(lrgp::protocol::value_as_str)
         .unwrap_or("")
         .to_string();
     let app_ver = envelope
-        .get(lrgp::constants::KEY_APP)
-        .and_then(lrgp::envelope::value_as_str)
+        .get(lrgp::protocol::KEY_APP)
+        .and_then(lrgp::protocol::value_as_str)
         .unwrap_or("");
-    let (app_id, app_version) = lrgp::envelope::parse_app_version(app_ver)
+    let (app_id, app_version) = lrgp::protocol::parse_app_version(app_ver)
         .map(|(id, version)| (id.to_string(), version))
         .unwrap_or_default();
     let command = envelope
-        .get(lrgp::constants::KEY_COMMAND)
-        .and_then(lrgp::envelope::value_as_str)
+        .get(lrgp::protocol::KEY_COMMAND)
+        .and_then(lrgp::protocol::value_as_str)
         .unwrap_or("")
         .to_string();
 
     // The router's process-local nonce cache protects the hot path. Retaining
     // accepted envelopes on action rows lets us compare their protocol nonces
     // and extend that guarantee across application restarts.
-    let envelope_mp = match lrgp::envelope::pack_to_bytes(&envelope) {
+    let envelope_mp = match lrgp::protocol::pack_to_bytes(&envelope) {
         Ok(bytes) => bytes,
         Err(_) => {
             tracing::warn!(
@@ -5705,8 +6587,8 @@ async fn try_handle_inbound_lrgp(
             return true;
         }
     };
-    let durable_nonce: [u8; lrgp::constants::NONCE_BYTES] = envelope
-        .get(lrgp::constants::KEY_NONCE)
+    let durable_nonce: [u8; lrgp::protocol::NONCE_BYTES] = envelope
+        .get(lrgp::protocol::KEY_NONCE)
         .and_then(|value| match value {
             rmpv::Value::Binary(bytes) => bytes.as_slice().try_into().ok(),
             _ => None,
@@ -5764,7 +6646,7 @@ async fn try_handle_inbound_lrgp(
                         &pool,
                         &sid,
                         &iid,
-                        lrgp::constants::CMD_ERROR,
+                        lrgp::protocol::CMD_ERROR,
                         &payload,
                         &sender,
                         message_timestamp,
@@ -5854,16 +6736,16 @@ async fn try_handle_inbound_lrgp(
                 "dispatch_incoming returned error"
             );
             let (code, public_message) = match &error {
-                lrgp::errors::LrgpError::UnknownApp(_) => ("unsupported_app", "Game unavailable"),
-                lrgp::errors::LrgpError::SessionExpired(_) => {
+                lrgp::protocol::LrgpError::UnknownApp(_) => ("unsupported_app", "Game unavailable"),
+                lrgp::protocol::LrgpError::SessionExpired(_) => {
                     ("session_expired", "Game session expired")
                 }
-                lrgp::errors::LrgpError::UnauthorizedPeer { .. } => {
+                lrgp::protocol::LrgpError::UnauthorizedPeer { .. } => {
                     ("unauthorized_sender", "Sender is not part of this game")
                 }
                 _ => ("protocol_error", "Action rejected"),
             };
-            if matches!(&error, lrgp::errors::LrgpError::SessionExpired(_)) {
+            if matches!(&error, lrgp::protocol::LrgpError::SessionExpired(_)) {
                 if let Some(Some(expired)) = state.lrgp_router.with_app(&app_id, |app| {
                     app.get_session_record(&session_id, identity_id)
                 }) {
@@ -6244,6 +7126,77 @@ mod inbound_pipeline_tests {
     }
 
     #[tokio::test]
+    async fn dedicated_opportunistic_proof_bypasses_destination_ingress_backpressure() {
+        use rns_transport::link_messages::DestinationEvent;
+
+        let (state, emitter) = pipeline_state();
+        let (proof_tx, proof_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (ordinary_tx, _ordinary_rx) = tokio::sync::mpsc::channel(1);
+        let shutdown = rns_runtime::lifecycle::ShutdownSignal::new();
+        ordinary_tx
+            .send(DestinationEvent::DeliveryProof {
+                msg_id: "11".repeat(32),
+                rtt: None,
+            })
+            .await
+            .unwrap();
+        let task = tokio::spawn(handle_lxmf_delivery_proofs(state, proof_rx, shutdown));
+        proof_tx
+            .send(DestinationEvent::DeliveryProof {
+                msg_id: "22".repeat(32),
+                rtt: Some(Duration::from_millis(5)),
+            })
+            .unwrap();
+        drop(proof_tx);
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("dedicated proof handler must not wait on ordinary ingress")
+            .unwrap();
+        assert!(matches!(
+            ordinary_tx.try_send(DestinationEvent::DeliveryProof {
+                msg_id: "33".repeat(32),
+                rtt: None,
+            }),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+        ));
+        assert_eq!(emitter.count("lxmf_step"), 0);
+    }
+
+    #[tokio::test]
+    async fn receiver_delivery_proof_waits_for_transport_capacity() {
+        let (transport_tx, mut transport_rx) = tokio::sync::mpsc::channel(1);
+        transport_tx
+            .send(rns_transport::messages::TransportMessage::RequestPath {
+                destination_hash: [0x31; 16],
+            })
+            .await
+            .unwrap();
+        let proof_destination = [0x32; 16];
+        let enqueue_tx = transport_tx.clone();
+        let task = tokio::spawn(async move {
+            enqueue_lxmf_delivery_proof(&enqueue_tx, vec![0xAA; 64], proof_destination).await
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !task.is_finished(),
+            "proof enqueue must wait instead of drop"
+        );
+
+        assert!(matches!(
+            transport_rx.recv().await,
+            Some(rns_transport::messages::TransportMessage::RequestPath { .. })
+        ));
+        assert!(task.await.unwrap());
+        match transport_rx.recv().await.unwrap() {
+            rns_transport::messages::TransportMessage::Outbound(request) => {
+                assert_eq!(request.destination_hash, proof_destination);
+                assert_eq!(request.raw.as_ref(), &[0xAA; 64]);
+            }
+            _ => panic!("expected retained delivery proof outbound"),
+        }
+    }
+
+    #[tokio::test]
     async fn unmatched_opportunistic_proof_does_not_emit_delivery() {
         let (state, emitter) = pipeline_state();
         let (tx, rx) = tokio::sync::mpsc::channel(1);
@@ -6322,15 +7275,33 @@ mod inbound_pipeline_tests {
     }
 
     fn packed_inbound(dest: [u8; 16], src: [u8; 16], content: &str) -> Vec<u8> {
-        let mut msg = lxmf_core::message::LxMessage::new(
+        let mut msg = lxmf_core::message_api::LxMessage::new(
             dest,
             src,
             "",
             content,
-            lxmf_core::constants::DeliveryMethod::Direct,
+            lxmf_core::message_api::DeliveryMethod::Direct,
         );
         // Unsigned-by-unknown-sender: verify returns None and the message is
         // still delivered, so tests don't need real peer keys.
+        msg.signature = Some([0u8; 64]);
+        msg.pack().unwrap()
+    }
+
+    fn packed_inbound_with_audio(
+        dest: [u8; 16],
+        src: [u8; 16],
+        mode: u8,
+        audio_bytes: &[u8],
+    ) -> Vec<u8> {
+        let mut msg = lxmf_core::message_api::LxMessage::new(
+            dest,
+            src,
+            "",
+            "Voice message",
+            lxmf_core::message_api::DeliveryMethod::Direct,
+        );
+        msg.set_audio_field(mode, audio_bytes).unwrap();
         msg.signature = Some([0u8; 64]);
         msg.pack().unwrap()
     }
@@ -6462,6 +7433,80 @@ mod inbound_pipeline_tests {
     }
 
     #[tokio::test]
+    async fn unknown_audio_mode_is_bounded_first_class_media_not_an_attachment() {
+        let (state, emitter) = pipeline_state();
+        let data =
+            packed_inbound_with_audio(local_dest(&state), [0xED; 16], 0xfe, b"future audio codec");
+
+        handle_decrypted_lxmf(&state, data, InboundLxmfSource::Propagated).await;
+
+        let identity = local_identity(&state);
+        let conversation = db::get_conversation(&state.db, &hex::encode([0xED; 16]), &identity, 10);
+        assert_eq!(conversation.len(), 1);
+        assert_eq!(conversation[0]["audio"]["mode"], 0xfe);
+        assert_eq!(conversation[0]["audio"]["supported"], false);
+        assert!(conversation[0]["audio"]["stored_name"].is_string());
+        assert!(conversation[0]["attachments"].is_null());
+        assert!(conversation[0]["image"].is_null());
+
+        let event = emitter
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(name, _)| name == "lxmf_message")
+            .map(|(_, payload)| payload.clone())
+            .unwrap();
+        assert_eq!(event["audio"]["mode"], 0xfe);
+        assert_eq!(event["audio"]["supported"], false);
+        assert!(event.get("attachments").is_none());
+    }
+
+    #[tokio::test]
+    async fn malformed_audio_does_not_reject_or_hide_the_enclosing_message() {
+        let (state, emitter) = pipeline_state();
+        let mut msg = lxmf_core::message_api::LxMessage::new(
+            local_dest(&state),
+            [0xEC; 16],
+            "",
+            "text survives malformed media",
+            lxmf_core::message_api::DeliveryMethod::Direct,
+        );
+        msg.set_msgpack_field(
+            lxmf_core::constants::FIELD_AUDIO,
+            vec![0x93, lxmf_core::constants::AM_OPUS_OGG, 0xc4, 0x00, 0xc0],
+        )
+        .unwrap();
+        msg.signature = Some([0u8; 64]);
+        let data = msg.pack().unwrap();
+
+        handle_decrypted_lxmf(&state, data, InboundLxmfSource::Propagated).await;
+
+        let identity = local_identity(&state);
+        let conversation = db::get_conversation(&state.db, &hex::encode([0xEC; 16]), &identity, 10);
+        assert_eq!(conversation.len(), 1);
+        assert_eq!(conversation[0]["content"], "text survives malformed media");
+        assert!(conversation[0]["audio"].is_null());
+        assert_eq!(emitter.count("lxmf_message"), 1);
+    }
+
+    #[tokio::test]
+    async fn oversized_audio_retains_message_and_mode_without_persisting_bytes() {
+        let (state, _emitter) = pipeline_state();
+        let audio = vec![0x55; lxmf::MAX_AUDIO_FIELD_BYTES + 1];
+        let data = packed_inbound_with_audio(local_dest(&state), [0xEB; 16], 0xfe, &audio);
+
+        handle_decrypted_lxmf(&state, data, InboundLxmfSource::Propagated).await;
+
+        let identity = local_identity(&state);
+        let conversation = db::get_conversation(&state.db, &hex::encode([0xEB; 16]), &identity, 10);
+        assert_eq!(conversation.len(), 1);
+        assert_eq!(conversation[0]["audio"]["mode"], 0xfe);
+        assert_eq!(conversation[0]["audio"]["unavailable"], true);
+        assert!(conversation[0]["audio"].get("stored_name").is_none());
+    }
+
+    #[tokio::test]
     async fn duplicate_inbound_is_skipped() {
         let (state, emitter) = pipeline_state();
         let data = packed_inbound(local_dest(&state), [0xEE; 16], "once");
@@ -6554,12 +7599,12 @@ mod inbound_pipeline_tests {
         content: &str,
         signing: &rns_crypto::ed25519::Ed25519PrivateKey,
     ) -> Vec<u8> {
-        let mut msg = lxmf_core::message::LxMessage::new(
+        let mut msg = lxmf_core::message_api::LxMessage::new(
             dest,
             src,
             "",
             content,
-            lxmf_core::constants::DeliveryMethod::Direct,
+            lxmf_core::message_api::DeliveryMethod::Direct,
         );
         msg.sign(signing).unwrap();
         msg.pack().unwrap()
@@ -6688,7 +7733,7 @@ mod inbound_pipeline_tests {
         handle_decrypted_lxmf(&state, prop_data, InboundLxmfSource::Propagated).await;
 
         let opp_data = packed_inbound(dest, [0xE3; 16], "via opportunistic");
-        let msg = lxmf_core::message::LxMessage::unpack(&opp_data).unwrap();
+        let msg = lxmf_core::message_api::LxMessage::unpack(&opp_data).unwrap();
         process_inbound_lxmf(
             &state,
             msg,
@@ -6743,12 +7788,12 @@ mod inbound_pipeline_tests {
         let (state, emitter) = pipeline_state();
         let target_id = hex::encode([0xAB; 32]);
 
-        let mut msg = lxmf_core::message::LxMessage::new(
+        let mut msg = lxmf_core::message_api::LxMessage::new(
             local_dest(&state),
             [0xEE; 16],
             "",
             "",
-            lxmf_core::constants::DeliveryMethod::Direct,
+            lxmf_core::message_api::DeliveryMethod::Direct,
         );
         for (field_id, bytes) in
             lxmf::ratspeak_chat_custom_fields(&lxmf::RatspeakChatExtension::Reaction {
@@ -6778,12 +7823,12 @@ mod inbound_pipeline_tests {
         let (state, emitter) = pipeline_state();
         let target_hash = [0xAB; 32];
 
-        let mut msg = lxmf_core::message::LxMessage::new(
+        let mut msg = lxmf_core::message_api::LxMessage::new(
             local_dest(&state),
             [0xEE; 16],
             "",
             "Reacted to your message with \u{1F44D}.",
-            lxmf_core::constants::DeliveryMethod::Direct,
+            lxmf_core::message_api::DeliveryMethod::Direct,
         );
         let dict_value = rmpv::Value::Map(vec![
             (
@@ -6823,12 +7868,12 @@ mod inbound_pipeline_tests {
         let (state, emitter) = pipeline_state();
         let target_hash = [0xCD; 32];
 
-        let mut msg = lxmf_core::message::LxMessage::new(
+        let mut msg = lxmf_core::message_api::LxMessage::new(
             local_dest(&state),
             [0xEE; 16],
             "",
             "standard reply",
-            lxmf_core::constants::DeliveryMethod::Direct,
+            lxmf_core::message_api::DeliveryMethod::Direct,
         );
         msg.set_field(lxmf_core::constants::FIELD_REPLY_TO, target_hash.to_vec());
         msg.set_field(lxmf_core::constants::FIELD_REPLY_QUOTE, b"quoted".to_vec());
@@ -7111,11 +8156,7 @@ mod notification_tests {
     }
 
     #[test]
-    fn attachment_notifications_hide_wire_fallback_and_name_voice_memos() {
-        assert_eq!(
-            notification_body("[File: Voice message.lxvm]", true),
-            "Voice message"
-        );
+    fn attachment_notifications_hide_wire_fallback_without_legacy_media_inference() {
         assert_eq!(
             notification_body("[File: field-notes.pdf]", true),
             "New attachment"
@@ -7133,6 +8174,7 @@ mod notification_tests {
         state
             .is_foreground
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        state.set_notification_foreground(false);
         db::save_contact(
             &state.db,
             "abcd1234abcd1234",
@@ -7158,6 +8200,7 @@ mod notification_tests {
         state
             .is_foreground
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        state.set_notification_foreground(true);
         notify_inbound_message_if_background(
             &state,
             "abcd1234abcd1234",
@@ -7171,6 +8214,7 @@ mod notification_tests {
         state
             .is_foreground
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        state.set_notification_foreground(false);
         state.set_native_notifications_enabled(false);
         notify_inbound_message_if_background(
             &state,
@@ -7180,6 +8224,34 @@ mod notification_tests {
             false,
         )
         .await;
+        assert_eq!(notifier.notifications.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn native_notification_owner_follows_immediate_platform_visibility() {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let state = make_state(notifier.clone());
+        let notification = ratspeak_core::NativeNotification::message(
+            "Message from Alice",
+            "hello",
+            "lxmf:abcd1234abcd1234",
+            42,
+        );
+
+        // AppState starts foregrounded. Even a caller that forgets its own
+        // early lifecycle check cannot leak an OS notification.
+        state.emit_native_notification(notification.clone());
+        assert!(notifier.notifications.lock().unwrap().is_empty());
+
+        // A platform background edge owns notification attention immediately,
+        // even while the slower transport lifecycle state is still foreground.
+        state.set_notification_foreground(false);
+        state.emit_native_notification(notification.clone());
+        assert_eq!(notifier.notifications.lock().unwrap().len(), 1);
+
+        // The inverse edge suppresses immediately as the app becomes visible.
+        state.set_notification_foreground(true);
+        state.emit_native_notification(notification);
         assert_eq!(notifier.notifications.lock().unwrap().len(), 1);
     }
 
@@ -7210,6 +8282,7 @@ mod notification_tests {
         state
             .is_foreground
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        state.set_notification_foreground(false);
         db::save_identity(&state.db, "identity-a", "lxmf-a", "Me", "Me");
         db::set_active_identity(&state.db, "identity-a").unwrap();
         db::save_contact(
